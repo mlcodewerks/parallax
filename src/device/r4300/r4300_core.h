@@ -81,6 +81,7 @@ struct mi_controller;
 struct rdram;
 
 struct jump_table;
+struct cached_interp_state;
 
 enum {
     EMUMODE_PURE_INTERPRETER = 0,
@@ -110,6 +111,8 @@ struct r4300_core
 
     /* from pure_interp.c */
     struct precomp_instr interp_PC;
+    void (*execute_one)(struct r4300_core* r4300);
+    struct cached_interp_state* cached_interp;
 
     unsigned int emumode;
 

@@ -13,7 +13,8 @@ INCFLAGS += \
 	-I$(CORE_DIR)/src \
 	-I$(CORE_DIR)/src/api \
 	-I$(LIBRETRO_COMM_DIR)/include \
-	-I$(CORE_DIR)/src/device/rcp/rdp
+	-I$(CORE_DIR)/src/device/rcp/rdp \
+	-I$(PARALLEL_RDP_IMPLEMENTATION)/vulkan-headers/include
 
 ifneq (,$(findstring win,$(platform)))
 	INCFLAGS += -I$(ROOT_DIR)/deps/mman
@@ -53,6 +54,7 @@ SOURCES_C = \
 	$(CORE_DIR)/src/device/pif/n64_cic_nus_6105.c \
 	$(CORE_DIR)/src/device/pif/pif.c \
 	$(CORE_DIR)/src/device/r4300/cp0.c \
+	$(CORE_DIR)/src/device/r4300/cached_interp.c \
 	$(CORE_DIR)/src/device/r4300/cp1.c \
 	$(CORE_DIR)/src/device/r4300/idec.c \
 	$(CORE_DIR)/src/device/r4300/interrupt.c \
@@ -76,7 +78,6 @@ SOURCES_C = \
 	$(CORE_DIR)/src/plugin/plugin.c 
 
 
-
 HAVE_PARALLEL_RDP ?= 1
 include $(VIDEODIR_PARALLEL)/config.mk
 
@@ -98,7 +99,6 @@ SOURCES_C += \
 	$(ROOT_DIR)/deps/md5.c
 COREFLAGS += -I$(ROOT_DIR)/deps/md5
 
-SOURCES_C += $(ROOT_DIR)/deps/glad.c
 
 ifneq (,$(findstring win,$(platform)))
 	SOURCES_C += $(ROOT_DIR)/custom/osal/osal_files_win32.c

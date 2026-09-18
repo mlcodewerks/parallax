@@ -36,6 +36,7 @@
 #include "api/m64p_config.h"
 #include "api/m64p_types.h"
 #include "device/device.h"
+#include "device/r4300/cached_interp.h"
 #include "main.h"
 #include "md5.h"
 #include "osal/preproc.h"
@@ -231,6 +232,8 @@ m64p_error open_rom(const unsigned char* romimage, unsigned int size)
 
 m64p_error close_rom(void)
 {
+    cached_interp_destroy(&g_dev.r4300);
+
     /* Clear Byte-swapped flag, since ROM is now deleted. */
     g_RomWordsLittleEndian = 0;
     DebugMessage(M64MSG_STATUS, "Rom closed.");

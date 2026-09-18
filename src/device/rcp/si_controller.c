@@ -68,6 +68,8 @@ static void copy_pif_rdram(struct si_controller* si)
         for(i = 0; i < (PIF_RAM_SIZE / 4); ++i) {
             dram[i] = tohl(pif_ram[i]);
         }
+
+        invalidate_r4300_cached_code(si->mi->r4300, dram_addr, PIF_RAM_SIZE);
     }
 }
 

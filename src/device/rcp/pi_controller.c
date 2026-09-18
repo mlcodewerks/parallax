@@ -113,6 +113,7 @@ static void dma_pi_write(struct pi_controller* pi)
         length -= dram_addr & 0x7;
     unsigned int cycles = handler->dma_write(opaque, dram, dram_addr, cart_addr, length);
 
+    invalidate_r4300_cached_code(pi->mi->r4300, dram_addr, length);
     post_framebuffer_write(&pi->dp->fb, dram_addr, length);
 
     /* Mark DMA as busy */

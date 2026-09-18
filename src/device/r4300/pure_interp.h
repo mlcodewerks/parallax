@@ -22,6 +22,16 @@
 #ifndef M64P_DEVICE_R4300_PURE_INTERP_H
 #define M64P_DEVICE_R4300_PURE_INTERP_H
 
+#include <stdbool.h>
+#include <stdint.h>
+
 struct r4300_core;
+
+typedef void (*r4300_interp_handler)(struct r4300_core* r4300, uint32_t op);
+
+extern bool breakloop;
+
+r4300_interp_handler pure_interp_decode(uint32_t op, int idle);
+void pure_interp_execute_one(struct r4300_core* r4300);
 
 #endif /* M64P_DEVICE_R4300_PURE_INTERP_H */

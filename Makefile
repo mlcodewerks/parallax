@@ -1,4 +1,10 @@
 DEBUG = 1
+# Keep the CPU interpreter optimized even when the rest of the tree is built
+# with DEBUG=1. Set INTERP_OPTIMIZE=0 for source-level interpreter debugging.
+INTERP_OPTIMIZE ?= 1
+INTERP_BRANCHLESS ?= 0
+HEADLESS_BENCHMARK ?= 0
+HEADLESS_BENCH_CPU ?= cached
 FORCE_GLES ?= 0
 FORCE_GLES3 ?= 0
 LLE ?= 0
@@ -527,9 +533,9 @@ COREFLAGS += -D__STDC_CONSTANT_MACROS -D__STDC_LIMIT_MACROS -D__LIBRETRO__ -DUSE
 
 ifeq ($(DEBUG), 1)
    CPUOPTS += -O0 -g
-   CPUOPTS += -DOPENGL_DEBUG
    CPUOPTS += -DNDEBUG -fsigned-char -fvisibility=hidden
 else
+   CPUOPTS += -Ofast
    CPUOPTS += -DNDEBUG -fsigned-char -ffast-math -fno-strict-aliasing -fomit-frame-pointer -fvisibility=hidden
 ifneq ($(platform), libnx)
    CPUOPTS := $(CPUOPTS)
@@ -542,6 +548,13 @@ CPUOPTS += -fcommon
 
 # set C/C++ standard to use
 CFLAGS += -std=gnu99 -D_CRT_SECURE_NO_WARNINGS -Wno-discarded-qualifiers
+
+ifeq ($(HEADLESS_BENCHMARK),1)
+CFLAGS += -DM64P_HEADLESS_BENCHMARK
+ifeq ($(HEADLESS_BENCH_CPU),pure)
+CFLAGS += -DM64P_HEADLESS_BENCH_PURE
+endif
+endif
 CXXFLAGS += -std=c++17 -D_CRT_SECURE_NO_WARNINGS
 CXXFLAGS += -fpermissive -msse4.1
 
@@ -558,6 +571,12 @@ endif
 OBJECTS     += $(SOURCES_CXX:.cpp=.o) $(SOURCES_C:.c=.o) $(SOURCES_ASM:.S=.o) $(SOURCES_NASM:.asm=.o)
 CXXFLAGS    += $(CPUOPTS) $(COREFLAGS) $(INCFLAGS) $(PLATCFLAGS) $(fpic) $(CPUFLAGS) $(GLFLAGS) $(DYNAFLAGS)
 CFLAGS      += $(CPUOPTS) $(COREFLAGS) $(INCFLAGS) $(PLATCFLAGS) $(fpic) $(CPUFLAGS) $(GLFLAGS) $(DYNAFLAGS)
+
+ifeq ($(INTERP_OPTIMIZE),1)
+$(CORE_DIR)/src/device/r4300/pure_interp.o $(CORE_DIR)/src/device/r4300/cached_interp.o: CFLAGS += -O3
+endif
+
+$(CORE_DIR)/src/device/r4300/pure_interp.o: CFLAGS += -DM64P_INTERP_BRANCHLESS=$(INTERP_BRANCHLESS)
 
 ifeq (,$(findstring android,$(platform)))
    LDFLAGS    += -lpthread
@@ -576,7 +595,7 @@ $(TARGET): $(OBJECTS)
 ifeq ($(STATIC_LINKING), 1)
 	$(AR) rcs $@ $(OBJECTS)
 else
-	$(CXX) -o $@ $(OBJECTS) $(LDFLAGS) $(GL_LIB)
+	$(CXX) -o $@ $(OBJECTS) $(LDFLAGS)
 endif
 
 %.o: %.c

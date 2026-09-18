@@ -61,6 +61,7 @@ static void do_sp_dma(struct rsp_core* sp, const struct sp_dma* dma)
                 dramaddr++;
             }
 
+            invalidate_r4300_cached_code(sp->mi->r4300, dramaddr - length, length);
             post_framebuffer_write(&sp->dp->fb, dramaddr - length, length);
             dramaddr+=skip;
         }

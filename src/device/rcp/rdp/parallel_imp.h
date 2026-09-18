@@ -2,7 +2,6 @@
 #include "m64p_plugin.h"
 #include "m64p_common.h"
 #include "gfxstructdefs.h"
-#include "glad.h"
 
 #ifdef __cplusplus
 extern "C"

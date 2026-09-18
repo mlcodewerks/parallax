@@ -22,3 +22,7 @@ Making a garbage fire by hacking on parallel-n64 to see what the heck happens, i
 This is in no way intended to be a "daily driver" or even maintained as such. This is worked on **entirely** when I feel like to mess around with N64 things.
 
 
+
+## Headless interpreter validation
+
+Reproducible pure/cached interpreter correctness and performance tooling is bundled under `benchmarks/headless/`. Benchmark-only core builds can force either interpreter and expose a read-only timing snapshot without changing normal release builds. See `benchmarks/headless/README.md` for build and run commands.

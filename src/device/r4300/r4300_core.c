@@ -20,6 +20,7 @@
  * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
 
 #include "r4300_core.h"
+#include "cached_interp.h"
 #if defined(COUNT_INSTR)
 #include "instr_counters.h"
 #endif
@@ -46,6 +47,8 @@ void init_r4300(struct r4300_core* r4300, struct memory* mem, struct mi_controll
     r4300->rdram = rdram;
     r4300->randomize_interrupt = randomize_interrupt;
     r4300->start_address = start_address;
+    r4300->execute_one = NULL;
+    r4300->cached_interp = NULL;
     srand((unsigned int) time(NULL));
 }
 
@@ -62,6 +65,8 @@ void poweron_r4300(struct r4300_core* r4300)
     r4300->skip_jump = 0;
     r4300->reset_hard_job = 0;
     r4300->startup =1;
+
+    cached_interp_invalidate(r4300, 0, 0);
 
     /* setup CP0 registers */
     poweron_cp0(&r4300->cp0);
@@ -184,9 +189,6 @@ int r4300_read_aligned_dword(struct r4300_core* r4300, uint32_t address, uint64_
 int r4300_write_aligned_word(struct r4300_core* r4300, uint32_t address, uint32_t value, uint32_t mask)
 {
     if ((address & UINT32_C(0xc0000000)) != UINT32_C(0x80000000)) {
-
-        invalidate_r4300_cached_code(r4300, address, 4);
-
         address = virtual_to_physical_address(r4300, address, 1);
         if (address == 0) {
             return 0;
@@ -194,8 +196,6 @@ int r4300_write_aligned_word(struct r4300_core* r4300, uint32_t address, uint32_
     }
 
     invalidate_r4300_cached_code(r4300, address, 4);
-    invalidate_r4300_cached_code(r4300, address ^ UINT32_C(0x20000000), 4);
-
     address &= UINT32_C(0x1ffffffc);
 
     mem_write32(mem_get_handler(r4300->mem, address), address & ~UINT32_C(3), value, mask);
@@ -214,9 +214,6 @@ int r4300_write_aligned_dword(struct r4300_core* r4300, uint32_t address, uint64
     }
 
     if ((address & UINT32_C(0xc0000000)) != UINT32_C(0x80000000)) {
-
-        invalidate_r4300_cached_code(r4300, address, 8);
-
         address = virtual_to_physical_address(r4300, address, 1);
         if (address == 0) {
             return 0;
@@ -224,8 +221,6 @@ int r4300_write_aligned_dword(struct r4300_core* r4300, uint32_t address, uint64
     }
 
     invalidate_r4300_cached_code(r4300, address, 8);
-    invalidate_r4300_cached_code(r4300, address ^ UINT32_C(0x20000000), 8);
-
     address &= UINT32_C(0x1ffffffc);
 
     const struct mem_handler* handler = mem_get_handler(r4300->mem, address);
@@ -237,6 +232,7 @@ int r4300_write_aligned_dword(struct r4300_core* r4300, uint32_t address, uint64
 
 void invalidate_r4300_cached_code(struct r4300_core* r4300, uint32_t address, size_t size)
 {
+    cached_interp_invalidate(r4300, address, size);
 }
 
 

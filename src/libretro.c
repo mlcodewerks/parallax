@@ -23,8 +23,6 @@
 #include <string.h>
 #include <compat/strl.h>
 
-#include <glad.h>
-
 #include "libretro.h"
 #include "libretro_private.h"
 
@@ -421,26 +419,51 @@ void copy_file(char *ininame, char *fileName)
 }
 
 struct retro_hw_render_callback hw_render;
+static struct retro_hw_render_context_negotiation_interface_vulkan hw_context_negotiation;
+static const struct retro_hw_render_interface_vulkan *vulkan_hw;
 
 static void context_reset(void)
 {
-    fprintf(stderr, "Context reset!\n");
-    gladLoadGLLoader((GLADloadproc)hw_render.get_proc_address);
+    const struct retro_hw_render_interface *iface = NULL;
+
+    if (!environ_cb(RETRO_ENVIRONMENT_GET_HW_RENDER_INTERFACE, &iface) || iface == NULL)
+        return;
+    if (iface->interface_type != RETRO_HW_RENDER_INTERFACE_VULKAN ||
+        iface->interface_version < RETRO_HW_RENDER_INTERFACE_VULKAN_VERSION)
+        return;
+
+    vulkan_hw = (const struct retro_hw_render_interface_vulkan *)iface;
+    vk_set_hw_render_interface(vulkan_hw);
 }
 
 static void context_destroy(void)
 {
+    vk_context_destroy();
+    vulkan_hw = NULL;
 }
 
 static bool retro_init_hw_context(void)
 {
-    hw_render.context_type = RETRO_HW_CONTEXT_OPENGL;
+    memset(&hw_render, 0, sizeof(hw_render));
+    memset(&hw_context_negotiation, 0, sizeof(hw_context_negotiation));
+
+    hw_render.context_type = RETRO_HW_CONTEXT_VULKAN;
     hw_render.context_reset = context_reset;
     hw_render.context_destroy = context_destroy;
-    hw_render.depth = false;
-    hw_render.bottom_left_origin = true;
+    hw_render.cache_context = true;
 
     if (!environ_cb(RETRO_ENVIRONMENT_SET_HW_RENDER, &hw_render))
+        return false;
+
+    hw_context_negotiation.interface_type = RETRO_HW_RENDER_CONTEXT_NEGOTIATION_INTERFACE_VULKAN;
+    hw_context_negotiation.interface_version =
+        RETRO_HW_RENDER_CONTEXT_NEGOTIATION_INTERFACE_VULKAN_VERSION;
+    hw_context_negotiation.get_application_info = vk_get_application_info;
+    hw_context_negotiation.create_device = vk_create_device;
+    hw_context_negotiation.destroy_device = NULL;
+
+    if (!environ_cb(RETRO_ENVIRONMENT_SET_HW_RENDER_CONTEXT_NEGOTIATION_INTERFACE,
+                    &hw_context_negotiation))
         return false;
 
     return true;
@@ -654,7 +677,11 @@ void update_variables(bool startup)
         EnableFrameDuping = 1;
         EnableFullspeed = 0;
         CountPerScanlineOverride = 0;
+#if defined(M64P_HEADLESS_BENCH_PURE)
         r4300_emumode = EMUMODE_PURE_INTERPRETER;
+#else
+        r4300_emumode = EMUMODE_PURE_INTERPRETER;
+#endif
         retro_screen_aspect = 4.0 / 3.0;
         AspectRatio = 1; // Aspect::a43
         CountPerOp = 1;  // Force CountPerOp == 1
@@ -680,15 +707,18 @@ void retro_run(void)
 
     if (libretro_swap_buffer)
     {
-        video_cb(RETRO_HW_FRAME_BUFFER_VALID, 640,480, 0);
+        const unsigned frame_width = vk_frame_width() ? vk_frame_width() : 640;
+        const unsigned frame_height = vk_frame_height() ? vk_frame_height() : 480;
+        video_cb(RETRO_HW_FRAME_BUFFER_VALID, frame_width, frame_height, 0);
     }
     else
     {
-        glBindFramebuffer(GL_FRAMEBUFFER, hw_render.get_current_framebuffer());
-        glClearColor(0.0, 0.0, 0.0, 1.0);
-        glViewport(0, 0, 640,480);
-        glClear(GL_COLOR_BUFFER_BIT);
-        video_cb(RETRO_HW_FRAME_BUFFER_VALID, 640,480, 0);
+        /* No new Vulkan image was produced. Let the frontend duplicate the
+         * previous frame rather than touching an API-specific framebuffer. */
+        video_cb(NULL,
+                 vk_frame_width() ? vk_frame_width() : 640,
+                 vk_frame_height() ? vk_frame_height() : 480,
+                 0);
     }
 }
 
@@ -912,3 +942,24 @@ m64p_error angrylionPluginGetVersion(m64p_plugin_type *PluginType, int *PluginVe
 
     return M64ERR_SUCCESS;
 }
+#if defined(M64P_HEADLESS_BENCHMARK)
+/* Read-only timing snapshot used by benchmarks/headless/benchmark.c. */
+EXPORT void retro_debug_timing(uint32_t out[12])
+{
+    struct r4300_core *r = &g_dev.r4300;
+    struct cp0 *c = &r->cp0;
+
+    out[0] = *r4300_pc(r);
+    out[1] = c->regs[CP0_COUNT_REG];
+    out[2] = (uint32_t)c->cycle_count;
+    out[3] = c->next_interrupt;
+    out[4] = c->last_addr;
+    out[5] = r->delay_slot;
+    out[6] = c->q.first ? (uint32_t)c->q.first->data.type : UINT32_C(0xffffffff);
+    out[7] = c->q.first ? c->q.first->data.count : 0;
+    out[8] = c->regs[CP0_CAUSE_REG];
+    out[9] = c->regs[CP0_STATUS_REG];
+    out[10] = r->emumode;
+    out[11] = c->interrupt_unsafe_state;
+}
+#endif
