@@ -62,7 +62,7 @@ struct memory
 #endif
 };
 
-static osal_inline void masked_write(uint32_t* dst, uint32_t value, uint32_t mask)
+static osal_force_inline void masked_write(uint32_t* dst, uint32_t value, uint32_t mask)
 {
     *dst = (*dst & ~mask) | (value & mask);
 }
@@ -72,17 +72,17 @@ void init_memory(struct memory* mem,
                  void* base,
                  struct mem_handler* dbg_handler);
 
-static osal_inline const struct mem_handler* mem_get_handler(const struct memory* mem, uint32_t address)
+static osal_force_inline const struct mem_handler* mem_get_handler(const struct memory* mem, uint32_t address)
 {
     return &mem->handlers[address >> 16];
 }
 
-static osal_inline void mem_read32(const struct mem_handler* handler, uint32_t address, uint32_t* value)
+static osal_force_inline void mem_read32(const struct mem_handler* handler, uint32_t address, uint32_t* value)
 {
     handler->read32(handler->opaque, address, value);
 }
 
-static osal_inline void mem_write32(const struct mem_handler* handler, uint32_t address, uint32_t value, uint32_t mask)
+static osal_force_inline void mem_write32(const struct mem_handler* handler, uint32_t address, uint32_t value, uint32_t mask)
 {
     handler->write32(handler->opaque, address, value, mask);
 }

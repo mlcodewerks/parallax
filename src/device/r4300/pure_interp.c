@@ -290,8 +290,7 @@ static void InterpretOpcode(struct r4300_core* r4300, bool continuous) M64P_HOT;
 #include <inttypes.h>
 #include <stdint.h>
 
-/* Fast instruction fetch for the common unmapped KSEG0/KSEG1 path.
- * Keep the generic helper for TLB-mapped addresses and exceptions. */
+
 static M64P_FORCE_INLINE uint32_t* interp_fast_mem_access(struct r4300_core* r4300, uint32_t address)
 {
     if (M64P_LIKELY((address & UINT32_C(0xc0000000)) == UINT32_C(0x80000000)))
@@ -300,7 +299,162 @@ static M64P_FORCE_INLINE uint32_t* interp_fast_mem_access(struct r4300_core* r43
         return (uint32_t*)((uint8_t*)r4300->mem->base + address);
     }
 
-    return fast_mem_access(r4300, address);
+#if defined(NEW_DYNAREC)
+    if (M64P_UNLIKELY(r4300->emumode == EMUMODE_DYNAREC))
+        return fast_mem_access(r4300, address);
+#endif
+
+    {
+        const uint32_t mapped = r4300->cp0.tlb.LUT_r[address >> 12];
+        if (M64P_LIKELY(mapped != 0))
+            address = (mapped & UINT32_C(0xfffff000)) | (address & UINT32_C(0x00000fff));
+        else
+        {
+            address = virtual_to_physical_address(r4300, address, 2);
+            if (M64P_UNLIKELY(address == 0))
+                return NULL;
+        }
+    }
+
+    address &= UINT32_C(0x1ffffffc);
+    return (uint32_t*)((uint8_t*)r4300->mem->base + address);
+}
+
+
+static M64P_FORCE_INLINE uint32_t interp_translate_address(struct r4300_core* r4300,
+                                                           uint32_t address,
+                                                           int w)
+{
+#if defined(NEW_DYNAREC)
+    if (M64P_UNLIKELY(r4300->emumode == EMUMODE_DYNAREC))
+        return virtual_to_physical_address(r4300, address, w);
+#endif
+
+    const uint32_t page = address >> 12;
+    const uint32_t mapped = (w == 1)
+        ? r4300->cp0.tlb.LUT_w[page]
+        : r4300->cp0.tlb.LUT_r[page];
+
+    if (M64P_LIKELY(mapped != 0))
+        return (mapped & UINT32_C(0xfffff000)) | (address & UINT32_C(0x00000fff));
+
+    return virtual_to_physical_address(r4300, address, w);
+}
+
+
+static M64P_FORCE_INLINE void interp_mem_read32(const struct mem_handler* handler,
+                                                uint32_t address,
+                                                uint32_t* value)
+{
+    if (M64P_LIKELY(handler->read32 == read_rdram_dram))
+    {
+        const struct rdram* rdram = (const struct rdram*)handler->opaque;
+        *value = rdram->dram[rdram_dram_address(address)];
+        return;
+    }
+
+    handler->read32(handler->opaque, address, value);
+}
+
+static M64P_FORCE_INLINE void interp_mem_write32(const struct mem_handler* handler,
+                                                 uint32_t address,
+                                                 uint32_t value,
+                                                 uint32_t mask)
+{
+    if (M64P_LIKELY(handler->write32 == write_rdram_dram))
+    {
+        struct rdram* rdram = (struct rdram*)handler->opaque;
+        masked_write(&rdram->dram[rdram_dram_address(address)], value, mask);
+        return;
+    }
+
+    handler->write32(handler->opaque, address, value, mask);
+}
+
+static M64P_FORCE_INLINE int interp_read_aligned_word(struct r4300_core* r4300,
+                                                      uint32_t address,
+                                                      uint32_t* value)
+{
+    if (M64P_UNLIKELY((address & UINT32_C(0xc0000000)) != UINT32_C(0x80000000)))
+    {
+        address = interp_translate_address(r4300, address, 0);
+        if (M64P_UNLIKELY(address == 0))
+            return 0;
+    }
+
+    address &= UINT32_C(0x1ffffffc);
+    interp_mem_read32(&r4300->mem->handlers[address >> 16], address, value);
+    return 1;
+}
+
+static M64P_FORCE_INLINE int interp_read_aligned_dword(struct r4300_core* r4300,
+                                                       uint32_t address,
+                                                       uint64_t* value)
+{
+    uint32_t w0;
+    uint32_t w1;
+
+    if (M64P_UNLIKELY((address & UINT32_C(7)) != 0))
+        DebugMessage(M64MSG_WARNING, "Unaligned dword read %08x", address);
+
+    if (M64P_UNLIKELY((address & UINT32_C(0xc0000000)) != UINT32_C(0x80000000)))
+    {
+        address = interp_translate_address(r4300, address, 0);
+        if (M64P_UNLIKELY(address == 0))
+            return 0;
+    }
+
+    address &= UINT32_C(0x1ffffffc);
+    const struct mem_handler* handler = &r4300->mem->handlers[address >> 16];
+    interp_mem_read32(handler, address + 0, &w0);
+    interp_mem_read32(handler, address + 4, &w1);
+    *value = ((uint64_t)w0 << 32) | w1;
+    return 1;
+}
+
+static M64P_FORCE_INLINE int interp_write_aligned_word(struct r4300_core* r4300,
+                                                       uint32_t address,
+                                                       uint32_t value,
+                                                       uint32_t mask)
+{
+    if (M64P_UNLIKELY((address & UINT32_C(0xc0000000)) != UINT32_C(0x80000000)))
+    {
+        address = interp_translate_address(r4300, address, 1);
+        if (M64P_UNLIKELY(address == 0))
+            return 0;
+    }
+
+    if (M64P_UNLIKELY(r4300->cached_interp != NULL))
+        invalidate_r4300_cached_code(r4300, address, 4);
+
+    address &= UINT32_C(0x1ffffffc);
+    interp_mem_write32(&r4300->mem->handlers[address >> 16], address, value, mask);
+    return 1;
+}
+
+static M64P_FORCE_INLINE int interp_write_aligned_dword(struct r4300_core* r4300,
+                                                        uint32_t address,
+                                                        uint64_t value,
+                                                        uint64_t mask)
+{
+    if (M64P_UNLIKELY((address & UINT32_C(7)) != 0))
+        DebugMessage(M64MSG_WARNING, "Unaligned dword write %08x", address);
+
+    if (M64P_UNLIKELY((address & UINT32_C(0xc0000000)) != UINT32_C(0x80000000)))
+    {
+        address = interp_translate_address(r4300, address, 1);
+        if (M64P_UNLIKELY(address == 0))
+            return 0;
+    }
+
+    if (M64P_UNLIKELY(r4300->cached_interp != NULL))
+        invalidate_r4300_cached_code(r4300, address, 8);
+
+    address &= UINT32_C(0x1ffffffc);
+    const struct mem_handler* handler = &r4300->mem->handlers[address >> 16];
+    interp_mem_write32(handler, address + 0, (uint32_t)(value >> 32), (uint32_t)(mask >> 32));
+    interp_mem_write32(handler, address + 4, (uint32_t)value, (uint32_t)mask);
+    return 1;
 }
 
 /* Assists unaligned memory accessors with making masks to preserve or apply
@@ -367,7 +521,7 @@ DECLARE_INSTRUCTION(BREAK)
 
 /* Load instructions */
 
-static int check_alignment(struct r4300_core* r4300, uint32_t address, unsigned int mask, int store)
+static M64P_FORCE_INLINE int check_alignment(struct r4300_core* r4300, uint32_t address, unsigned int mask, int store)
 {
     if ((address & mask) == 0) return 0;
     r4300->cp0.regs[CP0_BADVADDR_REG] = address;
@@ -385,11 +539,11 @@ DECLARE_INSTRUCTION(LLD)
     uint64_t value;
     if (check_alignment(r4300, address, 7, 0)) return;
     ADD_TO_PC(1);
-    if (r4300_read_aligned_dword(r4300, address, &value)) {
+    if (interp_read_aligned_dword(r4300, address, &value)) {
         irt = (int64_t)value;
         r4300->llbit = 1;
         uint32_t physical = (address & UINT32_C(0xc0000000)) == UINT32_C(0x80000000)
-            ? address : virtual_to_physical_address(r4300, address, 0);
+            ? address : interp_translate_address(r4300, address, 0);
         r4300->cp0.regs[CP0_LLADDR_REG] = (physical & UINT32_C(0x1fffffff)) >> 4;
     }
 }
@@ -399,7 +553,7 @@ DECLARE_INSTRUCTION(SCD)
     uint32_t address = (uint32_t)irs + (uint32_t)iimmediate;
     if (r4300->llbit && check_alignment(r4300, address, 7, 1)) return;
     ADD_TO_PC(1);
-    if (r4300->llbit) irt = r4300_write_aligned_dword(r4300, address, (uint64_t)irt, UINT64_MAX);
+    if (r4300->llbit) irt = interp_write_aligned_dword(r4300, address, (uint64_t)irt, UINT64_MAX);
     else irt = 0;
 }
 
@@ -412,7 +566,7 @@ DECLARE_INSTRUCTION(LB)
     uint32_t value;
     unsigned int shift = bshift(lsaddr);
 
-    if (r4300_read_aligned_word(r4300, lsaddr, &value)) {
+    if (interp_read_aligned_word(r4300, lsaddr, &value)) {
         *lsrtp = SE8((value >> shift) & 0xff);
     }
 }
@@ -426,7 +580,7 @@ DECLARE_INSTRUCTION(LBU)
     uint32_t value;
     unsigned int shift = bshift(lsaddr);
 
-    if (r4300_read_aligned_word(r4300, lsaddr, &value)) {
+    if (interp_read_aligned_word(r4300, lsaddr, &value)) {
         *lsrtp = (value >> shift) & 0xff;
     }
 }
@@ -441,7 +595,7 @@ DECLARE_INSTRUCTION(LH)
     uint32_t value;
     unsigned int shift = hshift(lsaddr);
 
-    if (r4300_read_aligned_word(r4300, lsaddr, &value)) {
+    if (interp_read_aligned_word(r4300, lsaddr, &value)) {
         *lsrtp = SE16((value >> shift) & 0xffff);
     }
 }
@@ -456,7 +610,7 @@ DECLARE_INSTRUCTION(LHU)
     uint32_t value;
     unsigned int shift = hshift(lsaddr);
 
-    if (r4300_read_aligned_word(r4300, lsaddr, &value)) {
+    if (interp_read_aligned_word(r4300, lsaddr, &value)) {
         *lsrtp = (value >> shift) & 0xffff;
     }
 }
@@ -470,11 +624,11 @@ DECLARE_INSTRUCTION(LL)
     ADD_TO_PC(1);
     uint32_t value;
 
-    if (r4300_read_aligned_word(r4300, lsaddr, &value)) {
+    if (interp_read_aligned_word(r4300, lsaddr, &value)) {
         *lsrtp = SE32(value);
         r4300->llbit = 1;
         uint32_t physical = (lsaddr & UINT32_C(0xc0000000)) == UINT32_C(0x80000000)
-            ? lsaddr : virtual_to_physical_address(r4300, lsaddr, 0);
+            ? lsaddr : interp_translate_address(r4300, lsaddr, 0);
         r4300->cp0.regs[CP0_LLADDR_REG] = (physical & UINT32_C(0x1fffffff)) >> 4;
     }
 }
@@ -488,7 +642,7 @@ DECLARE_INSTRUCTION(LW)
     ADD_TO_PC(1);
     uint32_t value;
 
-    if (r4300_read_aligned_word(r4300, lsaddr, &value)) {
+    if (interp_read_aligned_word(r4300, lsaddr, &value)) {
         *lsrtp = SE32(value);
     }
 }
@@ -503,7 +657,7 @@ DECLARE_INSTRUCTION(LWU)
 
     uint32_t value;
 
-    if (r4300_read_aligned_word(r4300, lsaddr, &value)) {
+    if (interp_read_aligned_word(r4300, lsaddr, &value)) {
         *lsrtp = value;
     }
 }
@@ -520,7 +674,7 @@ DECLARE_INSTRUCTION(LWL)
     uint32_t mask = BITS_BELOW_MASK32(8 * n);
     uint32_t value;
 
-    if (r4300_read_aligned_word(r4300, lsaddr, &value)) {
+    if (interp_read_aligned_word(r4300, lsaddr, &value)) {
         *lsrtp = SE32(((uint32_t)*lsrtp & mask) | ((uint32_t)value << shift));
     }
 }
@@ -539,7 +693,7 @@ DECLARE_INSTRUCTION(LWR)
         : BITS_ABOVE_MASK32(8 * (n + 1));
     uint32_t value;
 
-    if (r4300_read_aligned_word(r4300, lsaddr, &value)) {
+    if (interp_read_aligned_word(r4300, lsaddr, &value)) {
         uint32_t merged = ((uint32_t)*lsrtp & mask) | (value >> shift);
         *lsrtp = n == 3 ? SE32(merged)
             : (int64_t)(((uint64_t)*lsrtp & UINT64_C(0xffffffff00000000)) | merged);
@@ -554,7 +708,7 @@ DECLARE_INSTRUCTION(LD)
     if (check_alignment(r4300, lsaddr, 7, 0)) return;
     ADD_TO_PC(1);
 
-    r4300_read_aligned_dword(r4300, lsaddr, (uint64_t*)lsrtp);
+    interp_read_aligned_dword(r4300, lsaddr, (uint64_t*)lsrtp);
 }
 
 DECLARE_INSTRUCTION(LDL)
@@ -569,7 +723,7 @@ DECLARE_INSTRUCTION(LDL)
     uint64_t mask = BITS_BELOW_MASK64(8 * n);
     uint64_t value;
 
-    if (r4300_read_aligned_dword(r4300, lsaddr & ~UINT32_C(7), &value)) {
+    if (interp_read_aligned_dword(r4300, lsaddr & ~UINT32_C(7), &value)) {
         *lsrtp = ((uint64_t)*lsrtp & mask) | (value << shift);
     }
 }
@@ -588,7 +742,7 @@ DECLARE_INSTRUCTION(LDR)
         : BITS_ABOVE_MASK64(8 * (n + 1));
     uint64_t value;
 
-    if (r4300_read_aligned_dword(r4300, lsaddr & ~UINT32_C(7), &value)) {
+    if (interp_read_aligned_dword(r4300, lsaddr & ~UINT32_C(7), &value)) {
         *lsrtp = ((uint64_t)*lsrtp & mask) | (value >> shift);
     }
 }
@@ -603,7 +757,7 @@ DECLARE_INSTRUCTION(SB)
     ADD_TO_PC(1);
     unsigned int shift = bshift(lsaddr);
 
-    r4300_write_aligned_word(r4300, lsaddr, (uint32_t)*lsrtp << shift, UINT32_C(0xff) << shift);
+    interp_write_aligned_word(r4300, lsaddr, (uint32_t)*lsrtp << shift, UINT32_C(0xff) << shift);
 }
 
 DECLARE_INSTRUCTION(SH)
@@ -615,7 +769,7 @@ DECLARE_INSTRUCTION(SH)
     ADD_TO_PC(1);
     unsigned int shift = hshift(lsaddr);
 
-    r4300_write_aligned_word(r4300, lsaddr, (uint32_t)*lsrtp << shift, UINT32_C(0xffff) << shift);
+    interp_write_aligned_word(r4300, lsaddr, (uint32_t)*lsrtp << shift, UINT32_C(0xffff) << shift);
 }
 
 DECLARE_INSTRUCTION(SC)
@@ -628,7 +782,7 @@ DECLARE_INSTRUCTION(SC)
 
     if (r4300->llbit)
     {
-        *lsrtp = r4300_write_aligned_word(r4300, lsaddr, (uint32_t)*lsrtp, ~UINT32_C(0));
+        *lsrtp = interp_write_aligned_word(r4300, lsaddr, (uint32_t)*lsrtp, ~UINT32_C(0));
     }
     else
     {
@@ -644,7 +798,7 @@ DECLARE_INSTRUCTION(SW)
     if (check_alignment(r4300, lsaddr, 3, 1)) return;
     ADD_TO_PC(1);
 
-    r4300_write_aligned_word(r4300, lsaddr, (uint32_t)*lsrtp, ~UINT32_C(0));
+    interp_write_aligned_word(r4300, lsaddr, (uint32_t)*lsrtp, ~UINT32_C(0));
 }
 
 DECLARE_INSTRUCTION(SWL)
@@ -661,7 +815,7 @@ DECLARE_INSTRUCTION(SWL)
         : BITS_BELOW_MASK32(8 * (4 - n));
     uint32_t value = (uint32_t)*lsrtp;
 
-    r4300_write_aligned_word(r4300, lsaddr & ~UINT32_C(0x3), value >> shift, mask);
+    interp_write_aligned_word(r4300, lsaddr & ~UINT32_C(0x3), value >> shift, mask);
 }
 
 DECLARE_INSTRUCTION(SWR)
@@ -676,7 +830,7 @@ DECLARE_INSTRUCTION(SWR)
     uint32_t mask = BITS_ABOVE_MASK32(8 * (3 - n));
     uint32_t value = (uint32_t)*lsrtp;
 
-    r4300_write_aligned_word(r4300, lsaddr & ~UINT32_C(0x3), value << shift, mask);
+    interp_write_aligned_word(r4300, lsaddr & ~UINT32_C(0x3), value << shift, mask);
 }
 
 DECLARE_INSTRUCTION(SD)
@@ -687,7 +841,7 @@ DECLARE_INSTRUCTION(SD)
     if (check_alignment(r4300, lsaddr, 7, 1)) return;
     ADD_TO_PC(1);
 
-    r4300_write_aligned_dword(r4300, lsaddr, (uint64_t)*lsrtp, ~UINT64_C(0));
+    interp_write_aligned_dword(r4300, lsaddr, (uint64_t)*lsrtp, ~UINT64_C(0));
 }
 
 DECLARE_INSTRUCTION(SDL)
@@ -704,7 +858,7 @@ DECLARE_INSTRUCTION(SDL)
         : BITS_BELOW_MASK64(8 * (8 - n));
     uint64_t value = (uint64_t)*lsrtp;
 
-    r4300_write_aligned_dword(r4300, lsaddr & ~UINT32_C(0x7), value >> shift, mask);
+    interp_write_aligned_dword(r4300, lsaddr & ~UINT32_C(0x7), value >> shift, mask);
 }
 
 DECLARE_INSTRUCTION(SDR)
@@ -719,7 +873,7 @@ DECLARE_INSTRUCTION(SDR)
     uint64_t mask = BITS_ABOVE_MASK64(8 * (7 - n));
     uint64_t value = (uint64_t)*lsrtp;
 
-    r4300_write_aligned_dword(r4300, lsaddr & ~UINT32_C(0x7), value << shift, mask);
+    interp_write_aligned_dword(r4300, lsaddr & ~UINT32_C(0x7), value << shift, mask);
 }
 
 static M64P_FORCE_INLINE int add_overflow_s32(int32_t a, int32_t b, int32_t* result)
@@ -1603,7 +1757,7 @@ DECLARE_INSTRUCTION(LWC1)
     if (check_alignment(r4300, lslfaddr, 3, 0)) return;
     ADD_TO_PC(1);
 
-    r4300_read_aligned_word(r4300, lslfaddr, (uint32_t*)r4300->cp1.regs_simple[lslfft]);
+    interp_read_aligned_word(r4300, lslfaddr, (uint32_t*)r4300->cp1.regs_simple[lslfft]);
 }
 
 DECLARE_INSTRUCTION(LDC1)
@@ -1615,7 +1769,7 @@ DECLARE_INSTRUCTION(LDC1)
     if (check_alignment(r4300, lslfaddr, 7, 0)) return;
     ADD_TO_PC(1);
 
-    r4300_read_aligned_dword(r4300, lslfaddr, (uint64_t*)r4300->cp1.regs_double[lslfft]);
+    interp_read_aligned_dword(r4300, lslfaddr, (uint64_t*)r4300->cp1.regs_double[lslfft]);
 }
 
 DECLARE_INSTRUCTION(SWC1)
@@ -1627,7 +1781,7 @@ DECLARE_INSTRUCTION(SWC1)
     if (check_alignment(r4300, lslfaddr, 3, 1)) return;
     ADD_TO_PC(1);
 
-    r4300_write_aligned_word(r4300, lslfaddr, *((uint32_t*)(r4300->cp1.regs_simple)[lslfft]), ~UINT32_C(0));
+    interp_write_aligned_word(r4300, lslfaddr, *((uint32_t*)(r4300->cp1.regs_simple)[lslfft]), ~UINT32_C(0));
 }
 
 DECLARE_INSTRUCTION(SDC1)
@@ -1639,7 +1793,7 @@ DECLARE_INSTRUCTION(SDC1)
     if (check_alignment(r4300, lslfaddr, 7, 1)) return;
     ADD_TO_PC(1);
 
-    r4300_write_aligned_dword(r4300, lslfaddr, *((uint64_t*)(r4300->cp1.regs_double)[lslfft]), ~UINT64_C(0));
+    interp_write_aligned_dword(r4300, lslfaddr, *((uint64_t*)(r4300->cp1.regs_double)[lslfft]), ~UINT64_C(0));
 }
 
 DECLARE_INSTRUCTION(MFC1)

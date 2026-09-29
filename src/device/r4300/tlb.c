@@ -128,15 +128,14 @@ uint32_t virtual_to_physical_address(struct r4300_core* r4300, uint32_t address,
     }
 #endif
 
-    if (w == 1)
     {
-        if (tlb->LUT_w[addr])
-            return (tlb->LUT_w[addr] & UINT32_C(0xFFFFF000)) | (address & UINT32_C(0xFFF));
-    }
-    else
-    {
-        if (tlb->LUT_r[addr])
-            return (tlb->LUT_r[addr] & UINT32_C(0xFFFFF000)) | (address & UINT32_C(0xFFF));
+        const uint32_t mapped = (w == 1) ? tlb->LUT_w[addr] : tlb->LUT_r[addr];
+#if defined(__GNUC__) || defined(__clang__)
+        if (__builtin_expect(mapped != 0, 1))
+#else
+        if (mapped != 0)
+#endif
+            return (mapped & UINT32_C(0xFFFFF000)) | (address & UINT32_C(0xFFF));
     }
     //printf("tlb exception !!! @ %x, %x, add:%x\n", address, w, r4300->pc->addr);
     //getchar();
