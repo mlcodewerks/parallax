@@ -56,7 +56,7 @@ enum { GB_CART_FINGERPRINT_OFFSET = 0x134 };
 enum { DD_DISK_ID_OFFSET = 0x43670 };
 
 static const char* savestate_magic = "M64+SAVE";
-static const int savestate_latest_version = 0x00010800;  /* 1.8 */
+static const int savestate_latest_version = 0x00010a00;  /* 1.10 */
 static const unsigned char pj64_magic[4] = { 0xC8, 0xA6, 0xD8, 0x23 };
 
 static savestates_job job = savestates_job_nothing;
@@ -342,6 +342,7 @@ int savestates_load_m64p(struct device* dev, const void *data)
     *r4300_llbit(&dev->r4300) = GETDATA(curr, uint32_t);
     COPYARRAY(r4300_regs(&dev->r4300), curr, int64_t, 32);
     COPYARRAY(cp0_regs, curr, uint32_t, CP0_REGS_COUNT);
+    cp0_reset_extended(&dev->r4300.cp0);
     *r4300_mult_lo(&dev->r4300) = GETDATA(curr, int64_t);
     *r4300_mult_hi(&dev->r4300) = GETDATA(curr, int64_t);
     cp1_reg *cp1_regs = r4300_cp1_regs(&dev->r4300.cp1);
@@ -389,6 +390,7 @@ int savestates_load_m64p(struct device* dev, const void *data)
 
     to_little_endian_buffer(queue, 4, 256);
     load_eventqueue_infos(&dev->r4300.cp0, queue);
+    dev->r4300.cp0.count_phase = 0; /* Older states had no fractional cycle. */
 
     if (version == 0x00010200)
     {
@@ -761,6 +763,14 @@ int savestates_load_m64p(struct device* dev, const void *data)
             dev->cart.flashram.status = GETDATA(curr, uint32_t);
             dev->cart.flashram.erase_page = GETDATA(curr, uint16_t);
             dev->cart.flashram.mode = GETDATA(curr, uint16_t);
+        }
+        if (version >= 0x00010900)
+            dev->r4300.cp0.count_phase = GETDATA(curr, uint32_t) & 1;
+        if (version >= 0x00010a00) {
+            COPYARRAY(dev->r4300.cp0.regs_hi, curr, uint32_t, 32);
+            COPYARRAY(dev->r4300.cp0.tlb_entryhi_hi, curr, uint32_t, 32);
+            dev->r4300.cp0.latch = GETDATA(curr, uint64_t);
+            dev->r4300.cp0.random_state = GETDATA(curr, uint32_t);
         }
     }
     else
@@ -1244,6 +1254,13 @@ int savestates_save_m64p(const struct device* dev, void *data)
     PUTDATA(curr, uint32_t, dev->cart.flashram.status);
     PUTDATA(curr, uint16_t, dev->cart.flashram.erase_page);
     PUTDATA(curr, uint16_t, dev->cart.flashram.mode);
+    /* COUNT divider phase (since 1.9), within the existing extra-state area. */
+    PUTDATA(curr, uint32_t, dev->r4300.cp0.count_phase);
+    /* Full-width COP0 state and independent RANDOM generator (since 1.10). */
+    PUTARRAY(dev->r4300.cp0.regs_hi, curr, uint32_t, 32);
+    PUTARRAY(dev->r4300.cp0.tlb_entryhi_hi, curr, uint32_t, 32);
+    PUTDATA(curr, uint64_t, dev->r4300.cp0.latch);
+    PUTDATA(curr, uint32_t, dev->r4300.cp0.random_state);
 
     memcpy(save->mempointer, save->data, save->size);
     free(save->data);

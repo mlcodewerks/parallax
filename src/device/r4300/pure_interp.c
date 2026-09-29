@@ -22,6 +22,7 @@
 #include "pure_interp.h"
 #include "cached_interp.h"
 #include "idec.h"
+#include "timing.h"
 
 #include <stdint.h>
 #include <stdbool.h>
@@ -121,13 +122,15 @@ static void InterpretOpcode(struct r4300_core* r4300, bool continuous) M64P_HOT;
 #define DECLARE_JUMP(name, destination, condition, link, likely, cop1) \
     static void name(struct r4300_core* r4300, uint32_t op) \
     { \
-        const int take_jump = (condition); \
+        int take_jump = (condition); \
         const uint32_t jump_target = (destination); \
         int64_t* link_register = (link); \
         if (cop1 && check_cop1_unusable(r4300)) return; \
+        if (cop1) r4300->cp1.fcr31 &= ~UINT32_C(0x3f000); \
         if (link_register != &r4300->regs[0]) \
         { \
             *link_register = SE32(r4300->interp_PC.addr + 8); \
+            if ((op >> 26) == 1 && ((op >> 16) & 31) != 17) take_jump = (condition); \
         } \
         if (!likely || take_jump) \
         { \
@@ -154,12 +157,15 @@ static void InterpretOpcode(struct r4300_core* r4300, bool continuous) M64P_HOT;
         int* cp0_cycle_count = &r4300->cp0.cycle_count; \
         const int take_jump = (condition); \
         if (cop1 && check_cop1_unusable(r4300)) return; \
+        if ((op >> 26) == 1 && ((op >> 16) & 16) && ((op >> 21) & 31) == 31) \
+        { name(r4300, op); return; } \
         if (take_jump) \
         { \
             cp0_update_count(r4300); \
             if (*cp0_cycle_count < 0) \
             { \
                 cp0_regs[CP0_COUNT_REG] -= *cp0_cycle_count; \
+                r4300->cp0.count_phase = 0; \
                 *cp0_cycle_count = 0; \
             } \
         } \
@@ -273,7 +279,8 @@ static void InterpretOpcode(struct r4300_core* r4300, bool continuous) M64P_HOT;
  * If cop1 is nonzero, a COP1 unusable check will be done.
  */
 
-#include "fpu.h"
+#include <math.h>
+#define FCR31_CMP_BIT UINT32_C(0x800000)
 #include "r4300_core.h"
 #include "device/memory.h"
 #include "device/rcp/mi_controller.h"
@@ -335,15 +342,66 @@ static M64P_FORCE_INLINE unsigned int hshift(uint32_t address)
 
 DECLARE_INSTRUCTION(NI)
 {
-    DECLARE_R4300
-    DebugMessage(M64MSG_ERROR, "NI() @ 0x%" PRIX32, PCADDR);
-    DebugMessage(M64MSG_ERROR, "opcode not implemented: %" PRIX32 ":%" PRIX32, PCADDR, *interp_fast_mem_access(r4300, PCADDR));
-    r4300->stop = 1;
+    if ((op >> 26) == 0x11) {
+        if (check_cop1_unusable(r4300)) return;
+        r4300->cp1.fcr31 = (r4300->cp1.fcr31 & ~UINT32_C(0x3f000)) | UINT32_C(0x20000);
+        r4300->cp0.regs[CP0_CAUSE_REG] =
+            (r4300->cp0.regs[CP0_CAUSE_REG] & ~UINT32_C(0x3000007c)) | CP0_CAUSE_EXCCODE_FPE;
+        exception_general(r4300);
+        return;
+    }
+    r4300->cp0.regs[CP0_CAUSE_REG] =
+        (r4300->cp0.regs[CP0_CAUSE_REG] & ~UINT32_C(0x3000007c)) | CP0_CAUSE_EXCCODE_RI;
+    exception_general(r4300);
+}
+
+DECLARE_INSTRUCTION(BREAK)
+{
+    (void)op;
+    r4300->cp0.regs[CP0_CAUSE_REG] =
+        (r4300->cp0.regs[CP0_CAUSE_REG] & ~UINT32_C(0x3000007c)) | CP0_CAUSE_EXCCODE_BP;
+    exception_general(r4300);
 }
 
 /* Reserved */
 
 /* Load instructions */
+
+static int check_alignment(struct r4300_core* r4300, uint32_t address, unsigned int mask, int store)
+{
+    if ((address & mask) == 0) return 0;
+    r4300->cp0.regs[CP0_BADVADDR_REG] = address;
+    r4300->cp0.regs_hi[CP0_BADVADDR_REG] = (int32_t)address < 0 ? UINT32_MAX : 0;
+    r4300->cp0.regs[CP0_CAUSE_REG] =
+        (r4300->cp0.regs[CP0_CAUSE_REG] & ~UINT32_C(0x3000007c)) |
+        (store ? CP0_CAUSE_EXCCODE_ADES : CP0_CAUSE_EXCCODE_ADEL);
+    exception_general(r4300);
+    return 1;
+}
+
+DECLARE_INSTRUCTION(LLD)
+{
+    uint32_t address = (uint32_t)irs + (uint32_t)iimmediate;
+    uint64_t value;
+    if (check_alignment(r4300, address, 7, 0)) return;
+    ADD_TO_PC(1);
+    if (r4300_read_aligned_dword(r4300, address, &value)) {
+        irt = (int64_t)value;
+        r4300->llbit = 1;
+        uint32_t physical = (address & UINT32_C(0xc0000000)) == UINT32_C(0x80000000)
+            ? address : virtual_to_physical_address(r4300, address, 0);
+        r4300->cp0.regs[CP0_LLADDR_REG] = (physical & UINT32_C(0x1fffffff)) >> 4;
+    }
+}
+
+DECLARE_INSTRUCTION(SCD)
+{
+    uint32_t address = (uint32_t)irs + (uint32_t)iimmediate;
+    if (r4300->llbit && check_alignment(r4300, address, 7, 1)) return;
+    ADD_TO_PC(1);
+    if (r4300->llbit) irt = r4300_write_aligned_dword(r4300, address, (uint64_t)irt, UINT64_MAX);
+    else irt = 0;
+}
 
 DECLARE_INSTRUCTION(LB)
 {
@@ -378,6 +436,7 @@ DECLARE_INSTRUCTION(LH)
     DECLARE_R4300
     const uint32_t lsaddr = (uint32_t) irs32 + (uint32_t) iimmediate;
     int64_t *lsrtp = &irt;
+    if (check_alignment(r4300, lsaddr, 1, 0)) return;
     ADD_TO_PC(1);
     uint32_t value;
     unsigned int shift = hshift(lsaddr);
@@ -392,6 +451,7 @@ DECLARE_INSTRUCTION(LHU)
     DECLARE_R4300
     const uint32_t lsaddr = (uint32_t) irs32 + (uint32_t) iimmediate;
     int64_t *lsrtp = &irt;
+    if (check_alignment(r4300, lsaddr, 1, 0)) return;
     ADD_TO_PC(1);
     uint32_t value;
     unsigned int shift = hshift(lsaddr);
@@ -406,12 +466,16 @@ DECLARE_INSTRUCTION(LL)
     DECLARE_R4300
     const uint32_t lsaddr = (uint32_t) irs32 + (uint32_t) iimmediate;
     int64_t *lsrtp = &irt;
+    if (check_alignment(r4300, lsaddr, 3, 0)) return;
     ADD_TO_PC(1);
     uint32_t value;
 
     if (r4300_read_aligned_word(r4300, lsaddr, &value)) {
         *lsrtp = SE32(value);
         r4300->llbit = 1;
+        uint32_t physical = (lsaddr & UINT32_C(0xc0000000)) == UINT32_C(0x80000000)
+            ? lsaddr : virtual_to_physical_address(r4300, lsaddr, 0);
+        r4300->cp0.regs[CP0_LLADDR_REG] = (physical & UINT32_C(0x1fffffff)) >> 4;
     }
 }
 
@@ -420,6 +484,7 @@ DECLARE_INSTRUCTION(LW)
     DECLARE_R4300
     const uint32_t lsaddr = (uint32_t) irs32 + (uint32_t) iimmediate;
     int64_t *lsrtp = &irt;
+    if (check_alignment(r4300, lsaddr, 3, 0)) return;
     ADD_TO_PC(1);
     uint32_t value;
 
@@ -433,6 +498,7 @@ DECLARE_INSTRUCTION(LWU)
     DECLARE_R4300
     const uint32_t lsaddr = (uint32_t) irs32 + (uint32_t) iimmediate;
     int64_t *lsrtp = &irt;
+    if (check_alignment(r4300, lsaddr, 3, 0)) return;
     ADD_TO_PC(1);
 
     uint32_t value;
@@ -474,7 +540,9 @@ DECLARE_INSTRUCTION(LWR)
     uint32_t value;
 
     if (r4300_read_aligned_word(r4300, lsaddr, &value)) {
-        *lsrtp = SE32(((uint32_t)*lsrtp & mask) | ((uint32_t)value >> shift));
+        uint32_t merged = ((uint32_t)*lsrtp & mask) | (value >> shift);
+        *lsrtp = n == 3 ? SE32(merged)
+            : (int64_t)(((uint64_t)*lsrtp & UINT64_C(0xffffffff00000000)) | merged);
     }
 }
 
@@ -483,6 +551,7 @@ DECLARE_INSTRUCTION(LD)
     DECLARE_R4300
     const uint32_t lsaddr = (uint32_t) irs32 + (uint32_t) iimmediate;
     int64_t *lsrtp = &irt;
+    if (check_alignment(r4300, lsaddr, 7, 0)) return;
     ADD_TO_PC(1);
 
     r4300_read_aligned_dword(r4300, lsaddr, (uint64_t*)lsrtp);
@@ -542,6 +611,7 @@ DECLARE_INSTRUCTION(SH)
     DECLARE_R4300
     const uint32_t lsaddr = (uint32_t) irs32 + (uint32_t) iimmediate;
     int64_t *lsrtp = &irt;
+    if (check_alignment(r4300, lsaddr, 1, 1)) return;
     ADD_TO_PC(1);
     unsigned int shift = hshift(lsaddr);
 
@@ -553,14 +623,12 @@ DECLARE_INSTRUCTION(SC)
     DECLARE_R4300
     const uint32_t lsaddr = (uint32_t) irs32 + (uint32_t) iimmediate;
     int64_t *lsrtp = &irt;
+    if (r4300->llbit && check_alignment(r4300, lsaddr, 3, 1)) return;
     ADD_TO_PC(1);
 
     if (r4300->llbit)
     {
-        if (r4300_write_aligned_word(r4300, lsaddr, (uint32_t)*lsrtp, ~UINT32_C(0))) {
-            r4300->llbit = 0;
-            *lsrtp = 1;
-        }
+        *lsrtp = r4300_write_aligned_word(r4300, lsaddr, (uint32_t)*lsrtp, ~UINT32_C(0));
     }
     else
     {
@@ -573,6 +641,7 @@ DECLARE_INSTRUCTION(SW)
     DECLARE_R4300
     const uint32_t lsaddr = (uint32_t) irs32 + (uint32_t) iimmediate;
     int64_t *lsrtp = &irt;
+    if (check_alignment(r4300, lsaddr, 3, 1)) return;
     ADD_TO_PC(1);
 
     r4300_write_aligned_word(r4300, lsaddr, (uint32_t)*lsrtp, ~UINT32_C(0));
@@ -615,6 +684,7 @@ DECLARE_INSTRUCTION(SD)
     DECLARE_R4300
     const uint32_t lsaddr = (uint32_t) irs32 + (uint32_t) iimmediate;
     int64_t *lsrtp = &irt;
+    if (check_alignment(r4300, lsaddr, 7, 1)) return;
     ADD_TO_PC(1);
 
     r4300_write_aligned_dword(r4300, lsaddr, (uint64_t)*lsrtp, ~UINT64_C(0));
@@ -691,7 +761,7 @@ static M64P_FORCE_INLINE int sub_overflow_s64(int64_t a, int64_t b, int64_t* res
 static M64P_FORCE_INLINE void raise_arithmetic_overflow(struct r4300_core* r4300)
 {
     r4300->cp0.regs[CP0_CAUSE_REG] =
-        (r4300->cp0.regs[CP0_CAUSE_REG] & ~CP0_CAUSE_EXCCODE_MASK) | CP0_CAUSE_EXCCODE_OV;
+        (r4300->cp0.regs[CP0_CAUSE_REG] & ~UINT32_C(0x3000007c)) | CP0_CAUSE_EXCCODE_OV;
     exception_general(r4300);
 }
 
@@ -980,14 +1050,14 @@ DECLARE_INSTRUCTION(DSRL32)
 DECLARE_INSTRUCTION(SRA)
 {
     DECLARE_R4300
-    rrd = SE32((int32_t) rrt32 >> rsa);
+    rrd = SE32(rrt >> rsa);
     ADD_TO_PC(1);
 }
 
 DECLARE_INSTRUCTION(SRAV)
 {
     DECLARE_R4300
-    rrd = SE32((int32_t) rrt32 >> (rrs32 & 0x1F));
+    rrd = SE32(rrt >> (rrs32 & 0x1F));
     ADD_TO_PC(1);
 }
 
@@ -1017,9 +1087,10 @@ DECLARE_INSTRUCTION(DSRA32)
 DECLARE_INSTRUCTION(MULT)
 {
     DECLARE_R4300
-    int64_t temp;
-    temp = rrs32 * (int64_t)rrt32;
-    r4300->hi = temp >> 32;
+    /* VR4300/Ares uses a signed 64-by-35-bit product for MULT. */
+    const int64_t rhs = (int64_t)((uint64_t)rrt << 29) >> 29;
+    const uint64_t temp = (uint64_t)rrs * (uint64_t)rhs;
+    r4300->hi = SE32(temp >> 32);
     r4300->lo = SE32(temp);
     ADD_TO_PC(1);
 }
@@ -1133,18 +1204,10 @@ DECLARE_INSTRUCTION(DMULTU)
 DECLARE_INSTRUCTION(DIV)
 {
     DECLARE_R4300
-    if (rrt32)
+    if (rrt)
     {
-        if (rrs32 == INT32_MIN && rrt32 == -1)
-        {
-            r4300->lo = SE32(rrs32);
-            r4300->hi = 0;
-        }
-        else
-        {
-            r4300->lo = SE32(rrs32 / rrt32);
-            r4300->hi = SE32(rrs32 % rrt32);
-        }
+        r4300->lo = SE32((int64_t)rrs32 / rrt);
+        r4300->hi = SE32((int64_t)rrs32 % rrt);
     }
     else
     {
@@ -1288,8 +1351,8 @@ DECLARE_INSTRUCTION(ERET)
     cp0_update_count(r4300);
     if (cp0_regs[CP0_STATUS_REG] & CP0_STATUS_ERL)
     {
-        DebugMessage(M64MSG_ERROR, "error in ERET");
-        r4300->stop=1;
+        cp0_regs[CP0_STATUS_REG] &= ~CP0_STATUS_ERL;
+        generic_jump_to(r4300, cp0_regs[CP0_ERROREPC_REG]);
     }
     else
     {
@@ -1313,7 +1376,7 @@ DECLARE_INSTRUCTION(SYSCALL)
     DECLARE_R4300
     uint32_t* cp0_regs = r4300->cp0.regs;
 
-    cp0_regs[CP0_CAUSE_REG] = CP0_CAUSE_EXCCODE_SYS;
+    cp0_regs[CP0_CAUSE_REG] = (cp0_regs[CP0_CAUSE_REG] & ~UINT32_C(0x3000007c)) | CP0_CAUSE_EXCCODE_SYS;
     exception_general(r4300);
 }
 
@@ -1326,7 +1389,7 @@ DECLARE_INSTRUCTION(name) \
     uint32_t* cp0_regs = r4300->cp0.regs; \
     if (cond) \
     { \
-        cp0_regs[CP0_CAUSE_REG] = CP0_CAUSE_EXCCODE_TR; \
+        cp0_regs[CP0_CAUSE_REG] = (cp0_regs[CP0_CAUSE_REG] & ~UINT32_C(0x3000007c)) | CP0_CAUSE_EXCCODE_TR; \
         exception_general(r4300); \
     } \
     else \
@@ -1360,7 +1423,8 @@ DECLARE_INSTRUCTION(TLBP)
     cp0_regs[CP0_INDEX_REG] |= UINT32_C(0x80000000);
     for (i = 0; i < 32; ++i)
     {
-        if (((r4300->cp0.tlb.entries[i].vpn2 & (~r4300->cp0.tlb.entries[i].mask)) ==
+        if (r4300->cp0.tlb_entryhi_hi[i] == r4300->cp0.regs_hi[CP0_ENTRYHI_REG] &&
+            ((r4300->cp0.tlb.entries[i].vpn2 & (~r4300->cp0.tlb.entries[i].mask)) ==
                     (((cp0_regs[CP0_ENTRYHI_REG] & UINT32_C(0xFFFFE000)) >> 13) & (~r4300->cp0.tlb.entries[i].mask))) &&
                 ((r4300->cp0.tlb.entries[i].g) ||
                  (r4300->cp0.tlb.entries[i].asid == (cp0_regs[CP0_ENTRYHI_REG] & UINT32_C(0xFF)))))
@@ -1378,7 +1442,9 @@ DECLARE_INSTRUCTION(TLBR)
     uint32_t* cp0_regs = r4300->cp0.regs;
 
     int index;
-    index = cp0_regs[CP0_INDEX_REG] & UINT32_C(0x1F);
+    index = cp0_regs[CP0_INDEX_REG] & UINT32_C(0x3F);
+    if (index >= 32) { ADD_TO_PC(1); return; }
+    r4300->cp0.regs_hi[CP0_ENTRYHI_REG] = r4300->cp0.tlb_entryhi_hi[index];
     cp0_regs[CP0_PAGEMASK_REG] = r4300->cp0.tlb.entries[index].mask << 13;
     cp0_regs[CP0_ENTRYHI_REG] = ((r4300->cp0.tlb.entries[index].vpn2 << 13) | r4300->cp0.tlb.entries[index].asid);
     cp0_regs[CP0_ENTRYLO0_REG] = (r4300->cp0.tlb.entries[index].pfn_even << 6) | (r4300->cp0.tlb.entries[index].c_even << 3)
@@ -1393,17 +1459,9 @@ DECLARE_INSTRUCTION(TLBR)
 static void TLBWrite(struct r4300_core* r4300, unsigned int idx)
 {
     uint32_t* cp0_regs = r4300->cp0.regs;
-    uint32_t pc_addr = r4300->interp_PC.addr;
+    if (idx >= 32) return;
 
-    if (pc_addr >= r4300->cp0.tlb.entries[idx].start_even
-        && pc_addr < r4300->cp0.tlb.entries[idx].end_even
-        && r4300->cp0.tlb.entries[idx].v_even)
-        return;
-    if (pc_addr >= r4300->cp0.tlb.entries[idx].start_odd
-        && pc_addr < r4300->cp0.tlb.entries[idx].end_odd
-        && r4300->cp0.tlb.entries[idx].v_odd)
-        return;
-
+    r4300->cp0.tlb_entryhi_hi[idx] = r4300->cp0.regs_hi[CP0_ENTRYHI_REG];
     tlb_unmap(&r4300->cp0.tlb, idx);
 
     r4300->cp0.tlb.entries[idx].g = (cp0_regs[CP0_ENTRYLO0_REG] & cp0_regs[CP0_ENTRYLO1_REG] & 1);
@@ -1440,8 +1498,7 @@ DECLARE_INSTRUCTION(TLBWR)
     DECLARE_R4300
     uint32_t* cp0_regs = r4300->cp0.regs;
     cp0_update_count(r4300);
-    cp0_regs[CP0_RANDOM_REG] = (cp0_regs[CP0_COUNT_REG]/r4300->cp0.count_per_op % (32 - cp0_regs[CP0_WIRED_REG]))
-        + cp0_regs[CP0_WIRED_REG];
+    cp0_regs[CP0_RANDOM_REG] = cp0_random(&r4300->cp0);
     TLBWrite(r4300, cp0_regs[CP0_RANDOM_REG]);
     ADD_TO_PC(1);
 }
@@ -1458,130 +1515,83 @@ DECLARE_INSTRUCTION(TLBWI)
 
 DECLARE_INSTRUCTION(MFC0)
 {
-    DECLARE_R4300
-    uint32_t* cp0_regs = r4300->cp0.regs;
-
-    switch (rfs)
-    {
-    case CP0_RANDOM_REG:
-        cp0_update_count(r4300);
-        cp0_regs[CP0_RANDOM_REG] = (cp0_regs[CP0_COUNT_REG]/r4300->cp0.count_per_op % (32 - cp0_regs[CP0_WIRED_REG]))
-            + cp0_regs[CP0_WIRED_REG];
-        break;
-    case CP0_COUNT_REG:
-        cp0_update_count(r4300);
-        break;
-    }
-    rrt = SE32(cp0_regs[rfs]);
+    uint64_t value = cp0_get_control(&r4300->cp0, rfs);
+    rrt = RS_OF(op) == 1 ? (int64_t)value : SE32(value);
     ADD_TO_PC(1);
 }
 
 DECLARE_INSTRUCTION(MTC0)
 {
-    DECLARE_R4300
-    uint32_t* cp0_regs = r4300->cp0.regs;
-    int* cp0_cycle_count = &r4300->cp0.cycle_count;
-
-    switch (rfs)
-    {
-    case CP0_INDEX_REG:
-        cp0_regs[CP0_INDEX_REG] = rrt32 & UINT32_C(0x8000003F);
-        if ((cp0_regs[CP0_INDEX_REG] & UINT32_C(0x3F)) > UINT32_C(31))
-        {
-            DebugMessage(M64MSG_ERROR, "MTC0 instruction writing Index register with TLB index > 31");
-            r4300->stop=1;
-        }
+    struct cp0* cp0 = &r4300->cp0;
+    uint32_t* regs = cp0->regs;
+    uint64_t data = (uint64_t)rrt;
+    uint64_t old = ((uint64_t)cp0->regs_hi[rfs] << 32) | regs[rfs];
+    cp0->latch = data;
+    switch (rfs) {
+    case 0: regs[0] = data & 0x8000003f; break;
+    case 2: case 3: regs[rfs] = data & 0x3fffffff; break;
+    case 4:
+        data = (data & ~UINT64_C(0x7fffff)) | (old & 0x7ffff0);
+        goto wide;
+    case 5: regs[5] = data & 0x01ffe000; break;
+    case 6: regs[6] = data & 63; break;
+    case 9:
+        cp0->interrupt_unsafe_state |= INTR_UNSAFE_R4300;
+        if (cp0->cycle_count >= 0) gen_interrupt(r4300);
+        cp0->interrupt_unsafe_state &= ~INTR_UNSAFE_R4300;
+        translate_event_queue(cp0, (uint32_t)data);
         break;
-    case CP0_RANDOM_REG:
+    case 10: data &= UINT64_C(0xc00000ffffffe0ff); goto wide;
+    case 11:
+        regs[11] = (uint32_t)data;
+        schedule_compare(cp0);
+        regs[13] &= ~CP0_CAUSE_IP7;
         break;
-    case CP0_ENTRYLO0_REG:
-        cp0_regs[CP0_ENTRYLO0_REG] = rrt32 & UINT32_C(0x3FFFFFFF);
+    case 12:
+        data = (data & 0xff57ffff) | (regs[12] & CP0_STATUS_TS);
+        if ((data ^ regs[12]) & CP0_STATUS_FR) set_fpr_pointers(&r4300->cp1, (uint32_t)data);
+        regs[12] = (uint32_t)data;
         break;
-    case CP0_ENTRYLO1_REG:
-        cp0_regs[CP0_ENTRYLO1_REG] = rrt32 & UINT32_C(0x3FFFFFFF);
-        break;
-    case CP0_CONTEXT_REG:
-        cp0_regs[CP0_CONTEXT_REG] = (rrt32 & UINT32_C(0xFF800000))
-            | (cp0_regs[CP0_CONTEXT_REG] & UINT32_C(0x007FFFF0));
-        break;
-    case CP0_PAGEMASK_REG:
-        cp0_regs[CP0_PAGEMASK_REG] = rrt32 & UINT32_C(0x01FFE000);
-        break;
-    case CP0_WIRED_REG:
-        cp0_regs[CP0_WIRED_REG] = rrt32;
-        cp0_regs[CP0_RANDOM_REG] = UINT32_C(31);
-        break;
-    case CP0_BADVADDR_REG:
-        break;
-    case CP0_COUNT_REG:
-        cp0_update_count(r4300);
-        r4300->cp0.interrupt_unsafe_state |= INTR_UNSAFE_R4300;
-        if (*cp0_cycle_count >= 0) { gen_interrupt(r4300); }
-        r4300->cp0.interrupt_unsafe_state &= ~INTR_UNSAFE_R4300;
-        translate_event_queue(&r4300->cp0, rrt32);
-        break;
-    case CP0_ENTRYHI_REG:
-        cp0_regs[CP0_ENTRYHI_REG] = rrt32 & UINT32_C(0xFFFFE0FF);
-        break;
-    case CP0_COMPARE_REG:
-        cp0_update_count(r4300);
-        remove_event(&r4300->cp0.q, COMPARE_INT);
-
-        cp0_regs[CP0_COUNT_REG] += r4300->cp0.count_per_op;
-        *cp0_cycle_count += r4300->cp0.count_per_op;
-        add_interrupt_event_count(&r4300->cp0, COMPARE_INT, rrt32);
-        cp0_regs[CP0_COUNT_REG] -= r4300->cp0.count_per_op;
-
-        *cp0_cycle_count = cp0_regs[CP0_COUNT_REG] - r4300->cp0.q.first->data.count;
-        cp0_regs[CP0_COMPARE_REG] = rrt32;
-        cp0_regs[CP0_CAUSE_REG] &= ~CP0_CAUSE_IP7;
-        break;
-    case CP0_STATUS_REG:
-        if ((rrt32 & CP0_STATUS_FR) != (cp0_regs[CP0_STATUS_REG] & CP0_STATUS_FR))
-            set_fpr_pointers(&r4300->cp1, rrt32);
-
-        cp0_regs[CP0_STATUS_REG] = rrt32;
-        ADD_TO_PC(1);
-        cp0_update_count(r4300);
-        r4300_check_interrupt(r4300, CP0_CAUSE_IP2, r4300->mi->regs[MI_INTR_REG] & r4300->mi->regs[MI_INTR_MASK_REG]); // ???
-        r4300->cp0.interrupt_unsafe_state |= INTR_UNSAFE_R4300;
-        if (*cp0_cycle_count >= 0) { gen_interrupt(r4300); }
-        r4300->cp0.interrupt_unsafe_state &= ~INTR_UNSAFE_R4300;
-        return;
-    case CP0_CAUSE_REG:
-        cp0_regs[CP0_CAUSE_REG] &= ~(CP0_CAUSE_IP0 | CP0_CAUSE_IP1);
-        cp0_regs[CP0_CAUSE_REG] |= rrt32 & (CP0_CAUSE_IP0 | CP0_CAUSE_IP1);
-        break;
-    case CP0_EPC_REG:
-        cp0_regs[CP0_EPC_REG] = rrt32;
-        break;
-    case CP0_PREVID_REG:
-        break;
-    case CP0_CONFIG_REG:
-        cp0_regs[CP0_CONFIG_REG] = rrt32;
-        break;
-    case CP0_WATCHLO_REG:
-        cp0_regs[CP0_WATCHLO_REG] = rrt32;
-        break;
-    case CP0_WATCHHI_REG:
-        cp0_regs[CP0_WATCHHI_REG] = rrt32;
-        break;
-    case CP0_TAGLO_REG:
-        cp0_regs[CP0_TAGLO_REG] = rrt32 & UINT32_C(0x0FFFFFC0);
-        break;
-    case CP0_TAGHI_REG:
-        cp0_regs[CP0_TAGHI_REG] = 0;
-        break;
-    case CP0_ERROREPC_REG:
-        cp0_regs[CP0_ERROREPC_REG] = rrt32;
-        break;
-    default:
-        DebugMessage(M64MSG_ERROR, "Unknown MTC0 write: %d", rfs);
-        r4300->stop=1;
+    case 13: regs[13] = (regs[13] & ~0x300) | (data & 0x300); break;
+    case 14: case 30: goto wide;
+    case 16: regs[16] = (regs[16] & ~UINT32_C(0x0f00800f)) | (data & 0x0f00800f); break;
+    case 17: case 28: regs[rfs] = (uint32_t)data; break;
+    case 18: regs[18] = data & 0xfffffffb; break;
+    case 19: regs[19] = data & 15; break;
+    case 20: data = (data & ~UINT64_C(0x1ffffffff)) | (old & UINT64_C(0x1fffffff0)); goto wide;
+    case 26: regs[26] = data & 255; break;
+    case 27: regs[27] = 0; break;
+    default: break; /* Read-only or write-latch-only register. */
     }
+    goto done;
+wide:
+    regs[rfs] = (uint32_t)data;
+    cp0->regs_hi[rfs] = (uint32_t)(data >> 32);
+done:
     ADD_TO_PC(1);
+    if (rfs == 12 || rfs == 13 || rfs == 11) {
+        r4300_check_interrupt(r4300, CP0_CAUSE_IP2,
+            r4300->mi->regs[MI_INTR_REG] & r4300->mi->regs[MI_INTR_MASK_REG]);
+    }
 }
 
+DECLARE_INSTRUCTION(COP0)
+{
+    unsigned int rs = RS_OF(op);
+    if (rs == 0 || rs == 1) { MFC0(r4300, op); return; }
+    if (rs == 4 || rs == 5) { MTC0(r4300, op); return; }
+    if (rs == 2 || rs == 6 || rs == 8) { ADD_TO_PC(1); return; }
+    if (rs >= 16) {
+        switch (op & 63) {
+        case 1: TLBR(r4300, op); return;
+        case 2: TLBWI(r4300, op); return;
+        case 6: TLBWR(r4300, op); return;
+        case 8: TLBP(r4300, op); return;
+        case 24: ERET(r4300, op); return;
+        }
+    }
+    NI(r4300, op);
+}
 /* CP1 load/store instructions */
 
 DECLARE_INSTRUCTION(LWC1)
@@ -1590,6 +1600,7 @@ DECLARE_INSTRUCTION(LWC1)
     const unsigned char lslfft = lfft;
     const uint32_t lslfaddr = (uint32_t) r4300->regs[lfbase] + lfoffset;
     if (check_cop1_unusable(r4300)) { return; }
+    if (check_alignment(r4300, lslfaddr, 3, 0)) return;
     ADD_TO_PC(1);
 
     r4300_read_aligned_word(r4300, lslfaddr, (uint32_t*)r4300->cp1.regs_simple[lslfft]);
@@ -1601,6 +1612,7 @@ DECLARE_INSTRUCTION(LDC1)
     const unsigned char lslfft = lfft;
     const uint32_t lslfaddr = (uint32_t) r4300->regs[lfbase] + lfoffset;
     if (check_cop1_unusable(r4300)) { return; }
+    if (check_alignment(r4300, lslfaddr, 7, 0)) return;
     ADD_TO_PC(1);
 
     r4300_read_aligned_dword(r4300, lslfaddr, (uint64_t*)r4300->cp1.regs_double[lslfft]);
@@ -1612,6 +1624,7 @@ DECLARE_INSTRUCTION(SWC1)
     const unsigned char lslfft = lfft;
     const uint32_t lslfaddr = (uint32_t) r4300->regs[lfbase] + lfoffset;
     if (check_cop1_unusable(r4300)) { return; }
+    if (check_alignment(r4300, lslfaddr, 3, 1)) return;
     ADD_TO_PC(1);
 
     r4300_write_aligned_word(r4300, lslfaddr, *((uint32_t*)(r4300->cp1.regs_simple)[lslfft]), ~UINT32_C(0));
@@ -1623,6 +1636,7 @@ DECLARE_INSTRUCTION(SDC1)
     const unsigned char lslfft = lfft;
     const uint32_t lslfaddr = (uint32_t) r4300->regs[lfbase] + lfoffset;
     if (check_cop1_unusable(r4300)) { return; }
+    if (check_alignment(r4300, lslfaddr, 7, 1)) return;
     ADD_TO_PC(1);
 
     r4300_write_aligned_dword(r4300, lslfaddr, *((uint64_t*)(r4300->cp1.regs_double)[lslfft]), ~UINT64_C(0));
@@ -1648,6 +1662,7 @@ DECLARE_INSTRUCTION(CFC1)
 {
     DECLARE_R4300
     if (check_cop1_unusable(r4300)) { return; }
+    rrt = 0;
     if (rfs==31)
     {
         rrt = SE32((r4300->cp1.fcr31));
@@ -1681,8 +1696,16 @@ DECLARE_INSTRUCTION(CTC1)
     if (check_cop1_unusable(r4300)) { return; }
     if (rfs==31)
     {
-        (r4300->cp1.fcr31) = rrt32;
+        (r4300->cp1.fcr31) = (uint32_t)rrt32 & UINT32_C(0x0183ffff);
         update_x86_rounding_mode(&r4300->cp1);
+        if ((r4300->cp1.fcr31 & UINT32_C(0x20000)) ||
+            ((r4300->cp1.fcr31 >> 12) & (r4300->cp1.fcr31 >> 7) & 31))
+        {
+            r4300->cp0.regs[CP0_CAUSE_REG] =
+                (r4300->cp0.regs[CP0_CAUSE_REG] & ~UINT32_C(0x3000007c)) | CP0_CAUSE_EXCCODE_FPE;
+            exception_general(r4300);
+            return;
+        }
     }
     //if (((r4300->cp1.fcr31) >> 7) & 0x1F) printf("FPU Exception enabled : %x\n",
     //                 (int)(((r4300->cp1.fcr31) >> 7) & 0x1F));
@@ -1690,695 +1713,20 @@ DECLARE_INSTRUCTION(CTC1)
 }
 
 
-DECLARE_INSTRUCTION(ABS_S)
-{
-    DECLARE_R4300
-    if (check_cop1_unusable(r4300)) { return; }
-    abs_s((r4300->cp1.regs_simple)[cffs], (r4300->cp1.regs_simple)[cffd]);
-    ADD_TO_PC(1);
-}
+#include "fpu_arithmetic.h"
 
-DECLARE_INSTRUCTION(ABS_D)
-{
-    DECLARE_R4300
-    if (check_cop1_unusable(r4300)) { return; }
-    abs_d((r4300->cp1.regs_double)[cffs], (r4300->cp1.regs_double)[cffd]);
-    ADD_TO_PC(1);
-}
-
-DECLARE_INSTRUCTION(ADD_S)
-{
-    DECLARE_R4300
-    if (check_cop1_unusable(r4300)) { return; }
-    add_s(r4300->cp1.fcr31, (r4300->cp1.regs_simple)[cffs], (r4300->cp1.regs_simple)[cfft], (r4300->cp1.regs_simple)[cffd]);
-    ADD_TO_PC(1);
-}
-
-DECLARE_INSTRUCTION(ADD_D)
-{
-    DECLARE_R4300
-    if (check_cop1_unusable(r4300)) { return; }
-    add_d(r4300->cp1.fcr31, (r4300->cp1.regs_double)[cffs], (r4300->cp1.regs_double)[cfft], (r4300->cp1.regs_double)[cffd]);
-    ADD_TO_PC(1);
-}
-
-DECLARE_INSTRUCTION(DIV_S)
-{
-    DECLARE_R4300
-    if (check_cop1_unusable(r4300)) { return; }
-    if (((r4300->cp1.fcr31) & UINT32_C(0x400)) && *(r4300->cp1.regs_simple)[cfft] == 0)
-    {
-        DebugMessage(M64MSG_ERROR, "DIV_S by 0");
-    }
-    div_s(r4300->cp1.fcr31, (r4300->cp1.regs_simple)[cffs], (r4300->cp1.regs_simple)[cfft], (r4300->cp1.regs_simple)[cffd]);
-    ADD_TO_PC(1);
-}
-
-DECLARE_INSTRUCTION(DIV_D)
-{
-    DECLARE_R4300
-    if (check_cop1_unusable(r4300)) { return; }
-    if (((r4300->cp1.fcr31) & UINT32_C(0x400)) && *(r4300->cp1.regs_double)[cfft] == 0)
-    {
-        //(r4300->cp1.fcr31) |= 0x8020;
-        /*(r4300->cp1.fcr31) |= 0x8000;
-          Cause = 15 << 2;
-          exception_general(r4300);*/
-        DebugMessage(M64MSG_ERROR, "DIV_D by 0");
-        //return;
-    }
-    div_d(r4300->cp1.fcr31, (r4300->cp1.regs_double)[cffs], (r4300->cp1.regs_double)[cfft], (r4300->cp1.regs_double)[cffd]);
-    ADD_TO_PC(1);
-}
-
-DECLARE_INSTRUCTION(MOV_S)
-{
-    DECLARE_R4300
-    if (check_cop1_unusable(r4300)) { return; }
-    mov_s((r4300->cp1.regs_simple)[cffs], (r4300->cp1.regs_simple)[cffd]);
-    ADD_TO_PC(1);
-}
-
-DECLARE_INSTRUCTION(MOV_D)
-{
-    DECLARE_R4300
-    if (check_cop1_unusable(r4300)) { return; }
-    mov_d((r4300->cp1.regs_double)[cffs], (r4300->cp1.regs_double)[cffd]);
-    ADD_TO_PC(1);
-}
-
-DECLARE_INSTRUCTION(MUL_S)
-{
-    DECLARE_R4300
-    if (check_cop1_unusable(r4300)) { return; }
-    mul_s(r4300->cp1.fcr31, (r4300->cp1.regs_simple)[cffs], (r4300->cp1.regs_simple)[cfft], (r4300->cp1.regs_simple)[cffd]);
-    ADD_TO_PC(1);
-}
-
-DECLARE_INSTRUCTION(MUL_D)
-{
-    DECLARE_R4300
-    if (check_cop1_unusable(r4300)) { return; }
-    mul_d(r4300->cp1.fcr31, (r4300->cp1.regs_double)[cffs], (r4300->cp1.regs_double)[cfft], (r4300->cp1.regs_double)[cffd]);
-    ADD_TO_PC(1);
-}
-
-DECLARE_INSTRUCTION(NEG_S)
-{
-    DECLARE_R4300
-    if (check_cop1_unusable(r4300)) { return; }
-    neg_s((r4300->cp1.regs_simple)[cffs], (r4300->cp1.regs_simple)[cffd]);
-    ADD_TO_PC(1);
-}
-
-DECLARE_INSTRUCTION(NEG_D)
-{
-    DECLARE_R4300
-    if (check_cop1_unusable(r4300)) { return; }
-    neg_d((r4300->cp1.regs_double)[cffs], (r4300->cp1.regs_double)[cffd]);
-    ADD_TO_PC(1);
-}
-
-DECLARE_INSTRUCTION(SQRT_S)
-{
-    DECLARE_R4300
-    if (check_cop1_unusable(r4300)) { return; }
-    sqrt_s(r4300->cp1.fcr31, (r4300->cp1.regs_simple)[cffs], (r4300->cp1.regs_simple)[cffd]);
-    ADD_TO_PC(1);
-}
-
-DECLARE_INSTRUCTION(SQRT_D)
-{
-    DECLARE_R4300
-    if (check_cop1_unusable(r4300)) { return; }
-    sqrt_d(r4300->cp1.fcr31, (r4300->cp1.regs_double)[cffs], (r4300->cp1.regs_double)[cffd]);
-    ADD_TO_PC(1);
-}
-
-DECLARE_INSTRUCTION(SUB_S)
-{
-    DECLARE_R4300
-    if (check_cop1_unusable(r4300)) { return; }
-    sub_s(r4300->cp1.fcr31, (r4300->cp1.regs_simple)[cffs], (r4300->cp1.regs_simple)[cfft], (r4300->cp1.regs_simple)[cffd]);
-    ADD_TO_PC(1);
-}
-
-DECLARE_INSTRUCTION(SUB_D)
-{
-    DECLARE_R4300
-    if (check_cop1_unusable(r4300)) { return; }
-    sub_d(r4300->cp1.fcr31, (r4300->cp1.regs_double)[cffs], (r4300->cp1.regs_double)[cfft], (r4300->cp1.regs_double)[cffd]);
-    ADD_TO_PC(1);
-}
-
-DECLARE_INSTRUCTION(TRUNC_W_S)
-{
-    DECLARE_R4300
-    if (check_cop1_unusable(r4300)) { return; }
-    trunc_w_s((r4300->cp1.regs_simple)[cffs], (int32_t*) (r4300->cp1.regs_simple)[cffd]);
-    ADD_TO_PC(1);
-}
-
-DECLARE_INSTRUCTION(TRUNC_W_D)
-{
-    DECLARE_R4300
-    if (check_cop1_unusable(r4300)) { return; }
-    trunc_w_d((r4300->cp1.regs_double)[cffs], (int32_t*) (r4300->cp1.regs_simple)[cffd]);
-    ADD_TO_PC(1);
-}
-
-DECLARE_INSTRUCTION(TRUNC_L_S)
-{
-    DECLARE_R4300
-    if (check_cop1_unusable(r4300)) { return; }
-    trunc_l_s((r4300->cp1.regs_simple)[cffs], (int64_t*) (r4300->cp1.regs_double)[cffd]);
-    ADD_TO_PC(1);
-}
-
-DECLARE_INSTRUCTION(TRUNC_L_D)
-{
-    DECLARE_R4300
-    if (check_cop1_unusable(r4300)) { return; }
-    trunc_l_d((r4300->cp1.regs_double)[cffs], (int64_t*) (r4300->cp1.regs_double)[cffd]);
-    ADD_TO_PC(1);
-}
-
-DECLARE_INSTRUCTION(ROUND_W_S)
-{
-    DECLARE_R4300
-    if (check_cop1_unusable(r4300)) { return; }
-    round_w_s((r4300->cp1.regs_simple)[cffs], (int32_t*) (r4300->cp1.regs_simple)[cffd]);
-    ADD_TO_PC(1);
-}
-
-DECLARE_INSTRUCTION(ROUND_W_D)
-{
-    DECLARE_R4300
-    if (check_cop1_unusable(r4300)) { return; }
-    round_w_d((r4300->cp1.regs_double)[cffs], (int32_t*) (r4300->cp1.regs_simple)[cffd]);
-    ADD_TO_PC(1);
-}
-
-DECLARE_INSTRUCTION(ROUND_L_S)
-{
-    DECLARE_R4300
-    if (check_cop1_unusable(r4300)) { return; }
-    round_l_s((r4300->cp1.regs_simple)[cffs], (int64_t*) (r4300->cp1.regs_double)[cffd]);
-    ADD_TO_PC(1);
-}
-
-DECLARE_INSTRUCTION(ROUND_L_D)
-{
-    DECLARE_R4300
-    if (check_cop1_unusable(r4300)) { return; }
-    round_l_d((r4300->cp1.regs_double)[cffs], (int64_t*) (r4300->cp1.regs_double)[cffd]);
-    ADD_TO_PC(1);
-}
-
-DECLARE_INSTRUCTION(CEIL_W_S)
-{
-    DECLARE_R4300
-    if (check_cop1_unusable(r4300)) { return; }
-    ceil_w_s((r4300->cp1.regs_simple)[cffs], (int32_t*) (r4300->cp1.regs_simple)[cffd]);
-    ADD_TO_PC(1);
-}
-
-DECLARE_INSTRUCTION(CEIL_W_D)
-{
-    DECLARE_R4300
-    if (check_cop1_unusable(r4300)) { return; }
-    ceil_w_d((r4300->cp1.regs_double)[cffs], (int32_t*) (r4300->cp1.regs_simple)[cffd]);
-    ADD_TO_PC(1);
-}
-
-DECLARE_INSTRUCTION(CEIL_L_S)
-{
-    DECLARE_R4300
-    if (check_cop1_unusable(r4300)) { return; }
-    ceil_l_s((r4300->cp1.regs_simple)[cffs], (int64_t*) (r4300->cp1.regs_double)[cffd]);
-    ADD_TO_PC(1);
-}
-
-DECLARE_INSTRUCTION(CEIL_L_D)
-{
-    DECLARE_R4300
-    if (check_cop1_unusable(r4300)) { return; }
-    ceil_l_d((r4300->cp1.regs_double)[cffs], (int64_t*) (r4300->cp1.regs_double)[cffd]);
-    ADD_TO_PC(1);
-}
-
-DECLARE_INSTRUCTION(FLOOR_W_S)
-{
-    DECLARE_R4300
-    if (check_cop1_unusable(r4300)) { return; }
-    floor_w_s((r4300->cp1.regs_simple)[cffs], (int32_t*) (r4300->cp1.regs_simple)[cffd]);
-    ADD_TO_PC(1);
-}
-
-DECLARE_INSTRUCTION(FLOOR_W_D)
-{
-    DECLARE_R4300
-    if (check_cop1_unusable(r4300)) { return; }
-    floor_w_d((r4300->cp1.regs_double)[cffs], (int32_t*) (r4300->cp1.regs_simple)[cffd]);
-    ADD_TO_PC(1);
-}
-
-DECLARE_INSTRUCTION(FLOOR_L_S)
-{
-    DECLARE_R4300
-    if (check_cop1_unusable(r4300)) { return; }
-    floor_l_s((r4300->cp1.regs_simple)[cffs], (int64_t*) (r4300->cp1.regs_double)[cffd]);
-    ADD_TO_PC(1);
-}
-
-DECLARE_INSTRUCTION(FLOOR_L_D)
-{
-    DECLARE_R4300
-    if (check_cop1_unusable(r4300)) { return; }
-    floor_l_d((r4300->cp1.regs_double)[cffs], (int64_t*) (r4300->cp1.regs_double)[cffd]);
-    ADD_TO_PC(1);
-}
-
-DECLARE_INSTRUCTION(CVT_S_D)
-{
-    DECLARE_R4300
-    if (check_cop1_unusable(r4300)) { return; }
-    cvt_s_d(r4300->cp1.fcr31, (r4300->cp1.regs_double)[cffs], (r4300->cp1.regs_simple)[cffd]);
-    ADD_TO_PC(1);
-}
-
-DECLARE_INSTRUCTION(CVT_S_W)
-{
-    DECLARE_R4300
-    if (check_cop1_unusable(r4300)) { return; }
-    cvt_s_w(r4300->cp1.fcr31, (int32_t*) (r4300->cp1.regs_simple)[cffs], (r4300->cp1.regs_simple)[cffd]);
-    ADD_TO_PC(1);
-}
-
-DECLARE_INSTRUCTION(CVT_S_L)
-{
-    DECLARE_R4300
-    if (check_cop1_unusable(r4300)) { return; }
-    cvt_s_l(r4300->cp1.fcr31, (int64_t*) (r4300->cp1.regs_double)[cffs], (r4300->cp1.regs_simple)[cffd]);
-    ADD_TO_PC(1);
-}
-
-DECLARE_INSTRUCTION(CVT_D_S)
-{
-    DECLARE_R4300
-    if (check_cop1_unusable(r4300)) { return; }
-    cvt_d_s((r4300->cp1.regs_simple)[cffs], (r4300->cp1.regs_double)[cffd]);
-    ADD_TO_PC(1);
-}
-
-DECLARE_INSTRUCTION(CVT_D_W)
-{
-    DECLARE_R4300
-    if (check_cop1_unusable(r4300)) { return; }
-    cvt_d_w((int32_t*) (r4300->cp1.regs_simple)[cffs], (r4300->cp1.regs_double)[cffd]);
-    ADD_TO_PC(1);
-}
-
-DECLARE_INSTRUCTION(CVT_D_L)
-{
-    DECLARE_R4300
-    if (check_cop1_unusable(r4300)) { return; }
-    cvt_d_l(r4300->cp1.fcr31, (int64_t*) (r4300->cp1.regs_double)[cffs], (r4300->cp1.regs_double)[cffd]);
-    ADD_TO_PC(1);
-}
-
-DECLARE_INSTRUCTION(CVT_W_S)
-{
-    DECLARE_R4300
-    if (check_cop1_unusable(r4300)) { return; }
-    cvt_w_s(r4300->cp1.fcr31, (r4300->cp1.regs_simple)[cffs], (int32_t*) (r4300->cp1.regs_simple)[cffd]);
-    ADD_TO_PC(1);
-}
-
-DECLARE_INSTRUCTION(CVT_W_D)
-{
-    DECLARE_R4300
-    if (check_cop1_unusable(r4300)) { return; }
-    cvt_w_d(r4300->cp1.fcr31, (r4300->cp1.regs_double)[cffs], (int32_t*) (r4300->cp1.regs_simple)[cffd]);
-    ADD_TO_PC(1);
-}
-
-DECLARE_INSTRUCTION(CVT_L_S)
-{
-    DECLARE_R4300
-    if (check_cop1_unusable(r4300)) { return; }
-    cvt_l_s(r4300->cp1.fcr31, (r4300->cp1.regs_simple)[cffs], (int64_t*) (r4300->cp1.regs_double)[cffd]);
-    ADD_TO_PC(1);
-}
-
-DECLARE_INSTRUCTION(CVT_L_D)
-{
-    DECLARE_R4300
-    if (check_cop1_unusable(r4300)) { return; }
-    cvt_l_d(r4300->cp1.fcr31, (r4300->cp1.regs_double)[cffs], (int64_t*) (r4300->cp1.regs_double)[cffd]);
-    ADD_TO_PC(1);
-}
-
-DECLARE_INSTRUCTION(C_F_S)
-{
-    DECLARE_R4300
-    if (check_cop1_unusable(r4300)) { return; }
-    c_f_s(&r4300->cp1.fcr31);
-    ADD_TO_PC(1);
-}
-
-DECLARE_INSTRUCTION(C_F_D)
-{
-    DECLARE_R4300
-    if (check_cop1_unusable(r4300)) { return; }
-    c_f_d(&r4300->cp1.fcr31);
-    ADD_TO_PC(1);
-}
-
-DECLARE_INSTRUCTION(C_UN_S)
-{
-    DECLARE_R4300
-    if (check_cop1_unusable(r4300)) { return; }
-    c_un_s(&r4300->cp1.fcr31, (r4300->cp1.regs_simple)[cffs], (r4300->cp1.regs_simple)[cfft]);
-    ADD_TO_PC(1);
-}
-
-DECLARE_INSTRUCTION(C_UN_D)
-{
-    DECLARE_R4300
-    if (check_cop1_unusable(r4300)) { return; }
-    c_un_d(&r4300->cp1.fcr31, (r4300->cp1.regs_double)[cffs], (r4300->cp1.regs_double)[cfft]);
-    ADD_TO_PC(1);
-}
-
-DECLARE_INSTRUCTION(C_EQ_S)
-{
-    DECLARE_R4300
-    if (check_cop1_unusable(r4300)) { return; }
-    c_eq_s(&r4300->cp1.fcr31, (r4300->cp1.regs_simple)[cffs], (r4300->cp1.regs_simple)[cfft]);
-    ADD_TO_PC(1);
-}
-
-DECLARE_INSTRUCTION(C_EQ_D)
-{
-    DECLARE_R4300
-    if (check_cop1_unusable(r4300)) { return; }
-    c_eq_d(&r4300->cp1.fcr31, (r4300->cp1.regs_double)[cffs], (r4300->cp1.regs_double)[cfft]);
-    ADD_TO_PC(1);
-}
-
-DECLARE_INSTRUCTION(C_UEQ_S)
-{
-    DECLARE_R4300
-    if (check_cop1_unusable(r4300)) { return; }
-    c_ueq_s(&r4300->cp1.fcr31, (r4300->cp1.regs_simple)[cffs], (r4300->cp1.regs_simple)[cfft]);
-    ADD_TO_PC(1);
-}
-
-DECLARE_INSTRUCTION(C_UEQ_D)
-{
-    DECLARE_R4300
-    if (check_cop1_unusable(r4300)) { return; }
-    c_ueq_d(&r4300->cp1.fcr31, (r4300->cp1.regs_double)[cffs], (r4300->cp1.regs_double)[cfft]);
-    ADD_TO_PC(1);
-}
-
-DECLARE_INSTRUCTION(C_OLT_S)
-{
-    DECLARE_R4300
-    if (check_cop1_unusable(r4300)) { return; }
-    c_olt_s(&r4300->cp1.fcr31, (r4300->cp1.regs_simple)[cffs], (r4300->cp1.regs_simple)[cfft]);
-    ADD_TO_PC(1);
-}
-
-DECLARE_INSTRUCTION(C_OLT_D)
-{
-    DECLARE_R4300
-    if (check_cop1_unusable(r4300)) { return; }
-    c_olt_d(&r4300->cp1.fcr31, (r4300->cp1.regs_double)[cffs], (r4300->cp1.regs_double)[cfft]);
-    ADD_TO_PC(1);
-}
-
-DECLARE_INSTRUCTION(C_ULT_S)
-{
-    DECLARE_R4300
-    if (check_cop1_unusable(r4300)) { return; }
-    c_ult_s(&r4300->cp1.fcr31, (r4300->cp1.regs_simple)[cffs], (r4300->cp1.regs_simple)[cfft]);
-    ADD_TO_PC(1);
-}
-
-DECLARE_INSTRUCTION(C_ULT_D)
-{
-    DECLARE_R4300
-    if (check_cop1_unusable(r4300)) { return; }
-    c_ult_d(&r4300->cp1.fcr31, (r4300->cp1.regs_double)[cffs], (r4300->cp1.regs_double)[cfft]);
-    ADD_TO_PC(1);
-}
-
-DECLARE_INSTRUCTION(C_OLE_S)
-{
-    DECLARE_R4300
-    if (check_cop1_unusable(r4300)) { return; }
-    c_ole_s(&r4300->cp1.fcr31, (r4300->cp1.regs_simple)[cffs], (r4300->cp1.regs_simple)[cfft]);
-    ADD_TO_PC(1);
-}
-
-DECLARE_INSTRUCTION(C_OLE_D)
-{
-    DECLARE_R4300
-    if (check_cop1_unusable(r4300)) { return; }
-    c_ole_d(&r4300->cp1.fcr31, (r4300->cp1.regs_double)[cffs], (r4300->cp1.regs_double)[cfft]);
-    ADD_TO_PC(1);
-}
-
-DECLARE_INSTRUCTION(C_ULE_S)
-{
-    DECLARE_R4300
-    if (check_cop1_unusable(r4300)) { return; }
-    c_ule_s(&r4300->cp1.fcr31, (r4300->cp1.regs_simple)[cffs], (r4300->cp1.regs_simple)[cfft]);
-    ADD_TO_PC(1);
-}
-
-DECLARE_INSTRUCTION(C_ULE_D)
-{
-    DECLARE_R4300
-    if (check_cop1_unusable(r4300)) { return; }
-    c_ule_d(&r4300->cp1.fcr31, (r4300->cp1.regs_double)[cffs], (r4300->cp1.regs_double)[cfft]);
-    ADD_TO_PC(1);
-}
-
-DECLARE_INSTRUCTION(C_SF_S)
-{
-    DECLARE_R4300
-    if (check_cop1_unusable(r4300)) { return; }
-    if (isnan(*(r4300->cp1.regs_simple)[cffs]) || isnan(*(r4300->cp1.regs_simple)[cfft]))
-    {
-        DebugMessage(M64MSG_ERROR, "Invalid operation exception in C opcode");
-        r4300->stop=1;
-    }
-    c_sf_s(&r4300->cp1.fcr31, (r4300->cp1.regs_simple)[cffs], (r4300->cp1.regs_simple)[cfft]);
-    ADD_TO_PC(1);
-}
-
-DECLARE_INSTRUCTION(C_SF_D)
-{
-    DECLARE_R4300
-    if (isnan(*(r4300->cp1.regs_double)[cffs]) || isnan(*(r4300->cp1.regs_double)[cfft]))
-    {
-        DebugMessage(M64MSG_ERROR, "Invalid operation exception in C opcode");
-        r4300->stop=1;
-    }
-    c_sf_d(&r4300->cp1.fcr31, (r4300->cp1.regs_double)[cffs], (r4300->cp1.regs_double)[cfft]);
-    ADD_TO_PC(1);
-}
-
-DECLARE_INSTRUCTION(C_NGLE_S)
-{
-    DECLARE_R4300
-    if (check_cop1_unusable(r4300)) { return; }
-    if (isnan(*(r4300->cp1.regs_simple)[cffs]) || isnan(*(r4300->cp1.regs_simple)[cfft]))
-    {
-        DebugMessage(M64MSG_ERROR, "Invalid operation exception in C opcode");
-        r4300->stop=1;
-    }
-    c_ngle_s(&r4300->cp1.fcr31, (r4300->cp1.regs_simple)[cffs], (r4300->cp1.regs_simple)[cfft]);
-    ADD_TO_PC(1);
-}
-
-DECLARE_INSTRUCTION(C_NGLE_D)
-{
-    DECLARE_R4300
-    if (isnan(*(r4300->cp1.regs_double)[cffs]) || isnan(*(r4300->cp1.regs_double)[cfft]))
-    {
-        DebugMessage(M64MSG_ERROR, "Invalid operation exception in C opcode");
-        r4300->stop=1;
-    }
-    c_ngle_d(&r4300->cp1.fcr31, (r4300->cp1.regs_double)[cffs], (r4300->cp1.regs_double)[cfft]);
-    ADD_TO_PC(1);
-}
-
-DECLARE_INSTRUCTION(C_SEQ_S)
-{
-    DECLARE_R4300
-    if (check_cop1_unusable(r4300)) { return; }
-    if (isnan(*(r4300->cp1.regs_simple)[cffs]) || isnan(*(r4300->cp1.regs_simple)[cfft]))
-    {
-        DebugMessage(M64MSG_ERROR, "Invalid operation exception in C opcode");
-        r4300->stop=1;
-    }
-    c_seq_s(&r4300->cp1.fcr31, (r4300->cp1.regs_simple)[cffs], (r4300->cp1.regs_simple)[cfft]);
-    ADD_TO_PC(1);
-}
-
-DECLARE_INSTRUCTION(C_SEQ_D)
-{
-    DECLARE_R4300
-    if (isnan(*(r4300->cp1.regs_double)[cffs]) || isnan(*(r4300->cp1.regs_double)[cfft]))
-    {
-        DebugMessage(M64MSG_ERROR, "Invalid operation exception in C opcode");
-        r4300->stop=1;
-    }
-    c_seq_d(&r4300->cp1.fcr31, (r4300->cp1.regs_double)[cffs], (r4300->cp1.regs_double)[cfft]);
-    ADD_TO_PC(1);
-}
-
-DECLARE_INSTRUCTION(C_NGL_S)
-{
-    DECLARE_R4300
-    if (check_cop1_unusable(r4300)) { return; }
-    if (isnan(*(r4300->cp1.regs_simple)[cffs]) || isnan(*(r4300->cp1.regs_simple)[cfft]))
-    {
-        DebugMessage(M64MSG_ERROR, "Invalid operation exception in C opcode");
-        r4300->stop=1;
-    }
-    c_ngl_s(&r4300->cp1.fcr31, (r4300->cp1.regs_simple)[cffs], (r4300->cp1.regs_simple)[cfft]);
-    ADD_TO_PC(1);
-}
-
-DECLARE_INSTRUCTION(C_NGL_D)
-{
-    DECLARE_R4300
-    if (isnan(*(r4300->cp1.regs_double)[cffs]) || isnan(*(r4300->cp1.regs_double)[cfft]))
-    {
-        DebugMessage(M64MSG_ERROR, "Invalid operation exception in C opcode");
-        r4300->stop=1;
-    }
-    c_ngl_d(&r4300->cp1.fcr31, (r4300->cp1.regs_double)[cffs], (r4300->cp1.regs_double)[cfft]);
-    ADD_TO_PC(1);
-}
-
-DECLARE_INSTRUCTION(C_LT_S)
-{
-    DECLARE_R4300
-    if (check_cop1_unusable(r4300)) { return; }
-    if (isnan(*(r4300->cp1.regs_simple)[cffs]) || isnan(*(r4300->cp1.regs_simple)[cfft]))
-    {
-        DebugMessage(M64MSG_ERROR, "Invalid operation exception in C opcode");
-        r4300->stop=1;
-    }
-    c_lt_s(&r4300->cp1.fcr31, (r4300->cp1.regs_simple)[cffs], (r4300->cp1.regs_simple)[cfft]);
-    ADD_TO_PC(1);
-}
-
-DECLARE_INSTRUCTION(C_LT_D)
-{
-    DECLARE_R4300
-    if (check_cop1_unusable(r4300)) { return; }
-    if (isnan(*(r4300->cp1.regs_double)[cffs]) || isnan(*(r4300->cp1.regs_double)[cfft]))
-    {
-        DebugMessage(M64MSG_ERROR, "Invalid operation exception in C opcode");
-        r4300->stop=1;
-    }
-    c_lt_d(&r4300->cp1.fcr31, (r4300->cp1.regs_double)[cffs], (r4300->cp1.regs_double)[cfft]);
-    ADD_TO_PC(1);
-}
-
-DECLARE_INSTRUCTION(C_NGE_S)
-{
-    DECLARE_R4300
-    if (check_cop1_unusable(r4300)) { return; }
-    if (isnan(*(r4300->cp1.regs_simple)[cffs]) || isnan(*(r4300->cp1.regs_simple)[cfft]))
-    {
-        DebugMessage(M64MSG_ERROR, "Invalid operation exception in C opcode");
-        r4300->stop=1;
-    }
-    c_nge_s(&r4300->cp1.fcr31, (r4300->cp1.regs_simple)[cffs], (r4300->cp1.regs_simple)[cfft]);
-    ADD_TO_PC(1);
-}
-
-DECLARE_INSTRUCTION(C_NGE_D)
-{
-    DECLARE_R4300
-    if (check_cop1_unusable(r4300)) { return; }
-    if (isnan(*(r4300->cp1.regs_double)[cffs]) || isnan(*(r4300->cp1.regs_double)[cfft]))
-    {
-        DebugMessage(M64MSG_ERROR, "Invalid operation exception in C opcode");
-        r4300->stop=1;
-    }
-    c_nge_d(&r4300->cp1.fcr31, (r4300->cp1.regs_double)[cffs], (r4300->cp1.regs_double)[cfft]);
-    ADD_TO_PC(1);
-}
-
-DECLARE_INSTRUCTION(C_LE_S)
-{
-    DECLARE_R4300
-    if (check_cop1_unusable(r4300)) { return; }
-    if (isnan(*(r4300->cp1.regs_simple)[cffs]) || isnan(*(r4300->cp1.regs_simple)[cfft]))
-    {
-        DebugMessage(M64MSG_ERROR, "Invalid operation exception in C opcode");
-        r4300->stop=1;
-    }
-    c_le_s(&r4300->cp1.fcr31, (r4300->cp1.regs_simple)[cffs], (r4300->cp1.regs_simple)[cfft]);
-    ADD_TO_PC(1);
-}
-
-DECLARE_INSTRUCTION(C_LE_D)
-{
-    DECLARE_R4300
-    if (check_cop1_unusable(r4300)) { return; }
-    if (isnan(*(r4300->cp1.regs_double)[cffs]) || isnan(*(r4300->cp1.regs_double)[cfft]))
-    {
-        DebugMessage(M64MSG_ERROR, "Invalid operation exception in C opcode");
-        r4300->stop=1;
-    }
-    c_le_d(&r4300->cp1.fcr31, (r4300->cp1.regs_double)[cffs], (r4300->cp1.regs_double)[cfft]);
-    ADD_TO_PC(1);
-}
-
-DECLARE_INSTRUCTION(C_NGT_S)
-{
-    DECLARE_R4300
-    if (check_cop1_unusable(r4300)) { return; }
-    if (isnan(*(r4300->cp1.regs_simple)[cffs]) || isnan(*(r4300->cp1.regs_simple)[cfft]))
-    {
-        DebugMessage(M64MSG_ERROR, "Invalid operation exception in C opcode");
-        r4300->stop=1;
-    }
-    c_ngt_s(&r4300->cp1.fcr31, (r4300->cp1.regs_simple)[cffs], (r4300->cp1.regs_simple)[cfft]);
-    ADD_TO_PC(1);
-}
-
-DECLARE_INSTRUCTION(C_NGT_D)
-{
-    DECLARE_R4300
-    if (check_cop1_unusable(r4300)) { return; }
-    if (isnan(*(r4300->cp1.regs_double)[cffs]) || isnan(*(r4300->cp1.regs_double)[cfft]))
-    {
-        DebugMessage(M64MSG_ERROR, "Invalid operation exception in C opcode");
-        r4300->stop=1;
-    }
-    c_ngt_d(&r4300->cp1.fcr31, (r4300->cp1.regs_double)[cffs], (r4300->cp1.regs_double)[cfft]);
-    ADD_TO_PC(1);
-}
+#include "fpu_compare.h"
 
 r4300_interp_handler pure_interp_decode(uint32_t op, int idle)
 {
+    if ((op >> 26) == 16) return COP0;
     const struct r4300_idec* idec = r4300_get_idec(op);
     const unsigned int fmt = (op >> 21) & 0x1f;
+    if ((op >> 26) == 17 && fmt == 8 && RT_OF(op) >= 4) return NI;
 
 #define PI_RETURN(name) case R4300_OP_##name: return name
-#define PI_RETURN_RD(name) case R4300_OP_##name: return RD_OF(op) != 0 ? name : NOP
-#define PI_RETURN_RT(name) case R4300_OP_##name: return RT_OF(op) != 0 ? name : NOP
+#define PI_RETURN_RD(name) case R4300_OP_##name: return name
+#define PI_RETURN_RT(name) case R4300_OP_##name: return name
 #define PI_RETURN_BRANCH(name) case R4300_OP_##name: return idle ? name##_IDLE : name
 
     switch (idec->opcode)
@@ -2412,7 +1760,7 @@ r4300_interp_handler pure_interp_decode(uint32_t op, int idle)
     PI_RETURN_BRANCH(BNEL);
 
     case R4300_OP_BREAK:
-        return NI;
+        return BREAK;
     PI_RETURN(CACHE);
     PI_RETURN_RT(CFC1);
     PI_RETURN(CTC1);
@@ -2456,8 +1804,7 @@ r4300_interp_handler pure_interp_decode(uint32_t op, int idle)
     PI_RETURN_RT(LH);
     PI_RETURN_RT(LHU);
     PI_RETURN_RT(LL);
-    case R4300_OP_LLD:
-        return NI;
+    case R4300_OP_LLD: return LLD;
     PI_RETURN_RT(LUI);
     PI_RETURN_RT(LW);
     PI_RETURN(LWC1);
@@ -2483,8 +1830,7 @@ r4300_interp_handler pure_interp_decode(uint32_t op, int idle)
 
     PI_RETURN(SB);
     PI_RETURN_RT(SC);
-    case R4300_OP_SCD:
-        return NI;
+    case R4300_OP_SCD: return SCD;
     PI_RETURN(SD);
     PI_RETURN(SDC1);
     PI_RETURN(SDL);
@@ -2643,6 +1989,14 @@ static void InterpretOpcode(struct r4300_core* r4300, bool continuous)
 next_opcode: ;
     const uint32_t pc = r4300->interp_PC.addr;
     uint32_t* op_address;
+    if (M64P_UNLIKELY(pc & 3)) {
+        cp0_step_cycles(&r4300->cp0, 1);
+        check_alignment(r4300, pc, 3, 0);
+        if (!r4300->delay_slot && r4300->cp0.cycle_count >= 0) gen_interrupt(r4300);
+        sequential_op = NULL;
+        if (continuous && !breakloop) goto next_opcode;
+        return;
+    }
 
     if (M64P_LIKELY(continuous && sequential_op != NULL && pc == sequential_pc))
     {
@@ -2663,6 +2017,9 @@ next_opcode: ;
         op_address = interp_fast_mem_access(r4300, pc);
         if (M64P_UNLIKELY(op_address == NULL))
         {
+            cp0_step_cycles(&r4300->cp0, 1);
+            if (!r4300->delay_slot && r4300->cp0.cycle_count >= 0)
+                gen_interrupt(r4300);
             sequential_op = NULL;
             if (continuous && !breakloop)
                 goto next_opcode;
@@ -2684,6 +2041,7 @@ next_opcode: ;
     }
 
     const uint32_t op = *op_address;
+    if (!r4300_begin_instruction(r4300, op, pc)) goto instruction_done;
     if (M64P_UNLIKELY(op == 0))
     {
         r4300->interp_PC.addr = pc + 4;
@@ -2744,28 +2102,22 @@ next_opcode: ;
         switch (op & 0x3F) {
 #endif
         M64P_SPECIAL_CASE(0) /* SPECIAL opcode 0: SLL */
-            if (M64P_LIKELY(RD_OF(op) != 0)) SLL(r4300, op);
-            else r4300->interp_PC.addr = pc + 4;
+            SLL(r4300, op);
             break;
         M64P_SPECIAL_CASE(2) /* SPECIAL opcode 2: SRL */
-            if (M64P_LIKELY(RD_OF(op) != 0)) SRL(r4300, op);
-            else r4300->interp_PC.addr = pc + 4;
+            SRL(r4300, op);
             break;
         M64P_SPECIAL_CASE(3) /* SPECIAL opcode 3: SRA */
-            if (M64P_LIKELY(RD_OF(op) != 0)) SRA(r4300, op);
-            else r4300->interp_PC.addr = pc + 4;
+            SRA(r4300, op);
             break;
         M64P_SPECIAL_CASE(4) /* SPECIAL opcode 4: SLLV */
-            if (M64P_LIKELY(RD_OF(op) != 0)) SLLV(r4300, op);
-            else r4300->interp_PC.addr = pc + 4;
+            SLLV(r4300, op);
             break;
         M64P_SPECIAL_CASE(6) /* SPECIAL opcode 6: SRLV */
-            if (M64P_LIKELY(RD_OF(op) != 0)) SRLV(r4300, op);
-            else r4300->interp_PC.addr = pc + 4;
+            SRLV(r4300, op);
             break;
         M64P_SPECIAL_CASE(7) /* SPECIAL opcode 7: SRAV */
-            if (M64P_LIKELY(RD_OF(op) != 0)) SRAV(r4300, op);
-            else r4300->interp_PC.addr = pc + 4;
+            SRAV(r4300, op);
             break;
         M64P_SPECIAL_CASE(8) JR(r4300, op); break;
         M64P_SPECIAL_CASE(9) /* SPECIAL opcode 9: JALR */
@@ -2774,30 +2126,25 @@ next_opcode: ;
             break;
         M64P_SPECIAL_CASE(12) SYSCALL(r4300, op); break;
         M64P_SPECIAL_CASE(13) 
-            NI(r4300, op);
+            BREAK(r4300, op);
             break;
         M64P_SPECIAL_CASE(15) SYNC(r4300, op); break;
         M64P_SPECIAL_CASE(16) /* SPECIAL opcode 16: MFHI */
-            if (M64P_LIKELY(RD_OF(op) != 0)) MFHI(r4300, op);
-            else r4300->interp_PC.addr = pc + 4;
+            MFHI(r4300, op);
             break;
         M64P_SPECIAL_CASE(17) MTHI(r4300, op); break;
         M64P_SPECIAL_CASE(18) /* SPECIAL opcode 18: MFLO */
-            if (M64P_LIKELY(RD_OF(op) != 0)) MFLO(r4300, op);
-            else r4300->interp_PC.addr = pc + 4;
+            MFLO(r4300, op);
             break;
         M64P_SPECIAL_CASE(19) MTLO(r4300, op); break;
         M64P_SPECIAL_CASE(20) /* SPECIAL opcode 20: DSLLV */
-            if (M64P_LIKELY(RD_OF(op) != 0)) DSLLV(r4300, op);
-            else r4300->interp_PC.addr = pc + 4;
+            DSLLV(r4300, op);
             break;
         M64P_SPECIAL_CASE(22) /* SPECIAL opcode 22: DSRLV */
-            if (M64P_LIKELY(RD_OF(op) != 0)) DSRLV(r4300, op);
-            else r4300->interp_PC.addr = pc + 4;
+            DSRLV(r4300, op);
             break;
         M64P_SPECIAL_CASE(23) /* SPECIAL opcode 23: DSRAV */
-            if (M64P_LIKELY(RD_OF(op) != 0)) DSRAV(r4300, op);
-            else r4300->interp_PC.addr = pc + 4;
+            DSRAV(r4300, op);
             break;
         M64P_SPECIAL_CASE(24) MULT(r4300, op); break;
         M64P_SPECIAL_CASE(25) MULTU(r4300, op); break;
@@ -2808,60 +2155,46 @@ next_opcode: ;
         M64P_SPECIAL_CASE(30) DDIV(r4300, op); break;
         M64P_SPECIAL_CASE(31) DDIVU(r4300, op); break;
         M64P_SPECIAL_CASE(32) /* SPECIAL opcode 32: ADD */
-            if (M64P_LIKELY(RD_OF(op) != 0)) ADD(r4300, op);
-            else r4300->interp_PC.addr = pc + 4;
+            ADD(r4300, op);
             break;
         M64P_SPECIAL_CASE(33) /* SPECIAL opcode 33: ADDU */
-            if (M64P_LIKELY(RD_OF(op) != 0)) ADDU(r4300, op);
-            else r4300->interp_PC.addr = pc + 4;
+            ADDU(r4300, op);
             break;
         M64P_SPECIAL_CASE(34) /* SPECIAL opcode 34: SUB */
-            if (M64P_LIKELY(RD_OF(op) != 0)) SUB(r4300, op);
-            else r4300->interp_PC.addr = pc + 4;
+            SUB(r4300, op);
             break;
         M64P_SPECIAL_CASE(35) /* SPECIAL opcode 35: SUBU */
-            if (M64P_LIKELY(RD_OF(op) != 0)) SUBU(r4300, op);
-            else r4300->interp_PC.addr = pc + 4;
+            SUBU(r4300, op);
             break;
         M64P_SPECIAL_CASE(36) /* SPECIAL opcode 36: AND */
-            if (M64P_LIKELY(RD_OF(op) != 0)) AND(r4300, op);
-            else r4300->interp_PC.addr = pc + 4;
+            AND(r4300, op);
             break;
         M64P_SPECIAL_CASE(37) /* SPECIAL opcode 37: OR */
-            if (M64P_LIKELY(RD_OF(op) != 0)) OR(r4300, op);
-            else r4300->interp_PC.addr = pc + 4;
+            OR(r4300, op);
             break;
         M64P_SPECIAL_CASE(38) /* SPECIAL opcode 38: XOR */
-            if (M64P_LIKELY(RD_OF(op) != 0)) XOR(r4300, op);
-            else r4300->interp_PC.addr = pc + 4;
+            XOR(r4300, op);
             break;
         M64P_SPECIAL_CASE(39) /* SPECIAL opcode 39: NOR */
-            if (M64P_LIKELY(RD_OF(op) != 0)) NOR(r4300, op);
-            else r4300->interp_PC.addr = pc + 4;
+            NOR(r4300, op);
             break;
         M64P_SPECIAL_CASE(42) /* SPECIAL opcode 42: SLT */
-            if (M64P_LIKELY(RD_OF(op) != 0)) SLT(r4300, op);
-            else r4300->interp_PC.addr = pc + 4;
+            SLT(r4300, op);
             break;
         M64P_SPECIAL_CASE(43) /* SPECIAL opcode 43: SLTU */
-            if (M64P_LIKELY(RD_OF(op) != 0)) SLTU(r4300, op);
-            else r4300->interp_PC.addr = pc + 4;
+            SLTU(r4300, op);
             break;
         M64P_SPECIAL_CASE(44) /* SPECIAL opcode 44: DADD */
-            if (M64P_LIKELY(RD_OF(op) != 0)) DADD(r4300, op);
-            else r4300->interp_PC.addr = pc + 4;
+            DADD(r4300, op);
             break;
         M64P_SPECIAL_CASE(45) /* SPECIAL opcode 45: DADDU */
-            if (M64P_LIKELY(RD_OF(op) != 0)) DADDU(r4300, op);
-            else r4300->interp_PC.addr = pc + 4;
+            DADDU(r4300, op);
             break;
         M64P_SPECIAL_CASE(46) /* SPECIAL opcode 46: DSUB */
-            if (M64P_LIKELY(RD_OF(op) != 0)) DSUB(r4300, op);
-            else r4300->interp_PC.addr = pc + 4;
+            DSUB(r4300, op);
             break;
         M64P_SPECIAL_CASE(47) /* SPECIAL opcode 47: DSUBU */
-            if (M64P_LIKELY(RD_OF(op) != 0)) DSUBU(r4300, op);
-            else r4300->interp_PC.addr = pc + 4;
+            DSUBU(r4300, op);
             break;
         M64P_SPECIAL_CASE(48) TGE(r4300, op); break;
         M64P_SPECIAL_CASE(49) TGEU(r4300, op); break;
@@ -2870,32 +2203,26 @@ next_opcode: ;
         M64P_SPECIAL_CASE(52) TEQ(r4300, op); break;
         M64P_SPECIAL_CASE(54) TNE(r4300, op); break;
         M64P_SPECIAL_CASE(56) /* SPECIAL opcode 56: DSLL */
-            if (M64P_LIKELY(RD_OF(op) != 0)) DSLL(r4300, op);
-            else r4300->interp_PC.addr = pc + 4;
+            DSLL(r4300, op);
             break;
         M64P_SPECIAL_CASE(58) /* SPECIAL opcode 58: DSRL */
-            if (M64P_LIKELY(RD_OF(op) != 0)) DSRL(r4300, op);
-            else r4300->interp_PC.addr = pc + 4;
+            DSRL(r4300, op);
             break;
         M64P_SPECIAL_CASE(59) /* SPECIAL opcode 59: DSRA */
-            if (M64P_LIKELY(RD_OF(op) != 0)) DSRA(r4300, op);
-            else r4300->interp_PC.addr = pc + 4;
+            DSRA(r4300, op);
             break;
         M64P_SPECIAL_CASE(60) /* SPECIAL opcode 60: DSLL32 */
-            if (M64P_LIKELY(RD_OF(op) != 0)) DSLL32(r4300, op);
-            else r4300->interp_PC.addr = pc + 4;
+            DSLL32(r4300, op);
             break;
         M64P_SPECIAL_CASE(62) /* SPECIAL opcode 62: DSRL32 */
-            if (M64P_LIKELY(RD_OF(op) != 0)) DSRL32(r4300, op);
-            else r4300->interp_PC.addr = pc + 4;
+            DSRL32(r4300, op);
             break;
         M64P_SPECIAL_CASE(63) /* SPECIAL opcode 63: DSRA32 */
-            if (M64P_LIKELY(RD_OF(op) != 0)) DSRA32(r4300, op);
-            else r4300->interp_PC.addr = pc + 4;
+            DSRA32(r4300, op);
             break;
         M64P_SPECIAL_DEFAULT /* SPECIAL opcodes 1, 5, 10, 11, 14, 21, 40, 41, 53, 55, 57,
             61: Reserved Instructions */
-            M64P_UNREACHABLE();
+            NI(r4300, op);
             break;
 #if M64P_USE_COMPUTED_GOTO
         } while (0);
@@ -2962,7 +2289,7 @@ next_opcode: ;
             break;
         M64P_REGIMM_DEFAULT /* REGIMM opcodes 4..7, 13, 15, 20..31:
             Reserved Instructions */
-            M64P_UNREACHABLE();
+            NI(r4300, op);
             break;
 #if M64P_USE_COMPUTED_GOTO
         } while (0);
@@ -2995,84 +2322,30 @@ next_opcode: ;
         else BGTZ(r4300, op);
         break;
     M64P_MAJOR_CASE(8) /* Major opcode 8: ADDI */
-        if (M64P_LIKELY(RT_OF(op) != 0)) ADDI(r4300, op);
-        else r4300->interp_PC.addr = pc + 4;
+        ADDI(r4300, op);
         break;
     M64P_MAJOR_CASE(9) /* Major opcode 9: ADDIU */
-        if (M64P_LIKELY(RT_OF(op) != 0)) ADDIU(r4300, op);
-        else r4300->interp_PC.addr = pc + 4;
+        ADDIU(r4300, op);
         break;
     M64P_MAJOR_CASE(10) /* Major opcode 10: SLTI */
-        if (M64P_LIKELY(RT_OF(op) != 0)) SLTI(r4300, op);
-        else r4300->interp_PC.addr = pc + 4;
+        SLTI(r4300, op);
         break;
     M64P_MAJOR_CASE(11) /* Major opcode 11: SLTIU */
-        if (M64P_LIKELY(RT_OF(op) != 0)) SLTIU(r4300, op);
-        else r4300->interp_PC.addr = pc + 4;
+        SLTIU(r4300, op);
         break;
     M64P_MAJOR_CASE(12) /* Major opcode 12: ANDI */
-        if (M64P_LIKELY(RT_OF(op) != 0)) ANDI(r4300, op);
-        else r4300->interp_PC.addr = pc + 4;
+        ANDI(r4300, op);
         break;
     M64P_MAJOR_CASE(13) /* Major opcode 13: ORI */
-        if (M64P_LIKELY(RT_OF(op) != 0)) ORI(r4300, op);
-        else r4300->interp_PC.addr = pc + 4;
+        ORI(r4300, op);
         break;
     M64P_MAJOR_CASE(14) /* Major opcode 14: XORI */
-        if (M64P_LIKELY(RT_OF(op) != 0)) XORI(r4300, op);
-        else r4300->interp_PC.addr = pc + 4;
+        XORI(r4300, op);
         break;
     M64P_MAJOR_CASE(15) /* Major opcode 15: LUI */
-        if (M64P_LIKELY(RT_OF(op) != 0)) LUI(r4300, op);
-        else r4300->interp_PC.addr = pc + 4;
+        LUI(r4300, op);
         break;
-    M64P_MAJOR_CASE(16) /* Coprocessor 0 prefix */
-#if M64P_USE_COMPUTED_GOTO
-        static void* const pi_cop0_dispatch[32] =
-        {
-            &&pi_cop0_0, &&pi_cop0_default, &&pi_cop0_default, &&pi_cop0_default,
-            &&pi_cop0_4, &&pi_cop0_default, &&pi_cop0_default, &&pi_cop0_default,
-            &&pi_cop0_default, &&pi_cop0_default, &&pi_cop0_default, &&pi_cop0_default,
-            &&pi_cop0_default, &&pi_cop0_default, &&pi_cop0_default, &&pi_cop0_default,
-            &&pi_cop0_16, &&pi_cop0_default, &&pi_cop0_default, &&pi_cop0_default,
-            &&pi_cop0_default, &&pi_cop0_default, &&pi_cop0_default, &&pi_cop0_default,
-            &&pi_cop0_default, &&pi_cop0_default, &&pi_cop0_default, &&pi_cop0_default,
-            &&pi_cop0_default, &&pi_cop0_default, &&pi_cop0_default, &&pi_cop0_default
-        };
-        do
-        {
-            goto *pi_cop0_dispatch[(op >> 21) & 0x1F];
-#else
-        switch ((op >> 21) & 0x1F) {
-#endif
-        M64P_COP0_CASE(0) /* Coprocessor 0 opcode 0: MFC0 */
-            if (M64P_LIKELY(RT_OF(op) != 0)) MFC0(r4300, op);
-            else r4300->interp_PC.addr = pc + 4;
-            break;
-        M64P_COP0_CASE(4) MTC0(r4300, op); break;
-        M64P_COP0_CASE(16) /* Coprocessor 0 opcode 16: TLB */
-            switch (op & 0x3F) {
-            case 1: TLBR(r4300, op); break;
-            case 2: TLBWI(r4300, op); break;
-            case 6: TLBWR(r4300, op); break;
-            case 8: TLBP(r4300, op); break;
-            case 24: ERET(r4300, op); break;
-            default: /* TLB sub-opcodes 0, 3..5, 7, 9..23, 25..63:
-                        Reserved Instructions */
-                M64P_UNREACHABLE();
-                break;
-            }
-            break;
-        M64P_COP0_DEFAULT /* Coprocessor 0 opcodes 1..3, 5..15, 17..31:
-                             Reserved Instructions */
-            M64P_UNREACHABLE();
-            break;
-#if M64P_USE_COMPUTED_GOTO
-        } while (0);
-#else
-        }
-#endif
-        break;
+    M64P_MAJOR_CASE(16) COP0(r4300, op); break;
     M64P_MAJOR_CASE(17) /* Coprocessor 1 prefix */
 #if M64P_USE_COMPUTED_GOTO
         static void* const pi_cop1_dispatch[32] =
@@ -3093,22 +2366,20 @@ next_opcode: ;
         switch ((op >> 21) & 0x1F) {
 #endif
         M64P_COP1_CASE(0) /* Coprocessor 1 opcode 0: MFC1 */
-            if (M64P_LIKELY(RT_OF(op) != 0)) MFC1(r4300, op);
-            else r4300->interp_PC.addr = pc + 4;
+            MFC1(r4300, op);
             break;
         M64P_COP1_CASE(1) /* Coprocessor 1 opcode 1: DMFC1 */
-            if (M64P_LIKELY(RT_OF(op) != 0)) DMFC1(r4300, op);
-            else r4300->interp_PC.addr = pc + 4;
+            DMFC1(r4300, op);
             break;
         M64P_COP1_CASE(2) /* Coprocessor 1 opcode 2: CFC1 */
-            if (M64P_LIKELY(RT_OF(op) != 0)) CFC1(r4300, op);
-            else r4300->interp_PC.addr = pc + 4;
+            CFC1(r4300, op);
             break;
         M64P_COP1_CASE(4) MTC1(r4300, op); break;
         M64P_COP1_CASE(5) DMTC1(r4300, op); break;
         M64P_COP1_CASE(6) CTC1(r4300, op); break;
         M64P_COP1_CASE(8) /* Coprocessor 1 opcode 8: Branch on C1 condition */
-            switch ((op >> 16) & 0x3) {
+            switch ((op >> 16) & 0x1f) {
+            default: NI(r4300, op); break;
             case 0:
                 if (IS_RELATIVE_IDLE_LOOP(r4300, op, pc)) BC1F_IDLE(r4300, op);
                 else BC1F(r4300, op);
@@ -3190,7 +2461,7 @@ next_opcode: ;
             M64P_CP1S_CASE(62) C_LE_S(r4300, op); break;
             M64P_CP1S_CASE(63) C_NGT_S(r4300, op); break;
             M64P_CP1S_DEFAULT
-                M64P_UNREACHABLE();
+                NI(r4300, op);
                 break;
 #if M64P_USE_COMPUTED_GOTO
             } while (0);
@@ -3261,7 +2532,7 @@ next_opcode: ;
             M64P_CP1D_CASE(62) C_LE_D(r4300, op); break;
             M64P_CP1D_CASE(63) C_NGT_D(r4300, op); break;
             M64P_CP1D_DEFAULT
-                M64P_UNREACHABLE();
+                NI(r4300, op);
                 break;
 #if M64P_USE_COMPUTED_GOTO
             } while (0);
@@ -3274,7 +2545,7 @@ next_opcode: ;
             case 32: CVT_S_W(r4300, op); break;
             case 33: CVT_D_W(r4300, op); break;
             default:
-                M64P_UNREACHABLE();
+                NI(r4300, op);
                 break;
             }
             break;
@@ -3283,13 +2554,13 @@ next_opcode: ;
             case 32: CVT_S_L(r4300, op); break;
             case 33: CVT_D_L(r4300, op); break;
             default:
-                M64P_UNREACHABLE();
+                NI(r4300, op);
                 break;
             }
             break;
         M64P_COP1_DEFAULT /* Coprocessor 1 opcodes 3, 7, 9..15, 18..19, 22..31:
                              Reserved Instructions */
-            M64P_UNREACHABLE();
+            NI(r4300, op);
             break;
 #if M64P_USE_COMPUTED_GOTO
         } while (0);
@@ -3314,52 +2585,40 @@ next_opcode: ;
         else BGTZL(r4300, op);
         break;
     M64P_MAJOR_CASE(24) /* Major opcode 24: DADDI */
-        if (M64P_LIKELY(RT_OF(op) != 0)) DADDI(r4300, op);
-        else r4300->interp_PC.addr = pc + 4;
+        DADDI(r4300, op);
         break;
     M64P_MAJOR_CASE(25) /* Major opcode 25: DADDIU */
-        if (M64P_LIKELY(RT_OF(op) != 0)) DADDIU(r4300, op);
-        else r4300->interp_PC.addr = pc + 4;
+        DADDIU(r4300, op);
         break;
     M64P_MAJOR_CASE(26) /* Major opcode 26: LDL */
-        if (M64P_LIKELY(RT_OF(op) != 0)) LDL(r4300, op);
-        else r4300->interp_PC.addr = pc + 4;
+        LDL(r4300, op);
         break;
     M64P_MAJOR_CASE(27) /* Major opcode 27: LDR */
-        if (M64P_LIKELY(RT_OF(op) != 0)) LDR(r4300, op);
-        else r4300->interp_PC.addr = pc + 4;
+        LDR(r4300, op);
         break;
     M64P_MAJOR_CASE(32) /* Major opcode 32: LB */
-        if (M64P_LIKELY(RT_OF(op) != 0)) LB(r4300, op);
-        else r4300->interp_PC.addr = pc + 4;
+        LB(r4300, op);
         break;
     M64P_MAJOR_CASE(33) /* Major opcode 33: LH */
-        if (M64P_LIKELY(RT_OF(op) != 0)) LH(r4300, op);
-        else r4300->interp_PC.addr = pc + 4;
+        LH(r4300, op);
         break;
     M64P_MAJOR_CASE(34) /* Major opcode 34: LWL */
-        if (M64P_LIKELY(RT_OF(op) != 0)) LWL(r4300, op);
-        else r4300->interp_PC.addr = pc + 4;
+        LWL(r4300, op);
         break;
     M64P_MAJOR_CASE(35) /* Major opcode 35: LW */
-        if (M64P_LIKELY(RT_OF(op) != 0)) LW(r4300, op);
-        else r4300->interp_PC.addr = pc + 4;
+        LW(r4300, op);
         break;
     M64P_MAJOR_CASE(36) /* Major opcode 36: LBU */
-        if (M64P_LIKELY(RT_OF(op) != 0)) LBU(r4300, op);
-        else r4300->interp_PC.addr = pc + 4;
+        LBU(r4300, op);
         break;
     M64P_MAJOR_CASE(37) /* Major opcode 37: LHU */
-        if (M64P_LIKELY(RT_OF(op) != 0)) LHU(r4300, op);
-        else r4300->interp_PC.addr = pc + 4;
+        LHU(r4300, op);
         break;
     M64P_MAJOR_CASE(38) /* Major opcode 38: LWR */
-        if (M64P_LIKELY(RT_OF(op) != 0)) LWR(r4300, op);
-        else r4300->interp_PC.addr = pc + 4;
+        LWR(r4300, op);
         break;
     M64P_MAJOR_CASE(39) /* Major opcode 39: LWU */
-        if (M64P_LIKELY(RT_OF(op) != 0)) LWU(r4300, op);
-        else r4300->interp_PC.addr = pc + 4;
+        LWU(r4300, op);
         break;
     M64P_MAJOR_CASE(40) SB(r4300, op); break;
     M64P_MAJOR_CASE(41) SH(r4300, op); break;
@@ -3370,31 +2629,28 @@ next_opcode: ;
     M64P_MAJOR_CASE(46) SWR(r4300, op); break;
     M64P_MAJOR_CASE(47) CACHE(r4300, op); break;
     M64P_MAJOR_CASE(48) /* Major opcode 48: LL */
-        if (M64P_LIKELY(RT_OF(op) != 0)) LL(r4300, op);
-        else r4300->interp_PC.addr = pc + 4;
+        LL(r4300, op);
         break;
     M64P_MAJOR_CASE(49) LWC1(r4300, op); break;
-    M64P_MAJOR_CASE(52) /* Major opcode 52: LLD (Not implemented) */
-        NI(r4300, op);
+    M64P_MAJOR_CASE(52) /* Major opcode 52: LLD */
+        LLD(r4300, op);
         break;
     M64P_MAJOR_CASE(53) LDC1(r4300, op); break;
     M64P_MAJOR_CASE(55) /* Major opcode 55: LD */
-        if (M64P_LIKELY(RT_OF(op) != 0)) LD(r4300, op);
-        else r4300->interp_PC.addr = pc + 4;
+        LD(r4300, op);
         break;
     M64P_MAJOR_CASE(56) /* Major opcode 56: SC */
-        if (M64P_LIKELY(RT_OF(op) != 0)) SC(r4300, op);
-        else r4300->interp_PC.addr = pc + 4;
+        SC(r4300, op);
         break;
     M64P_MAJOR_CASE(57) SWC1(r4300, op); break;
-    M64P_MAJOR_CASE(60) /* Major opcode 60: SCD (Not implemented) */
-        NI(r4300, op);
+    M64P_MAJOR_CASE(60) /* Major opcode 60: SCD */
+        SCD(r4300, op);
         break;
     M64P_MAJOR_CASE(61) SDC1(r4300, op); break;
     M64P_MAJOR_CASE(63) SD(r4300, op); break;
     M64P_MAJOR_DEFAULT /* Major opcodes 18..19, 28..31, 50..51, 54, 58..59, 62:
         Reserved Instructions */
-        M64P_UNREACHABLE();
+        NI(r4300, op);
         break;
 #if M64P_USE_COMPUTED_GOTO
     } while (0);
@@ -3403,6 +2659,9 @@ next_opcode: ;
 #endif /* switch ((op >> 26) & 0x3F) */
 
 instruction_done:
+    r4300->regs[0] = 0;
+    if (!r4300->delay_slot && r4300->cp0.cycle_count >= 0)
+        gen_interrupt(r4300);
     if (M64P_LIKELY(continuous && !breakloop))
         goto next_opcode;
 }

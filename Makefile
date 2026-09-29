@@ -577,6 +577,9 @@ $(CORE_DIR)/src/device/r4300/pure_interp.o $(CORE_DIR)/src/device/r4300/cached_i
 endif
 
 $(CORE_DIR)/src/device/r4300/pure_interp.o: CFLAGS += -DM64P_INTERP_BRANCHLESS=$(INTERP_BRANCHLESS)
+# Keep precise host operations behind an integer ABI; dispatch and guest checks use fast-math.
+$(CORE_DIR)/src/device/r4300/pure_interp.o: CFLAGS += -ffast-math
+$(CORE_DIR)/src/device/r4300/fpu_native.o: CFLAGS += -O3 -fno-fast-math -fno-math-errno -frounding-math -ffp-contract=off
 
 ifeq (,$(findstring android,$(platform)))
    LDFLAGS    += -lpthread
@@ -590,6 +593,8 @@ endif
 
 -include $(OBJECTS:.o=.d)
 all: $(TARGET)
+$(CORE_DIR)/src/device/r4300/pure_interp.o: $(addprefix $(CORE_DIR)/src/device/r4300/,fpu_arithmetic.h fpu_compare.h fpu_native.h)
+$(CORE_DIR)/src/device/r4300/fpu_native.o: $(addprefix $(CORE_DIR)/src/device/r4300/,fpu_native.h fpu_neon.h cp1.h)
 $(TARGET): $(OBJECTS)
 
 ifeq ($(STATIC_LINKING), 1)

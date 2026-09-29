@@ -56,6 +56,7 @@ SOURCES_C = \
 	$(CORE_DIR)/src/device/r4300/cp0.c \
 	$(CORE_DIR)/src/device/r4300/cached_interp.c \
 	$(CORE_DIR)/src/device/r4300/cp1.c \
+	$(CORE_DIR)/src/device/r4300/fpu_native.c \
 	$(CORE_DIR)/src/device/r4300/idec.c \
 	$(CORE_DIR)/src/device/r4300/interrupt.c \
 	$(CORE_DIR)/src/device/r4300/pure_interp.c \

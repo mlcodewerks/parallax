@@ -175,6 +175,10 @@ struct cp0
 {
 
     uint32_t regs[CP0_REGS_COUNT];
+    uint32_t regs_hi[CP0_REGS_COUNT];
+    uint32_t tlb_entryhi_hi[32];
+    uint64_t latch;
+    uint32_t random_state;
 
 
     /* set to avoid savestates/reset if state may be inconsistent
@@ -189,6 +193,9 @@ struct cp0
     struct interrupt_handler interrupt_handlers[CP0_INTERRUPT_HANDLERS_COUNT];
 
     uint32_t last_addr;
+    uint32_t count_phase; /* CPU cycles modulo two; serialized since 1.9 */
+    /* Legacy configuration retained for the initialization API. Instruction
+     * timing now uses CPU cycles and the hardware COUNT divider. */
     unsigned int count_per_op;
     unsigned int count_per_op_denom_pot;
 
@@ -201,6 +208,9 @@ struct cp0
 
 void init_cp0(struct cp0* cp0, unsigned int count_per_op, unsigned int count_per_op_denom_pot, const struct interrupt_handler* interrupt_handlers);
 void poweron_cp0(struct cp0* cp0);
+void cp0_reset_extended(struct cp0* cp0);
+uint32_t cp0_random(struct cp0* cp0);
+uint64_t cp0_get_control(struct cp0* cp0, unsigned int reg);
 
 uint32_t* r4300_cp0_regs(struct cp0* cp0);
 uint32_t* r4300_cp0_last_addr(struct cp0* cp0);
@@ -212,6 +222,7 @@ unsigned int* r4300_cp0_next_interrupt(struct cp0* cp0);
 int* r4300_cp0_cycle_count(struct cp0* cp0);
 
 int check_cop1_unusable(struct r4300_core* r4300);
+int check_instruction_mode(struct r4300_core* r4300, uint32_t op);
 
 void cp0_update_count(struct r4300_core* r4300);
 

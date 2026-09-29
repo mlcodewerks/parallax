@@ -36,6 +36,7 @@ void gen_interrupt(struct r4300_core* r4300);
 void r4300_check_interrupt(struct r4300_core* r4300, uint32_t cause_ip, int set_cause);
 
 void translate_event_queue(struct cp0* cp0, unsigned int base);
+void schedule_compare(struct cp0* cp0);
 void remove_event(struct interrupt_queue* q, int type);
 void add_interrupt_event_count(struct cp0* cp0, int type, unsigned int count);
 void add_interrupt_event(struct cp0* cp0, int type, unsigned int delay);

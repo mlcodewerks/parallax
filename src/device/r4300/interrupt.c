@@ -257,6 +257,18 @@ void remove_event(struct interrupt_queue* q, int type)
     }
 }
 
+void schedule_compare(struct cp0* cp0)
+{
+    uint32_t delta = cp0->regs[CP0_COMPARE_REG] - cp0->regs[CP0_COUNT_REG];
+    remove_event(&cp0->q, COMPARE_INT);
+    /* Equality means the next match is a full wrap away. SPECIAL_INT revisits
+     * distant matches at each half-wrap, keeping queue deadlines unambiguous. */
+    if (delta != 0 && delta <= UINT32_C(0x80000000))
+        add_interrupt_event_count(cp0, COMPARE_INT, cp0->regs[CP0_COMPARE_REG]);
+    cp0->next_interrupt = cp0->q.first->data.count;
+    cp0->cycle_count = (int32_t)(cp0->regs[CP0_COUNT_REG] - cp0->next_interrupt);
+}
+
 void translate_event_queue(struct cp0* cp0, unsigned int base)
 {
     struct node* e;
@@ -272,13 +284,10 @@ void translate_event_queue(struct cp0* cp0, unsigned int base)
     }
 
     cp0_regs[CP0_COUNT_REG] = base;
+    cp0->count_phase = 0;
     add_interrupt_event_count(cp0, SPECIAL_INT, ((cp0_regs[CP0_COUNT_REG] & UINT32_C(0x80000000)) ^ UINT32_C(0x80000000)));
 
-    /* Add count_per_op to avoid wrong event order in case CP0_COUNT_REG == CP0_COMPARE_REG */
-    cp0_regs[CP0_COUNT_REG] += cp0->count_per_op;
-    *cp0_cycle_count += cp0->count_per_op;
-    add_interrupt_event_count(cp0, COMPARE_INT, cp0_regs[CP0_COMPARE_REG]);
-    cp0_regs[CP0_COUNT_REG] -= cp0->count_per_op;
+    schedule_compare(cp0);
 
     /* Update next interrupt in case first event is COMPARE_INT */
     *cp0_cycle_count = cp0_regs[CP0_COUNT_REG] - cp0->q.first->data.count;
@@ -325,7 +334,7 @@ void init_interrupt(struct cp0* cp0)
 {
     clear_queue(&cp0->q);
     add_interrupt_event_count(cp0, SPECIAL_INT, 0x80000000);
-    add_interrupt_event_count(cp0, COMPARE_INT, 0);
+    schedule_compare(cp0);
 }
 
 void r4300_check_interrupt(struct r4300_core* r4300, uint32_t cause_ip, int set_cause)
@@ -336,7 +345,7 @@ void r4300_check_interrupt(struct r4300_core* r4300, uint32_t cause_ip, int set_
     int* cp0_cycle_count = r4300_cp0_cycle_count(&r4300->cp0);
 
     if (set_cause) {
-        cp0_regs[CP0_CAUSE_REG] = (cp0_regs[CP0_CAUSE_REG] | cause_ip) & ~CP0_CAUSE_EXCCODE_MASK;
+        cp0_regs[CP0_CAUSE_REG] = cp0_regs[CP0_CAUSE_REG] | cause_ip;
     }
     else {
         cp0_regs[CP0_CAUSE_REG] &= ~cause_ip;
@@ -347,6 +356,7 @@ void r4300_check_interrupt(struct r4300_core* r4300, uint32_t cause_ip, int set_
     }
     if (cp0_regs[CP0_STATUS_REG] & cp0_regs[CP0_CAUSE_REG] & UINT32_C(0xFF00))
     {
+        if (get_event(&r4300->cp0.q, CHECK_INT) != NULL) return;
         event = alloc_node(&r4300->cp0.q.pool);
 
         if (event == NULL)
@@ -376,7 +386,7 @@ void r4300_check_interrupt(struct r4300_core* r4300, uint32_t cause_ip, int set_
 void raise_maskable_interrupt(struct r4300_core* r4300, uint32_t cause_ip)
 {
     uint32_t* cp0_regs = r4300_cp0_regs(&r4300->cp0);
-    cp0_regs[CP0_CAUSE_REG] = (cp0_regs[CP0_CAUSE_REG] | cause_ip) & ~CP0_CAUSE_EXCCODE_MASK;
+    cp0_regs[CP0_CAUSE_REG] |= cause_ip;
 
     if (!(cp0_regs[CP0_STATUS_REG] & cp0_regs[CP0_CAUSE_REG] & UINT32_C(0xff00))) {
         return;
@@ -386,30 +396,21 @@ void raise_maskable_interrupt(struct r4300_core* r4300, uint32_t cause_ip)
         return;
     }
 
+    cp0_regs[CP0_CAUSE_REG] &= ~UINT32_C(0x3000007c);
     exception_general(r4300);
 }
 
 void compare_int_handler(void* opaque)
 {
     struct r4300_core* r4300 = (struct r4300_core*)opaque;
-    uint32_t* cp0_regs = r4300_cp0_regs(&r4300->cp0);
-    int* cp0_cycle_count = r4300_cp0_cycle_count(&r4300->cp0);
-
-    /* Add count_per_op to avoid wrong event order in case CP0_COUNT_REG == CP0_COMPARE_REG */
-    cp0_regs[CP0_COUNT_REG] += r4300->cp0.count_per_op;
-    *cp0_cycle_count += r4300->cp0.count_per_op;
-    add_interrupt_event_count(&r4300->cp0, COMPARE_INT, cp0_regs[CP0_COMPARE_REG]);
-    cp0_regs[CP0_COUNT_REG] -= r4300->cp0.count_per_op;
-
-    /* Update next interrupt in case first event is COMPARE_INT */
-    *cp0_cycle_count = cp0_regs[CP0_COUNT_REG] - r4300->cp0.q.first->data.count;
+    schedule_compare(&r4300->cp0);
 
     raise_maskable_interrupt(r4300, CP0_CAUSE_IP7);
 }
 
 void check_int_handler(void* opaque)
 {
-    exception_general((struct r4300_core*)opaque);
+    raise_maskable_interrupt((struct r4300_core*)opaque, 0);
 }
 
 /* Special interrupt is a fake interrupt which porpose is
@@ -422,6 +423,8 @@ void special_int_handler(void* opaque)
 
     remove_interrupt_event(cp0);
     add_interrupt_event_count(cp0, SPECIAL_INT, ((cp0_regs[CP0_COUNT_REG] & UINT32_C(0x80000000)) ^ UINT32_C(0x80000000)));
+    if (get_event(&cp0->q, COMPARE_INT) == NULL)
+        schedule_compare(cp0);
 }
 
 /* XXX: this should only require r4300 struct not device ? */
@@ -441,6 +444,7 @@ void nmi_int_handler(void* opaque)
     pif_bootrom_hle_execute(r4300);
     // clear all interrupts, reset interrupt counters back to 0
     cp0_regs[CP0_COUNT_REG] = 0;
+    r4300->cp0.count_phase = 0;
     g_gs_vi_counter = 0;
     init_interrupt(&r4300->cp0);
 
@@ -450,6 +454,7 @@ void nmi_int_handler(void* opaque)
     dev->ai.regs[AI_STATUS_REG] = 0;
     // set ErrorEPC with the last instruction address
     cp0_regs[CP0_ERROREPC_REG] = *r4300_pc(r4300);
+    r4300->cp0.regs_hi[CP0_ERROREPC_REG] = (int32_t)*r4300_pc(r4300) < 0 ? UINT32_MAX : 0;
     // adjust ErrorEPC if we were in a delay slot, and clear the r4300->delay_slot and r4300->recomp.dyna_interp flags
     if(r4300->delay_slot==1 || r4300->delay_slot==3)
     {

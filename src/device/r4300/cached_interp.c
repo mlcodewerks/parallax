@@ -1,6 +1,7 @@
 
 
 #include "cached_interp.h"
+#include "timing.h"
 
 #include <stdint.h>
 #include <stdlib.h>
@@ -476,8 +477,8 @@ static CI_FORCE_INLINE void ci_execute_fast_op(struct r4300_core* r4300, uint8_t
         break;
     case CI_FAST_MULT:
     {
-        const int64_t product = (int32_t)(uint32_t)regs[rs] *
-                                (int64_t)(int32_t)(uint32_t)regs[rt];
+        const int64_t rhs = (int64_t)((uint64_t)regs[rt] << 29) >> 29;
+        const uint64_t product = (uint64_t)regs[rs] * (uint64_t)rhs;
         r4300->hi = (int64_t)(int32_t)(uint32_t)((uint64_t)product >> 32);
         r4300->lo = ci_se32((uint32_t)product);
         break;
@@ -491,8 +492,8 @@ static CI_FORCE_INLINE void ci_execute_fast_op(struct r4300_core* r4300, uint8_t
     }
     case CI_FAST_DIV:
     {
-        const int32_t lhs = (int32_t)(uint32_t)regs[rs];
-        const int32_t rhs = (int32_t)(uint32_t)regs[rt];
+        const int64_t lhs = (int32_t)(uint32_t)regs[rs];
+        const int64_t rhs = regs[rt];
         if (rhs != 0)
         {
             if (lhs == INT32_MIN && rhs == -1)
@@ -626,10 +627,10 @@ static CI_FORCE_INLINE void ci_execute_fast_op(struct r4300_core* r4300, uint8_t
         regs[rd] = (int64_t)((uint64_t)regs[rs] < (uint64_t)regs[rt]);
         break;
     case CI_FAST_SRA:
-        regs[rd] = ci_se32((uint32_t)((int32_t)(uint32_t)regs[rt] >> sa));
+        regs[rd] = ci_se32((uint32_t)(regs[rt] >> sa));
         break;
     case CI_FAST_SRAV:
-        regs[rd] = ci_se32((uint32_t)((int32_t)(uint32_t)regs[rt] >> ((uint32_t)regs[rs] & 31)));
+        regs[rd] = ci_se32((uint32_t)(regs[rt] >> ((uint32_t)regs[rs] & 31)));
         break;
     case CI_FAST_SRL:
         regs[rd] = ci_se32((uint32_t)regs[rt] >> sa);
@@ -945,6 +946,7 @@ static CI_FORCE_INLINE void ci_execute_cached_instruction(struct r4300_core* r43
                                                           uint8_t fast_op,
                                                           uint32_t pc)
 {
+    if (!r4300_begin_instruction(r4300, op, pc)) return;
     if (CI_LIKELY(fast_op != CI_FAST_NONE))
     {
         ci_execute_fast_op(r4300, fast_op, op);
@@ -954,10 +956,14 @@ static CI_FORCE_INLINE void ci_execute_cached_instruction(struct r4300_core* r43
     {
         handler(r4300, op);
     }
+    r4300->regs[0] = 0;
+    if (!r4300->delay_slot && r4300->cp0.cycle_count >= 0)
+        gen_interrupt(r4300);
 }
 
 void cached_interp_execute_one(struct r4300_core* r4300)
 {
+    if (r4300->interp_PC.addr & 3) { pure_interp_execute_one(r4300); return; }
     struct cached_interp_state* state = r4300->cached_interp;
     const uint32_t pc = r4300->interp_PC.addr;
 
@@ -986,6 +992,7 @@ void cached_interp_execute_one(struct r4300_core* r4300)
 
 static void ci_execute_block(struct r4300_core* r4300)
 {
+    if (r4300->interp_PC.addr & 3) { pure_interp_execute_one(r4300); return; }
     struct cached_interp_state* state = r4300->cached_interp;
     const uint32_t start_pc = r4300->interp_PC.addr;
     struct cached_block* block = ci_lookup_block(r4300, start_pc);
@@ -1003,6 +1010,7 @@ static void ci_execute_block(struct r4300_core* r4300)
         const uint8_t meta = block->meta[i];
         const uint8_t fast_op = meta >> CI_META_FAST_SHIFT;
         const uint32_t op = block->ops[i];
+        if (!r4300_begin_instruction(r4300, op, local_pc)) return;
 
         if (CI_LIKELY(fast_op != CI_FAST_NONE))
         {
@@ -1010,6 +1018,12 @@ static void ci_execute_block(struct r4300_core* r4300)
             if (!ci_execute_hot_fast_op(r4300, fast_op, op))
                 ci_execute_fast_op(r4300, fast_op, op);
             local_pc += 4;
+            if (CI_UNLIKELY(r4300->cp0.cycle_count >= 0))
+            {
+                r4300->interp_PC.addr = local_pc;
+                gen_interrupt(r4300);
+                return;
+            }
             continue;
         }
 
@@ -1026,8 +1040,14 @@ static void ci_execute_block(struct r4300_core* r4300)
         }
 
         block->handlers[i](r4300, op);
+        r4300->regs[0] = 0;
         state->pending_delay_valid = 0;
 
+        if (CI_UNLIKELY(r4300->cp0.cycle_count >= 0))
+        {
+            gen_interrupt(r4300);
+            return;
+        }
         local_pc += 4;
         if (CI_UNLIKELY(breakloop || r4300->interp_PC.addr != local_pc))
             return;
