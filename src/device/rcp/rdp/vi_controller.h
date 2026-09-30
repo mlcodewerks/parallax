@@ -52,11 +52,16 @@ struct vi_controller
 {
     uint32_t regs[VI_REGS_COUNT];
     unsigned int field;
-    unsigned int delay;
-
     unsigned int clock;
     unsigned int expected_refresh_rate;
-    unsigned int count_per_scanline;
+
+    /* Fractional VI-field timing state. The next field is anchored to the
+     * COUNT value at which the current VI is serviced (Racer-compatible
+     * hybrid semantics), while field_tick_phase carries clock / refresh
+     * remainder so the old per-scanline truncation does not accumulate. */
+    uint64_t field_tick_phase;
+    int64_t field_start_count_clock;
+    uint32_t field_ticks;
 
     struct mi_controller* mi;
     struct rdp_core* dp;
@@ -70,6 +75,11 @@ static osal_inline uint32_t vi_reg(uint32_t address)
 
 unsigned int vi_clock_from_tv_standard(m64p_system_type tv_standard);
 unsigned int vi_expected_refresh_rate_from_tv_standard(m64p_system_type tv_standard);
+double vi_actual_refresh_rate(const struct vi_controller* vi);
+unsigned int vi_legacy_savestate_delay(const struct vi_controller* vi);
+unsigned int vi_legacy_savestate_count_per_scanline(const struct vi_controller* vi);
+void vi_rebase_timing(struct vi_controller* vi, unsigned int legacy_delay);
+void vi_schedule_vertical_interrupt(struct vi_controller* vi);
 void set_vi_vertical_interrupt(struct vi_controller* vi);
 
 void init_vi(struct vi_controller* vi, unsigned int clock, unsigned int expected_refresh_rate,

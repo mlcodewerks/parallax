@@ -86,6 +86,8 @@ struct rdp_core
     uint32_t dpc_regs[DPC_REGS_COUNT];
     uint32_t dps_regs[DPS_REGS_COUNT];
     unsigned char do_on_unfreeze;
+    uint32_t clock_base;
+    uint32_t clock_offset;
 
     struct fb fb;
 
@@ -111,6 +113,8 @@ void init_rdp(struct rdp_core* dp,
               struct r4300_core* r4300);
 
 void poweron_rdp(struct rdp_core* dp);
+uint32_t rdp_dpc_clock_value(const struct rdp_core* dp, uint32_t count);
+void rdp_restore_dpc_clock(struct rdp_core* dp, uint32_t count);
 
 void read_dpc_regs(void* opaque, uint32_t address, uint32_t* value);
 void write_dpc_regs(void* opaque, uint32_t address, uint32_t value, uint32_t mask);

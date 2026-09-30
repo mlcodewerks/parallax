@@ -157,6 +157,7 @@ int savestates_load_m64p(struct device* dev, const void *data)
     unsigned int version;
     int i;
     uint32_t FCR31;
+    uint32_t legacy_vi_delay = 0;
     
     size_t savestateSize;
     unsigned char *savestateData, *curr;
@@ -280,7 +281,7 @@ int savestates_load_m64p(struct device* dev, const void *data)
     dev->vi.regs[VI_V_BURST_REG] = GETDATA(curr, uint32_t);
     dev->vi.regs[VI_X_SCALE_REG] = GETDATA(curr, uint32_t);
     dev->vi.regs[VI_Y_SCALE_REG] = GETDATA(curr, uint32_t);
-    dev->vi.delay = GETDATA(curr, uint32_t);
+    legacy_vi_delay = GETDATA(curr, uint32_t);
     gfx.viStatusChanged();
     gfx.viWidthChanged();
 
@@ -342,6 +343,7 @@ int savestates_load_m64p(struct device* dev, const void *data)
     *r4300_llbit(&dev->r4300) = GETDATA(curr, uint32_t);
     COPYARRAY(r4300_regs(&dev->r4300), curr, int64_t, 32);
     COPYARRAY(cp0_regs, curr, uint32_t, CP0_REGS_COUNT);
+    rdp_restore_dpc_clock(&dev->dp, cp0_regs[CP0_COUNT_REG]);
     cp0_reset_extended(&dev->r4300.cp0);
     *r4300_mult_lo(&dev->r4300) = GETDATA(curr, int64_t);
     *r4300_mult_hi(&dev->r4300) = GETDATA(curr, int64_t);
@@ -523,7 +525,7 @@ int savestates_load_m64p(struct device* dev, const void *data)
         }
 
         /* extra vi state */
-        dev->vi.count_per_scanline = ALIGNED_GETDATA(curr, uint32_t);
+        (void)ALIGNED_GETDATA(curr, uint32_t); /* legacy VI count-per-scanline */
 
         /* extra si state */
         dev->si.dma_dir = GETDATA(curr, uint8_t);
@@ -674,7 +676,7 @@ int savestates_load_m64p(struct device* dev, const void *data)
         dev->dp.do_on_unfreeze = GETDATA(curr, uint8_t);
 
         /* extra vi state */
-        dev->vi.count_per_scanline = GETDATA(curr, uint32_t);
+        (void)GETDATA(curr, uint32_t); /* legacy VI count-per-scanline */
 
         /* extra RDRAM register state */
         for (i = 1; i < RDRAM_MAX_MODULES_COUNT; ++i) {
@@ -809,10 +811,8 @@ int savestates_load_m64p(struct device* dev, const void *data)
          */
         setup_channels_format(&dev->pif);
 
-        /* extra vi state */
-        dev->vi.count_per_scanline = (dev->vi.regs[VI_V_SYNC_REG] == 0)
-            ? 1500
-            : ((dev->vi.clock / dev->vi.expected_refresh_rate) / (dev->vi.regs[VI_V_SYNC_REG] + 1));
+        /* The old count_per_scanline field was derived state. The VI timing
+         * core now reconstructs its phase from the queued VI event instead. */
 
         /* extra si state */
         dev->si.dma_dir = SI_NO_DMA;
@@ -847,6 +847,8 @@ int savestates_load_m64p(struct device* dev, const void *data)
     dev->r4300.cp0.interrupt_unsafe_state = 0;
 
     *r4300_cp0_last_addr(&dev->r4300.cp0) = *r4300_pc(&dev->r4300);
+
+    vi_rebase_timing(&dev->vi, legacy_vi_delay);
 
     free(savestateData);
     return 1;
@@ -1012,7 +1014,7 @@ int savestates_save_m64p(const struct device* dev, void *data)
     PUTDATA(curr, uint32_t, dev->vi.regs[VI_V_BURST_REG]);
     PUTDATA(curr, uint32_t, dev->vi.regs[VI_X_SCALE_REG]);
     PUTDATA(curr, uint32_t, dev->vi.regs[VI_Y_SCALE_REG]);
-    PUTDATA(curr, uint32_t, dev->vi.delay);
+    PUTDATA(curr, uint32_t, vi_legacy_savestate_delay(&dev->vi));
 
     PUTDATA(curr, uint32_t, dev->ri.regs[RI_MODE_REG]);
     PUTDATA(curr, uint32_t, dev->ri.regs[RI_CONFIG_REG]);
@@ -1051,7 +1053,7 @@ int savestates_save_m64p(const struct device* dev, void *data)
     PUTDATA(curr, uint8_t, (dev->dp.dpc_regs[DPC_STATUS_REG] & 0x200) != 0);
     PUTDATA(curr, uint8_t, (dev->dp.dpc_regs[DPC_STATUS_REG] & 0x400) != 0);
     PUTDATA(curr, uint8_t, 0);
-    PUTDATA(curr, uint32_t, dev->dp.dpc_regs[DPC_CLOCK_REG]);
+    PUTDATA(curr, uint32_t, rdp_dpc_clock_value(&dev->dp, cp0_regs[CP0_COUNT_REG]));
     PUTDATA(curr, uint32_t, dev->dp.dpc_regs[DPC_BUFBUSY_REG]);
     PUTDATA(curr, uint32_t, dev->dp.dpc_regs[DPC_PIPEBUSY_REG]);
     PUTDATA(curr, uint32_t, dev->dp.dpc_regs[DPC_TMEM_REG]);
@@ -1180,7 +1182,7 @@ int savestates_save_m64p(const struct device* dev, void *data)
 
     PUTDATA(curr, uint8_t, dev->dp.do_on_unfreeze);
 
-    PUTDATA(curr, uint32_t, dev->vi.count_per_scanline);
+    PUTDATA(curr, uint32_t, vi_legacy_savestate_count_per_scanline(&dev->vi));
 
     for (i = 1; i < RDRAM_MAX_MODULES_COUNT; ++i) {
         PUTDATA(curr, uint32_t, dev->rdram.regs[i][RDRAM_CONFIG_REG]);

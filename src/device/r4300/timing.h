@@ -46,7 +46,8 @@ static inline void cp0_step_cycles(struct cp0* cp0, unsigned int cycles)
     uint32_t ticks = total >> 1;
     cp0->count_phase = total & 1;
     cp0->regs[CP0_COUNT_REG] += ticks;
-    cp0->cycle_count = (int32_t)((uint32_t)cp0->cycle_count + ticks);
+    cp0->count_clock += ticks;
+    cp0->cycle_count += ticks;
 }
 
 static inline int r4300_begin_instruction(struct r4300_core* r4300, uint32_t op, uint32_t pc)

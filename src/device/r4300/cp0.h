@@ -137,6 +137,7 @@ struct interrupt_event
 {
     int type;
     unsigned int count;
+    int64_t deadline;
 };
 
 struct node
@@ -164,7 +165,7 @@ struct interrupt_handler
     void (*callback)(void*);
 };
 
-enum { CP0_INTERRUPT_HANDLERS_COUNT = 13 };
+enum { CP0_INTERRUPT_HANDLERS_COUNT = 12 };
 
 enum {
     INTR_UNSAFE_R4300 = 0x01,
@@ -187,7 +188,8 @@ struct cp0
 
     struct interrupt_queue q;
     unsigned int next_interrupt;
-    int cycle_count;
+    int64_t cycle_count;
+    int64_t count_clock;
 
 
     struct interrupt_handler interrupt_handlers[CP0_INTERRUPT_HANDLERS_COUNT];
@@ -216,10 +218,11 @@ uint32_t* r4300_cp0_regs(struct cp0* cp0);
 uint32_t* r4300_cp0_last_addr(struct cp0* cp0);
 unsigned int* r4300_cp0_next_interrupt(struct cp0* cp0);
 
-/* cycle_count is a negative number representing the
-   number of cycles left until next interrupt is taken.
-   Next interrupt is taken whether cycle_count value is positive or null */
-int* r4300_cp0_cycle_count(struct cp0* cp0);
+/* cycle_count is negative while the next event is in the future and reaches
+ * zero when that event is due.  It is intentionally 64-bit so a full 32-bit
+ * COUNT wrap (notably COMPARE == COUNT) is representable without a fake
+ * half-wrap interrupt. */
+int64_t* r4300_cp0_cycle_count(struct cp0* cp0);
 
 int check_cop1_unusable(struct r4300_core* r4300);
 int check_instruction_mode(struct r4300_core* r4300, uint32_t op);

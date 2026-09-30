@@ -22,6 +22,14 @@ void poweron_device(struct device* dev) { (void)dev; abort(); }
 void pif_bootrom_hle_execute(struct r4300_core* core) { (void)core; abort(); }
 void DebugMessage(int level, const char* message, ...) { (void)level; (void)message; }
 uint32_t* mem_base_u32(void* base, uint32_t address) { return (uint32_t*)((char*)base + address); }
+void read_rdram_dram(void* opaque, uint32_t address, uint32_t* value)
+{
+    (void)opaque; (void)address; (void)value; abort();
+}
+void write_rdram_dram(void* opaque, uint32_t address, uint32_t value, uint32_t mask)
+{
+    (void)opaque; (void)address; (void)value; (void)mask; abort();
+}
 
 static struct r4300_core cpu;
 static struct memory memory;
@@ -63,8 +71,6 @@ static void setup(int cached)
     handlers[2].opaque = &cpu;
     handlers[1].callback = compare_int_handler;
     handlers[1].opaque = &cpu;
-    handlers[5].callback = special_int_handler;
-    handlers[5].opaque = &cpu.cp0;
     init_cp0(&cpu.cp0, 3, 2, handlers); /* Legacy scaling must not affect timing. */
     poweron_cp0(&cpu.cp0);
     poweron_cp1(&cpu.cp1);
@@ -184,8 +190,9 @@ static void check_compare(void)
     assert(get_next_event_type(&cpu.cp0.q) == COMPARE_INT);
     cpu.cp0.regs[CP0_COMPARE_REG] = 100;
     schedule_compare(&cpu.cp0);
-    assert(get_event(&cpu.cp0.q, COMPARE_INT) == NULL);
+    assert(get_event(&cpu.cp0.q, COMPARE_INT) != NULL);
     assert(cpu.cp0.next_interrupt == 110);
+    assert(cpu.cp0.cycle_count == -10);
     translate_event_queue(&cpu.cp0, 200);
     assert(*get_event(&cpu.cp0.q, PI_INT) == 210);
     assert(cpu.cp0.next_interrupt == 210);
@@ -198,12 +205,40 @@ static void check_compare(void)
     assert(cpu.cp0.regs[CP0_COUNT_REG] == 0);
     while (cpu.cp0.cycle_count >= 0) gen_interrupt(&cpu);
     assert(cpu.cp0.regs[CP0_CAUSE_REG] & CP0_CAUSE_IP7);
-    assert(get_event(&cpu.cp0.q, COMPARE_INT) == NULL);
-    /* Next half-wrap brings the distant match into the scheduling window. */
-    cpu.cp0.regs[CP0_COUNT_REG] = 0x80000000;
-    cpu.cp0.cycle_count = 0;
-    gen_interrupt(&cpu);
     assert(get_event(&cpu.cp0.q, COMPARE_INT) != NULL);
+    assert(cpu.cp0.cycle_count == -INT64_C(0x100000000));
+
+    /* Equality means the next timer match is one full 32-bit COUNT wrap away. */
+    setup(0);
+    translate_event_queue(&cpu.cp0, 123);
+    cpu.cp0.regs[CP0_COMPARE_REG] = 123;
+    schedule_compare(&cpu.cp0);
+    assert(cpu.cp0.cycle_count == -INT64_C(0x100000000));
+
+    /* Matches beyond the old signed 2^31 horizon remain directly schedulable. */
+    cpu.cp0.regs[CP0_COMPARE_REG] = UINT32_C(0x8000007c);
+    schedule_compare(&cpu.cp0);
+    assert(cpu.cp0.cycle_count == -INT64_C(0x80000001));
+
+    /* Legacy savestates may still contain the old fake 0x020 event.  Loading
+     * must discard it while retaining real events and rebuilding COMPARE. */
+    {
+        uint32_t legacy_queue[] = {
+            UINT32_C(0x020), UINT32_C(0x80000000),
+            PI_INT, UINT32_C(150),
+            UINT32_C(0xffffffff)
+        };
+        struct node* e;
+
+        setup(0);
+        translate_event_queue(&cpu.cp0, 100);
+        cpu.cp0.regs[CP0_COMPARE_REG] = 200;
+        load_eventqueue_infos(&cpu.cp0, (const char*)legacy_queue);
+        assert(*get_event(&cpu.cp0.q, PI_INT) == 150);
+        assert(*get_event(&cpu.cp0.q, COMPARE_INT) == 200);
+        for (e = cpu.cp0.q.first; e != NULL; e = e->next)
+            assert(e->data.type != 0x020);
+    }
 }
 
 static void check_latencies(void)

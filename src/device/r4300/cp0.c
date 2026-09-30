@@ -46,7 +46,7 @@ void poweron_cp0(struct cp0* cp0)
 {
     uint32_t* cp0_regs;
     unsigned int* cp0_next_interrupt;
-    int* cp0_cycle_count;
+    int64_t* cp0_cycle_count;
 
     cp0_regs = r4300_cp0_regs(cp0);
     cp0_next_interrupt = r4300_cp0_next_interrupt(cp0);
@@ -71,6 +71,7 @@ void poweron_cp0(struct cp0* cp0)
     *cp0_cycle_count = 0;
     cp0->last_addr = UINT32_C(0xbfc00000);
     cp0->count_phase = 0;
+    cp0->count_clock = 0;
 
     init_interrupt(cp0);
 
@@ -136,7 +137,7 @@ unsigned int* r4300_cp0_next_interrupt(struct cp0* cp0)
     return &cp0->next_interrupt;
 }
 
-int* r4300_cp0_cycle_count(struct cp0* cp0)
+int64_t* r4300_cp0_cycle_count(struct cp0* cp0)
 {
     return &cp0->cycle_count;
 }

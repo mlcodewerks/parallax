@@ -154,7 +154,7 @@ static void InterpretOpcode(struct r4300_core* r4300, bool continuous) M64P_HOT;
     static void name##_IDLE(struct r4300_core* r4300, uint32_t op) \
     { \
         uint32_t* cp0_regs = r4300->cp0.regs; \
-        int* cp0_cycle_count = &r4300->cp0.cycle_count; \
+        int64_t* cp0_cycle_count = &r4300->cp0.cycle_count; \
         const int take_jump = (condition); \
         if (cop1 && check_cop1_unusable(r4300)) return; \
         if ((op >> 26) == 1 && ((op >> 16) & 16) && ((op >> 21) & 31) == 31) \
@@ -164,7 +164,8 @@ static void InterpretOpcode(struct r4300_core* r4300, bool continuous) M64P_HOT;
             cp0_update_count(r4300); \
             if (*cp0_cycle_count < 0) \
             { \
-                cp0_regs[CP0_COUNT_REG] -= *cp0_cycle_count; \
+                cp0_regs[CP0_COUNT_REG] += (uint32_t)(-*cp0_cycle_count); \
+                r4300->cp0.count_clock += -*cp0_cycle_count; \
                 r4300->cp0.count_phase = 0; \
                 *cp0_cycle_count = 0; \
             } \
@@ -290,7 +291,8 @@ static void InterpretOpcode(struct r4300_core* r4300, bool continuous) M64P_HOT;
 #include <inttypes.h>
 #include <stdint.h>
 
-
+/* Fast instruction fetch for the common unmapped KSEG0/KSEG1 path.
+ * Keep the generic helper for TLB-mapped addresses and exceptions. */
 static M64P_FORCE_INLINE uint32_t* interp_fast_mem_access(struct r4300_core* r4300, uint32_t address)
 {
     if (M64P_LIKELY((address & UINT32_C(0xc0000000)) == UINT32_C(0x80000000)))
@@ -320,7 +322,9 @@ static M64P_FORCE_INLINE uint32_t* interp_fast_mem_access(struct r4300_core* r43
     return (uint32_t*)((uint8_t*)r4300->mem->base + address);
 }
 
-
+/* Interpreter-side TLB hit path. The existing translator remains the sole
+ * miss/exception path, so refill behavior and NEW_DYNAREC validation stay
+ * unchanged. w == 1 selects the writable LUT; all other values use read LUT. */
 static M64P_FORCE_INLINE uint32_t interp_translate_address(struct r4300_core* r4300,
                                                            uint32_t address,
                                                            int w)
@@ -341,7 +345,10 @@ static M64P_FORCE_INLINE uint32_t interp_translate_address(struct r4300_core* r4
     return virtual_to_physical_address(r4300, address, w);
 }
 
-
+/* Keep the dynamic memory map authoritative. Normal RDRAM is overwhelmingly
+ * common for Conker, so inline its tiny handler after confirming the currently
+ * installed handler is the normal one. Debug/breakpoint/corruption handlers
+ * still take the generic dispatch path. */
 static M64P_FORCE_INLINE void interp_mem_read32(const struct mem_handler* handler,
                                                 uint32_t address,
                                                 uint32_t* value)
@@ -1500,7 +1507,7 @@ DECLARE_INSTRUCTION(ERET)
 {
     DECLARE_R4300
     uint32_t* cp0_regs = r4300->cp0.regs;
-    int* cp0_cycle_count = &r4300->cp0.cycle_count;
+    int64_t* cp0_cycle_count = &r4300->cp0.cycle_count;
 
     cp0_update_count(r4300);
     if (cp0_regs[CP0_STATUS_REG] & CP0_STATUS_ERL)

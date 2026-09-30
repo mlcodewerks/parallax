@@ -62,11 +62,16 @@ static uint32_t get_remaining_dma_length(struct ai_controller* ai)
 
 static unsigned int get_dma_duration(struct ai_controller* ai)
 {
-    unsigned int samples_per_sec = ai->vi->clock / (1 + ai->regs[AI_DACRATE_REG]);
-    unsigned int bytes_per_sample = 4; /* XXX: assume 16bit stereo - should depends on bitrate instead */
-    unsigned int cpu_counts_per_sec = ai->vi->delay == 0 ? ai->vi->clock : ai->vi->delay * ai->vi->expected_refresh_rate; /* estimate cpu counts/sec using VI */
+    unsigned int bytes_per_sample = 4; /* 16-bit stereo */
+    unsigned int divider = 1 + ai->regs[AI_DACRATE_REG];
 
-    return ai->regs[AI_LEN_REG] * (cpu_counts_per_sec / (bytes_per_sample * samples_per_sec));
+    if (divider == 0)
+        return 0;
+
+    /* COUNT runs from the VI clock and the DAC consumes one sample every
+     * (1 + DACRATE) VI clocks.  Let the clock cancel and round only once. */
+    return (unsigned int)(((uint64_t)ai->regs[AI_LEN_REG] * divider)
+                          / bytes_per_sample);
 }
 
 
@@ -104,15 +109,15 @@ static void fifo_push(struct ai_controller* ai)
 
     if (ai->regs[AI_STATUS_REG] & AI_STATUS_BUSY)
     {
-        ai->fifo[1].address = ai->regs[AI_DRAM_ADDR_REG];
-        ai->fifo[1].length = ai->regs[AI_LEN_REG];
+        ai->fifo[1].address = ai->regs[AI_DRAM_ADDR_REG] & UINT32_C(0x00fffff8);
+        ai->fifo[1].length = ai->regs[AI_LEN_REG] & ~UINT32_C(7);
         ai->fifo[1].duration = duration;
         ai->regs[AI_STATUS_REG] |= AI_STATUS_FULL;
     }
     else
     {
-        ai->fifo[0].address = ai->regs[AI_DRAM_ADDR_REG];
-        ai->fifo[0].length = ai->regs[AI_LEN_REG];
+        ai->fifo[0].address = ai->regs[AI_DRAM_ADDR_REG] & UINT32_C(0x00fffff8);
+        ai->fifo[0].length = ai->regs[AI_LEN_REG] & ~UINT32_C(7);
         ai->fifo[0].duration = duration;
         ai->regs[AI_STATUS_REG] |= AI_STATUS_BUSY;
 
@@ -162,6 +167,40 @@ void poweron_ai(struct ai_controller* ai)
     ai->delayed_carry = 0;
 }
 
+static void ai_push_span(struct ai_controller* ai, unsigned int diff,
+                         unsigned int length)
+{
+    size_t dram_size = ai->ri->rdram->dram_size;
+    uint32_t start = ai->fifo[0].address & ~UINT32_C(7);
+
+    if (start >= dram_size || diff > dram_size - start)
+        return;
+
+    if (length > dram_size - start - diff)
+        length = (unsigned int)(dram_size - start - diff);
+
+    if (length < 4)
+        return;
+
+    ai->iaout->push_samples(ai->aout,
+        (unsigned char*)ai->ri->rdram->dram + start + diff, length);
+}
+
+static unsigned int ai_hand_over_played(struct ai_controller* ai, uint32_t remaining)
+{
+    unsigned int diff;
+    unsigned int handed;
+
+    if (remaining >= ai->last_read)
+        return 0;
+
+    diff = ai->fifo[0].length - ai->last_read;
+    handed = ai->last_read - remaining;
+    ai_push_span(ai, diff, handed);
+    ai->last_read = remaining;
+    return handed;
+}
+
 void read_ai_regs(void* opaque, uint32_t address, uint32_t* value)
 {
     struct ai_controller* ai = (struct ai_controller*)opaque;
@@ -170,13 +209,7 @@ void read_ai_regs(void* opaque, uint32_t address, uint32_t* value)
     if (reg == AI_LEN_REG)
     {
         *value = get_remaining_dma_length(ai);
-        if (*value < ai->last_read)
-        {
-            unsigned int diff = ai->fifo[0].length - ai->last_read;
-            unsigned char *p = (unsigned char*)&ai->ri->rdram->dram[ai->fifo[0].address/4];
-            ai->iaout->push_samples(ai->aout, p + diff, ai->last_read - *value);
-            ai->last_read = *value;
-        }
+        ai_hand_over_played(ai, *value);
     }
     else
     {
@@ -224,8 +257,7 @@ void ai_end_of_dma_event(void* opaque)
     if (ai->last_read != 0)
     {
         unsigned int diff = ai->fifo[0].length - ai->last_read;
-        unsigned char *p = (unsigned char*)&ai->ri->rdram->dram[ai->fifo[0].address/4];
-        ai->iaout->push_samples(ai->aout, p + diff, ai->last_read);
+        ai_push_span(ai, diff, ai->last_read);
         ai->last_read = 0;
     }
 
