@@ -20,6 +20,9 @@
  * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
 
 #include "rsp_core.h"
+#ifdef __LIBRETRO__
+#include "renderer_options.h"
+#endif
 
 #include <string.h>
 
@@ -36,7 +39,7 @@
 #include "plugin/plugin.h"
 #include "api/callbacks.h"
 
-static void do_sp_dma(struct rsp_core* sp, const struct sp_dma* dma)
+static void do_sp_dma(struct rsp_core* sp, const struct sp_dma* dma, int64_t start)
 {
     unsigned int i,j;
 
@@ -44,7 +47,7 @@ static void do_sp_dma(struct rsp_core* sp, const struct sp_dma* dma)
 
     unsigned int length = ((l & 0xfff) | 7) + 1;
     unsigned int count = ((l >> 12) & 0xff) + 1;
-    unsigned int skip = ((l >> 20) & 0xfff);
+    unsigned int skip = ((l >> 20) & 0xff8);
 
     unsigned int memaddr = dma->memaddr & 0xff8;
     unsigned int dramaddr = dma->dramaddr & 0xfffff8;
@@ -65,12 +68,12 @@ static void do_sp_dma(struct rsp_core* sp, const struct sp_dma* dma)
                 (dramaddr - length) & 0x7fffff, length);
             if (dramaddr <= 0x800000)
                 post_framebuffer_write(&sp->dp->fb, dramaddr - length, length);
-            dramaddr+=skip;
+            if (j + 1 < count) dramaddr+=skip;
         }
 
-        sp->regs[SP_MEM_ADDR_REG] = memaddr & 0xfff;
+        sp->regs[SP_MEM_ADDR_REG] = (dma->memaddr & 0x1000) | (memaddr & 0xfff);
         sp->regs[SP_DRAM_ADDR_REG] = dramaddr & 0xffffff;
-        sp->regs[SP_RD_LEN_REG] = 0xff8;
+        sp->regs[SP_RD_LEN_REG] = sp->regs[SP_WR_LEN_REG] = (l & 0xff800000) | 0xff8;
     }
     else
     {
@@ -83,17 +86,20 @@ static void do_sp_dma(struct rsp_core* sp, const struct sp_dma* dma)
                 memaddr++;
                 dramaddr++;
             }
-            dramaddr+=skip;
+            if (j + 1 < count) dramaddr+=skip;
         }
 
-        sp->regs[SP_MEM_ADDR_REG] = memaddr & 0xfff;
+        sp->regs[SP_MEM_ADDR_REG] = (dma->memaddr & 0x1000) | (memaddr & 0xfff);
         sp->regs[SP_DRAM_ADDR_REG] = dramaddr & 0xffffff;
-        sp->regs[SP_RD_LEN_REG] = 0xff8;
+        sp->regs[SP_RD_LEN_REG] = sp->regs[SP_WR_LEN_REG] = (l & 0xff800000) | 0xff8;
     }
 
     /* schedule end of dma event */
     cp0_update_count(sp->mi->r4300);
-    add_interrupt_event(&sp->mi->r4300->cp0, RSP_DMA_EVT, (count * length) / 8);
+    struct cp0* cp0 = &sp->mi->r4300->cp0;
+    sp->dma_end_clock = start + (count * length * 3 + 31) / 32;
+    add_interrupt_event_count(cp0, RSP_DMA_EVT, cp0->regs[CP0_COUNT_REG] +
+        (uint32_t)(sp->dma_end_clock - cp0->count_clock));
 }
 
 static void fifo_push(struct rsp_core* sp, uint32_t dir)
@@ -122,7 +128,8 @@ static void fifo_push(struct rsp_core* sp, uint32_t dir)
         sp->regs[SP_DMA_BUSY_REG] = 1;
         sp->regs[SP_STATUS_REG] |= SP_STATUS_DMA_BUSY;
 
-        do_sp_dma(sp, &sp->fifo[0]);
+        cp0_update_count(sp->mi->r4300);
+        do_sp_dma(sp, &sp->fifo[0], sp->mi->r4300->cp0.count_clock);
     }
 }
 
@@ -137,7 +144,7 @@ static void fifo_pop(struct rsp_core* sp)
         sp->regs[SP_DMA_FULL_REG] = 0;
         sp->regs[SP_STATUS_REG] &= ~SP_STATUS_DMA_FULL;
 
-        do_sp_dma(sp, &sp->fifo[0]);
+        do_sp_dma(sp, &sp->fifo[0], sp->dma_end_clock);
     }
     else
     {
@@ -194,6 +201,10 @@ void init_rsp(struct rsp_core* sp,
               struct ri_controller* ri)
 {
     sp->mem = sp_mem;
+    sp->cycle_timing = 1;
+#ifdef __LIBRETRO__
+    sp->cycle_timing = renderer_settings.rsp_timing;
+#endif
     sp->mi = mi;
     sp->dp = dp;
     sp->ri = ri;
@@ -207,6 +218,8 @@ void poweron_rsp(struct rsp_core* sp)
     memset(sp->fifo, 0, SP_DMA_FIFO_SIZE*sizeof(struct sp_dma));
 
     sp->rsp_task_locked = 0;
+    sp->dma_end_clock = 0;
+    sp->rsp_completion_status = 0;
     sp->mi->r4300->cp0.interrupt_unsafe_state &= ~INTR_UNSAFE_RSP;
     sp->regs[SP_STATUS_REG] = 1;
     sp->regs[SP_RD_LEN_REG] = 0xff8;
@@ -259,6 +272,8 @@ void write_rsp_regs(void* opaque, uint32_t address, uint32_t value, uint32_t mas
     }
 
     masked_write(&sp->regs[reg], value, mask);
+    if (reg == SP_MEM_ADDR_REG) sp->regs[reg] &= 0x1ff8;
+    if (reg == SP_DRAM_ADDR_REG) sp->regs[reg] &= 0xfffff8;
 
     switch(reg)
     {
@@ -280,7 +295,7 @@ void read_rsp_regs2(void* opaque, uint32_t address, uint32_t* value)
     struct rsp_core* sp = (struct rsp_core*)opaque;
     uint32_t reg = rsp_reg2(address);
 
-    *value = sp->regs2[reg];
+    *value = reg < SP_REGS2_COUNT ? sp->regs2[reg] : 0;
 
     if (reg == SP_PC_REG)
         *value &= 0xffc;
@@ -291,6 +306,7 @@ void write_rsp_regs2(void* opaque, uint32_t address, uint32_t value, uint32_t ma
     struct rsp_core* sp = (struct rsp_core*)opaque;
     uint32_t reg = rsp_reg2(address);
 
+    if (reg >= SP_REGS2_COUNT) return;
     if (reg == SP_PC_REG)
         mask &= 0xffc;
     masked_write(&sp->regs2[reg], value, mask);
@@ -301,6 +317,7 @@ void do_SP_Task(struct rsp_core* sp)
     uint32_t save_pc = sp->regs2[SP_PC_REG] & ~0xfff;
 
     uint32_t sp_delay_time;
+    uint32_t executed_cycles = 0;
 
     if (sp->mem[0xfc0/4] == 1)
     {
@@ -311,23 +328,15 @@ void do_SP_Task(struct rsp_core* sp)
 #if defined(PROFILE)
         timed_section_start(TIMED_SECTION_GFX);
 #endif
-        rsp.doRspCycles(0xffffffff);
+        executed_cycles = rsp.doRspCycles(0xffffffff);
 #if defined(PROFILE)
         timed_section_end(TIMED_SECTION_GFX);
 #endif
         sp->regs2[SP_PC_REG] |= save_pc;
         new_frame();
 
-        if (sp->mi->regs[MI_INTR_REG] & MI_INTR_DP)
-        {
-            sp->mi->regs[MI_INTR_REG] &= ~MI_INTR_DP;
-            if (sp->dp->dpc_regs[DPC_STATUS_REG] & DPC_STATUS_FREEZE) {
-                sp->dp->do_on_unfreeze |= DELAY_DP_INT;
-            } else {
-                cp0_update_count(sp->mi->r4300);
-                add_interrupt_event(&sp->mi->r4300->cp0, DP_INT, 4000);
-            }
-        }
+        /* DPC writes schedule SyncFull through the shared RDP handler.
+         * Preserve any DP interrupt already pending when the task started. */
         sp_delay_time = 1000;
 
         protect_framebuffers(&sp->dp->fb);
@@ -339,7 +348,7 @@ void do_SP_Task(struct rsp_core* sp)
 #if defined(PROFILE)
         timed_section_start(TIMED_SECTION_AUDIO);
 #endif
-        rsp.doRspCycles(0xffffffff);
+        executed_cycles = rsp.doRspCycles(0xffffffff);
 #if defined(PROFILE)
         timed_section_end(TIMED_SECTION_AUDIO);
 #endif
@@ -350,12 +359,18 @@ void do_SP_Task(struct rsp_core* sp)
     else
     {
         sp->regs2[SP_PC_REG] &= 0xfff;
-        rsp.doRspCycles(0xffffffff);
+        executed_cycles = rsp.doRspCycles(0xffffffff);
         sp->regs2[SP_PC_REG] |= save_pc;
 
         sp_delay_time = 0;
     }
 
+#if defined(HAVE_PARALLEL_RSP)
+    /* RSP is clocked at 62.5 MHz; COUNT at 46.875 MHz. Device completion
+     * must wait for executed work instead of treating an entire task as 1000 ticks. */
+    uint32_t task_ticks = (uint32_t)(((uint64_t)executed_cycles * 3 + 3) / 4);
+    if (sp->cycle_timing) sp_delay_time = task_ticks;
+#endif
     sp->rsp_task_locked = 0;
     sp->mi->r4300->cp0.interrupt_unsafe_state &= ~INTR_UNSAFE_RSP;
     if ((sp->regs[SP_STATUS_REG] & (SP_STATUS_HALT | SP_STATUS_BROKE)) == 0)
@@ -365,12 +380,19 @@ void do_SP_Task(struct rsp_core* sp)
         sp->rsp_task_locked = 1;
         sp->mi->r4300->cp0.interrupt_unsafe_state |= INTR_UNSAFE_RSP;
         cp0_update_count(sp->mi->r4300);
-        add_interrupt_event(&sp->mi->r4300->cp0, SP_INT, sp_delay_time);
+        /* A polling RSP must leave time for the CPU to change the shared
+         * registers. Zero-delay pumps can outrun the IPL3 semaphore handshake. */
+        add_interrupt_event(&sp->mi->r4300->cp0, SP_INT, sp_delay_time ? sp_delay_time : 64);
     }
-    else if (sp->mi->regs[MI_INTR_REG] & MI_INTR_SP)
+    else
     {
+        /* Completion is a status transition even when INTR_BREAK is off.
+         * Using MI_INTR_SP as the completion condition leaves a BREAK task
+         * permanently running when it did not request a CPU interrupt. */
+        sp->rsp_completion_status = sp->regs[SP_STATUS_REG] & (SP_STATUS_HALT | SP_STATUS_BROKE);
         cp0_update_count(sp->mi->r4300);
-        if (sp->regs[SP_STATUS_REG] & SP_STATUS_INTR_BREAK)
+        if ((sp->regs[SP_STATUS_REG] & SP_STATUS_INTR_BREAK) &&
+            (sp->mi->regs[MI_INTR_REG] & MI_INTR_SP))
         {
             clear_rcp_interrupt(sp->mi, MI_INTR_SP);
             if ((sp->mi->regs[MI_INTR_REG] & sp->mi->regs[MI_INTR_MASK_REG]) == 0)
@@ -379,8 +401,8 @@ void do_SP_Task(struct rsp_core* sp)
         add_interrupt_event(&sp->mi->r4300->cp0, SP_INT, sp_delay_time);
     }
 
-    sp->regs[SP_STATUS_REG] &=
-        ~(SP_STATUS_TASKDONE | SP_STATUS_BROKE | SP_STATUS_HALT);
+    /* SIG2 is a software-controlled signal, not a hardware BREAK flag. */
+    sp->regs[SP_STATUS_REG] &= ~(SP_STATUS_BROKE | SP_STATUS_HALT);
 }
 
 void rsp_interrupt_event(void* opaque)
@@ -393,10 +415,10 @@ void rsp_interrupt_event(void* opaque)
         return;
     }
 
-    sp->regs[SP_STATUS_REG] |=
-        SP_STATUS_TASKDONE | SP_STATUS_BROKE | SP_STATUS_HALT;
+    sp->regs[SP_STATUS_REG] |= sp->rsp_completion_status;
 
-    if ((sp->regs[SP_STATUS_REG] & SP_STATUS_INTR_BREAK) != 0)
+    if ((sp->rsp_completion_status & SP_STATUS_BROKE) &&
+        (sp->regs[SP_STATUS_REG] & SP_STATUS_INTR_BREAK))
     {
         raise_rcp_interrupt(sp->mi, MI_INTR_SP);
     }
@@ -406,4 +428,12 @@ void rsp_end_of_dma_event(void* opaque)
 {
     struct rsp_core* sp = (struct rsp_core*)opaque;
     fifo_pop(sp);
+}
+
+void rsp_rebase_dma(struct rsp_core* sp)
+{
+    struct cp0* cp0 = &sp->mi->r4300->cp0;
+    sp->dma_end_clock = cp0->count_clock;
+    for (struct node* e = cp0->q.first; e; e = e->next)
+        if (e->data.type == RSP_DMA_EVT) sp->dma_end_clock = e->data.deadline;
 }

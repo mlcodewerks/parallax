@@ -130,6 +130,7 @@ struct CPUState
 
 	CP2 cp2 = {};
 	CP0 cp0;
+	uint32_t cycles = 0; // Estimated RSP clocks in the current scheduler slice.
 };
 
 enum ReturnMode

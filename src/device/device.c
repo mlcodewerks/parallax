@@ -190,6 +190,7 @@ void init_device(struct device* dev,
     init_ri(&dev->ri, &dev->rdram);
     init_si(&dev->si, si_dma_duration, &dev->mi, &dev->pif, &dev->ri);
     init_vi(&dev->vi, vi_clock, expected_refresh_rate, &dev->mi, &dev->dp);
+    dev->dp.vi_regs = dev->vi.regs;
 
     /* FIXME: should boot on cart, unless only a disk is present, but having no cart is not yet supported by ui/core,
      * so use another way of selecting boot device:

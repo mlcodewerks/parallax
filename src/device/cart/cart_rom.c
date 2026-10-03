@@ -71,15 +71,14 @@ void read_cart_rom(void* opaque, uint32_t address, uint32_t* value)
 void write_cart_rom(void* opaque, uint32_t address, uint32_t value, uint32_t mask)
 {
     struct cart_rom* cart_rom = (struct cart_rom*)opaque;
-    cart_rom->last_write = value & mask;
-
     if (!validate_pi_request(cart_rom->pi))
         return;
+    cart_rom->last_write = value & mask;
 
     /* Mark IO as busy */
     cart_rom->pi->regs[PI_STATUS_REG] |= PI_STATUS_IO_BUSY;
     cp0_update_count(cart_rom->r4300);
-    add_interrupt_event(&cart_rom->r4300->cp0, PI_INT, 0x1000);
+    add_interrupt_event(&cart_rom->r4300->cp0, PI_INT, 100);
 }
 
 unsigned int cart_rom_dma_read(void* opaque, const uint8_t* dram, uint32_t dram_addr, uint32_t cart_addr, uint32_t length)

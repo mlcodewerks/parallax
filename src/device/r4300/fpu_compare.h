@@ -41,8 +41,7 @@ static void fpu_compare(struct r4300_core* r4300, uint32_t op)
     }
     if (unordered) result = predicate & 1;
     else {
-        /* IEEE encodings are monotonic within each sign. Compare integer bits
-         * so fast-math and host DAZ cannot collapse subnormal operands. */
+
         uint64_t sign = fmt == 16 ? UINT64_C(0x80000000) : UINT64_C(0x8000000000000000);
         int equal = lhs == rhs || ((lhs | rhs) & ~sign) == 0;
         int less = !equal && (((lhs ^ rhs) & sign) ? (lhs & sign) != 0 :

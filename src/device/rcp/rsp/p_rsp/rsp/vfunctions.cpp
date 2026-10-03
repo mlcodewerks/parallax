@@ -558,12 +558,13 @@ extern "C"
 	// VRSQ
 	// VRSQL
 	//
+	// LOAD_VT needs the full four-bit selector for accumulator-low. The
+	// scalar divider helpers independently mask their source lane to 0-7.
 	void RSP_VRCP(RSP::CPUState *rsp, unsigned vd, unsigned vs, unsigned vt, unsigned e)
 	{
 		TRACE_VU(VRCP);
 		uint16_t *acc = rsp->cp2.acc.e;
 		unsigned de = vs & 0x7;
-		e &= 0x7;
 
 		write_acc_lo(acc, LOAD_VT());
 
@@ -577,7 +578,6 @@ extern "C"
 		TRACE_VU(VRCPL);
 		uint16_t *acc = rsp->cp2.acc.e;
 		unsigned de = vs & 0x7;
-		e &= 0x7;
 
 		write_acc_lo(acc, LOAD_VT());
 
@@ -593,7 +593,6 @@ extern "C"
 		TRACE_VU(VRSQ);
 		uint16_t *acc = rsp->cp2.acc.e;
 		unsigned de = vs & 0x7;
-		e &= 0x7;
 
 		write_acc_lo(acc, LOAD_VT());
 
@@ -607,7 +606,6 @@ extern "C"
 		TRACE_VU(VRSQL);
 		uint16_t *acc = rsp->cp2.acc.e;
 		unsigned de = vs & 0x7;
-		e &= 0x7;
 
 		write_acc_lo(acc, LOAD_VT());
 
@@ -627,7 +625,6 @@ extern "C"
 		TRACE_VU(VRCPH);
 		uint16_t *acc = rsp->cp2.acc.e;
 		unsigned de = vs & 0x7;
-		e &= 0x7;
 
 		write_acc_lo(acc, LOAD_VT());
 
@@ -643,7 +640,6 @@ extern "C"
 		TRACE_VU(VRSQH);
 		uint16_t *acc = rsp->cp2.acc.e;
 		unsigned de = vs & 0x7;
-		e &= 0x7;
 
 		write_acc_lo(acc, LOAD_VT());
 

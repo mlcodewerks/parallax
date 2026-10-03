@@ -81,6 +81,8 @@ enum
     DELAY_UPDATESCREEN = 0x002
 };
 
+#include "rdp_timing.h"
+
 struct rdp_core
 {
     uint32_t dpc_regs[DPC_REGS_COUNT];
@@ -93,16 +95,19 @@ struct rdp_core
 
     struct rsp_core* sp;
     struct mi_controller* mi;
+    const uint32_t* vi_regs;
+    struct rdp_timing timing;
+    int instruction_timing;
 };
 
 static osal_inline uint32_t dpc_reg(uint32_t address)
 {
-    return (address & 0xffff) >> 2;
+    return (address & 0x1f) >> 2;
 }
 
 static osal_inline uint32_t dps_reg(uint32_t address)
 {
-    return (address & 0xffff) >> 2;
+    return (address & 0xf) >> 2;
 }
 
 void init_rdp(struct rdp_core* dp,
@@ -113,11 +118,16 @@ void init_rdp(struct rdp_core* dp,
               struct r4300_core* r4300);
 
 void poweron_rdp(struct rdp_core* dp);
+const uint32_t *rdp_hle_command_buffer(uint32_t address);
+void rdp_submit_hle(struct rdp_core *dp, const uint32_t *words, uint32_t base, uint32_t bytes);
 uint32_t rdp_dpc_clock_value(const struct rdp_core* dp, uint32_t count);
 void rdp_restore_dpc_clock(struct rdp_core* dp, uint32_t count);
+uint32_t rdp_sync_full_delay(const struct rdp_core* dp);
 
 void read_dpc_regs(void* opaque, uint32_t address, uint32_t* value);
+void read_rsp_dpc_regs(void* opaque, uint32_t address, uint32_t* value);
 void write_dpc_regs(void* opaque, uint32_t address, uint32_t value, uint32_t mask);
+void write_rsp_dpc_regs(void* opaque, uint32_t address, uint32_t value, uint32_t mask);
 
 void read_dps_regs(void* opaque, uint32_t address, uint32_t* value);
 void write_dps_regs(void* opaque, uint32_t address, uint32_t value, uint32_t mask);

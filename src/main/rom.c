@@ -50,7 +50,7 @@ enum { DEFAULT_COUNT_PER_OP = 2 };
 /* by default, extra mem is enabled */
 enum { DEFAULT_DISABLE_EXTRA_MEM = 0 };
 /* Default SI DMA duration */
-enum { DEFAULT_SI_DMA_DURATION = 0x900 };
+enum { DEFAULT_SI_DMA_DURATION = 0 }; /* Command-dependent SI timing. */
 
 static romdatabase_entry* ini_search_by_md5(md5_byte_t* md5);
 

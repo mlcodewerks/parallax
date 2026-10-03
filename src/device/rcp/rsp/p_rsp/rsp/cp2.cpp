@@ -40,9 +40,13 @@ extern "C"
 
 		if (element & 1)
 		{
-			unsigned hi = (element + 1) >> 1;
 			e[lo] = (e[lo] & 0xff00) | ((rt >> 8) & 0xff);
-			e[hi] = (e[lo] & 0x00ff) | ((rt & 0xff) << 8);
+			// Byte 15 drops the second byte instead of crossing registers.
+			if (element != 15)
+			{
+				unsigned hi = (element + 1) >> 1;
+				e[hi] = (e[hi] & 0x00ff) | ((rt & 0xff) << 8);
+			}
 		}
 		else
 			e[lo] = rt;

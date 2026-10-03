@@ -1,4 +1,5 @@
 #include "../state.hpp"
+#include "../dpc_bridge.h"
 
 #ifdef PARALLEL_INTEGRATION
 #include "../rsp_1.1.h"
@@ -16,6 +17,19 @@ using namespace RSP;
 extern "C"
 {
 
+	static void* dpc_opaque;
+	static void (*dpc_read)(void*, uint32_t, uint32_t*);
+	static void (*dpc_write)(void*, uint32_t, uint32_t, uint32_t);
+
+	void parallelRSPSetDpcCallbacks(void* opaque,
+	    void (*read)(void*, uint32_t, uint32_t*),
+	    void (*write)(void*, uint32_t, uint32_t, uint32_t))
+	{
+		dpc_opaque = opaque;
+		dpc_read = read;
+		dpc_write = write;
+	}
+
 #ifdef INTENSE_DEBUG
 	void log_rsp_mem_parallel(void);
 #endif
@@ -24,16 +38,25 @@ extern "C"
 	{
 		rd &= 15;
 		uint32_t res = *rsp->cp0.cr[rd];
+		if (rd >= CP0_REGISTER_CMD_START && dpc_read)
+			dpc_read(dpc_opaque, (rd - CP0_REGISTER_CMD_START) * 4, &res);
 		if (rt)
 			rsp->sr[rt] = res;
 
-			// CFG_MEND_SEMAPHORE_LOCK == 0 by default,
-			// so don't bother implementing semaphores.
-			// It makes Mario Golf run terribly for some reason.
+		if (rd == CP0_REGISTER_SP_RESERVED)
+			*rsp->cp0.cr[rd] = 1; // Atomic semaphore test-and-set, even for r0.
 
 #ifdef PARALLEL_INTEGRATION
-		// WAIT_FOR_CPU_HOST. From CXD4.
-		if (rd == CP0_REGISTER_SP_STATUS)
+		if (rd == CP0_REGISTER_SP_RESERVED)
+		{
+			// Synchronize after the atomic access. The task scheduler gives
+			// the CPU a turn before this RSP can acquire the semaphore again.
+			*RSP::rsp.SP_STATUS_REG |= SP_STATUS_HALT;
+			return MODE_CHECK_FLAGS;
+		}
+		// WAIT_FOR_CPU_HOST. From CXD4. DPC polling also needs to yield:
+		// the CPU can unfreeze the RDP only after this synchronous slice ends.
+		if (rd == CP0_REGISTER_SP_STATUS || rd >= CP0_REGISTER_CMD_START)
 		{
 			RSP::MFC0_count[rt] += 1;
 			if (RSP::MFC0_count[rt] >= RSP::SP_STATUS_TIMEOUT)
@@ -56,67 +79,67 @@ extern "C"
 
 		uint32_t status = *rsp->cp0.cr[CP0_REGISTER_SP_STATUS];
 
-		if (rt & SP_CLR_HALT)
+		if ((rt & (SP_CLR_HALT | SP_SET_HALT)) == SP_CLR_HALT)
 			status &= ~SP_STATUS_HALT;
-		else if (rt & SP_SET_HALT)
+		else if ((rt & (SP_CLR_HALT | SP_SET_HALT)) == SP_SET_HALT)
 			status |= SP_STATUS_HALT;
 
 		if (rt & SP_CLR_BROKE)
 			status &= ~SP_STATUS_BROKE;
 
-		if (rt & SP_CLR_INTR)
+		if ((rt & (SP_CLR_INTR | SP_SET_INTR)) == SP_CLR_INTR)
 			*rsp->cp0.irq &= ~1;
-		else if (rt & SP_SET_INTR)
+		else if ((rt & (SP_CLR_INTR | SP_SET_INTR)) == SP_SET_INTR)
 			*rsp->cp0.irq |= 1;
 
-		if (rt & SP_CLR_SSTEP)
+		if ((rt & (SP_CLR_SSTEP | SP_SET_SSTEP)) == SP_CLR_SSTEP)
 			status &= ~SP_STATUS_SSTEP;
-		else if (rt & SP_SET_SSTEP)
+		else if ((rt & (SP_CLR_SSTEP | SP_SET_SSTEP)) == SP_SET_SSTEP)
 			status |= SP_STATUS_SSTEP;
 
-		if (rt & SP_CLR_INTR_BREAK)
+		if ((rt & (SP_CLR_INTR_BREAK | SP_SET_INTR_BREAK)) == SP_CLR_INTR_BREAK)
 			status &= ~SP_STATUS_INTR_BREAK;
-		else if (rt & SP_SET_INTR_BREAK)
+		else if ((rt & (SP_CLR_INTR_BREAK | SP_SET_INTR_BREAK)) == SP_SET_INTR_BREAK)
 			status |= SP_STATUS_INTR_BREAK;
 
-		if (rt & SP_CLR_SIG0)
+		if ((rt & (SP_CLR_SIG0 | SP_SET_SIG0)) == SP_CLR_SIG0)
 			status &= ~SP_STATUS_SIG0;
-		else if (rt & SP_SET_SIG0)
+		else if ((rt & (SP_CLR_SIG0 | SP_SET_SIG0)) == SP_SET_SIG0)
 			status |= SP_STATUS_SIG0;
 
-		if (rt & SP_CLR_SIG1)
+		if ((rt & (SP_CLR_SIG1 | SP_SET_SIG1)) == SP_CLR_SIG1)
 			status &= ~SP_STATUS_SIG1;
-		else if (rt & SP_SET_SIG1)
+		else if ((rt & (SP_CLR_SIG1 | SP_SET_SIG1)) == SP_SET_SIG1)
 			status |= SP_STATUS_SIG1;
 
-		if (rt & SP_CLR_SIG2)
+		if ((rt & (SP_CLR_SIG2 | SP_SET_SIG2)) == SP_CLR_SIG2)
 			status &= ~SP_STATUS_SIG2;
-		else if (rt & SP_SET_SIG2)
+		else if ((rt & (SP_CLR_SIG2 | SP_SET_SIG2)) == SP_SET_SIG2)
 			status |= SP_STATUS_SIG2;
 
-		if (rt & SP_CLR_SIG3)
+		if ((rt & (SP_CLR_SIG3 | SP_SET_SIG3)) == SP_CLR_SIG3)
 			status &= ~SP_STATUS_SIG3;
-		else if (rt & SP_SET_SIG3)
+		else if ((rt & (SP_CLR_SIG3 | SP_SET_SIG3)) == SP_SET_SIG3)
 			status |= SP_STATUS_SIG3;
 
-		if (rt & SP_CLR_SIG4)
+		if ((rt & (SP_CLR_SIG4 | SP_SET_SIG4)) == SP_CLR_SIG4)
 			status &= ~SP_STATUS_SIG4;
-		else if (rt & SP_SET_SIG4)
+		else if ((rt & (SP_CLR_SIG4 | SP_SET_SIG4)) == SP_SET_SIG4)
 			status |= SP_STATUS_SIG4;
 
-		if (rt & SP_CLR_SIG5)
+		if ((rt & (SP_CLR_SIG5 | SP_SET_SIG5)) == SP_CLR_SIG5)
 			status &= ~SP_STATUS_SIG5;
-		else if (rt & SP_SET_SIG5)
+		else if ((rt & (SP_CLR_SIG5 | SP_SET_SIG5)) == SP_SET_SIG5)
 			status |= SP_STATUS_SIG5;
 
-		if (rt & SP_CLR_SIG6)
+		if ((rt & (SP_CLR_SIG6 | SP_SET_SIG6)) == SP_CLR_SIG6)
 			status &= ~SP_STATUS_SIG6;
-		else if (rt & SP_SET_SIG6)
+		else if ((rt & (SP_CLR_SIG6 | SP_SET_SIG6)) == SP_SET_SIG6)
 			status |= SP_STATUS_SIG6;
 
-		if (rt & SP_CLR_SIG7)
+		if ((rt & (SP_CLR_SIG7 | SP_SET_SIG7)) == SP_CLR_SIG7)
 			status &= ~SP_STATUS_SIG7;
-		else if (rt & SP_SET_SIG7)
+		else if ((rt & (SP_CLR_SIG7 | SP_SET_SIG7)) == SP_SET_SIG7)
 			status |= SP_STATUS_SIG7;
 
 		*rsp->cp0.cr[CP0_REGISTER_SP_STATUS] = status;
@@ -128,17 +151,14 @@ extern "C"
 	{
 		uint32_t length_reg = *rsp->cp0.cr[CP0_REGISTER_DMA_READ_LENGTH];
 		uint32_t length = (length_reg & 0xFFF) + 1;
-		uint32_t skip = (length_reg >> 20) & 0xFFF;
+		uint32_t skip = (length_reg >> 20) & 0xFF8;
 		unsigned count = (length_reg >> 12) & 0xFF;
 
 		// Force alignment.
 		length = (length + 0x7) & ~0x7;
-		*rsp->cp0.cr[CP0_REGISTER_DMA_CACHE] &= ~0x3;
+		rsp->cycles += (length / 8) * (count + 1); // Ares DMA: one RSP clock per 8 bytes.
+		*rsp->cp0.cr[CP0_REGISTER_DMA_CACHE] &= ~0x7;
 		*rsp->cp0.cr[CP0_REGISTER_DMA_DRAM] &= ~0x7;
-
-		// Check length.
-		if (((*rsp->cp0.cr[CP0_REGISTER_DMA_CACHE] & 0xFFF) + length) > 0x1000)
-			length = 0x1000 - (*rsp->cp0.cr[CP0_REGISTER_DMA_CACHE] & 0xFFF);
 
 		unsigned i = 0;
 		uint32_t source = *rsp->cp0.cr[CP0_REGISTER_DMA_DRAM];
@@ -155,7 +175,7 @@ extern "C"
 			do
 			{
 				uint32_t source_addr = (source + j) & 0x7FFFFC;
-				uint32_t dest_addr = (dest + j) & 0x1FFC;
+				uint32_t dest_addr = (dest & 0x1000) | ((dest + j) & 0xFFC);
 				uint32_t word = rsp->rdram[source_addr >> 2];
 
 				if (dest_addr & 0x1000)
@@ -172,12 +192,14 @@ extern "C"
 				j += 4;
 			} while (j < length);
 
-			source += length + skip;
-			dest += length;
+			source += length + (i < count ? skip : 0);
+			dest = (dest & 0x1000) | ((dest + length) & 0xFFF);
 		} while (++i <= count);
 
-		*rsp->cp0.cr[CP0_REGISTER_DMA_DRAM] = source;
+		*rsp->cp0.cr[CP0_REGISTER_DMA_DRAM] = source & 0xffffff;
 		*rsp->cp0.cr[CP0_REGISTER_DMA_CACHE] = dest;
+		*rsp->cp0.cr[CP0_REGISTER_DMA_READ_LENGTH] =
+			*rsp->cp0.cr[CP0_REGISTER_DMA_WRITE_LENGTH] = (length_reg & 0xff800000) | 0xff8;
 
 #ifdef INTENSE_DEBUG
 		log_rsp_mem_parallel();
@@ -189,17 +211,14 @@ extern "C"
 	{
 		uint32_t length_reg = *rsp->cp0.cr[CP0_REGISTER_DMA_WRITE_LENGTH];
 		uint32_t length = (length_reg & 0xFFF) + 1;
-		uint32_t skip = (length_reg >> 20) & 0xFFF;
+		uint32_t skip = (length_reg >> 20) & 0xFF8;
 		unsigned count = (length_reg >> 12) & 0xFF;
 
 		// Force alignment.
 		length = (length + 0x7) & ~0x7;
-		*rsp->cp0.cr[CP0_REGISTER_DMA_CACHE] &= ~0x3;
+		rsp->cycles += (length / 8) * (count + 1);
+		*rsp->cp0.cr[CP0_REGISTER_DMA_CACHE] &= ~0x7;
 		*rsp->cp0.cr[CP0_REGISTER_DMA_DRAM] &= ~0x7;
-
-		// Check length.
-		if (((*rsp->cp0.cr[CP0_REGISTER_DMA_CACHE] & 0xFFF) + length) > 0x1000)
-			length = 0x1000 - (*rsp->cp0.cr[CP0_REGISTER_DMA_CACHE] & 0xFFF);
 
 		uint32_t dest = *rsp->cp0.cr[CP0_REGISTER_DMA_DRAM];
 		uint32_t source = *rsp->cp0.cr[CP0_REGISTER_DMA_CACHE];
@@ -216,7 +235,7 @@ extern "C"
 
 			do
 			{
-				uint32_t source_addr = (source + j) & 0x1FFC;
+				uint32_t source_addr = (source & 0x1000) | ((source + j) & 0xFFC);
 				uint32_t dest_addr = (dest + j) & 0x7FFFFC;
 
 				rsp->rdram[dest_addr >> 2] =
@@ -225,12 +244,14 @@ extern "C"
 				j += 4;
 			} while (j < length);
 
-			source += length;
-			dest += length + skip;
+			source = (source & 0x1000) | ((source + length) & 0xFFF);
+			dest += length + (i < count ? skip : 0);
 		} while (++i <= count);
 
 		*rsp->cp0.cr[CP0_REGISTER_DMA_CACHE] = source;
-		*rsp->cp0.cr[CP0_REGISTER_DMA_DRAM] = dest;
+		*rsp->cp0.cr[CP0_REGISTER_DMA_DRAM] = dest & 0xffffff;
+		*rsp->cp0.cr[CP0_REGISTER_DMA_READ_LENGTH] =
+			*rsp->cp0.cr[CP0_REGISTER_DMA_WRITE_LENGTH] = (length_reg & 0xff800000) | 0xff8;
 #ifdef INTENSE_DEBUG
 		log_rsp_mem_parallel();
 #endif
@@ -240,15 +261,21 @@ extern "C"
 	int RSP_MTC0(RSP::CPUState *rsp, unsigned rd, unsigned rt)
 	{
 		uint32_t val = rsp->sr[rt];
+		rd &= 15;
+		if (rd >= CP0_REGISTER_CMD_START && dpc_write)
+		{
+			dpc_write(dpc_opaque, (rd - CP0_REGISTER_CMD_START) * 4, val, ~0u);
+			return MODE_CONTINUE;
+		}
 
 		switch (static_cast<CP0Registers>(rd & 15))
 		{
 		case CP0_REGISTER_DMA_CACHE:
-			*rsp->cp0.cr[CP0_REGISTER_DMA_CACHE] = val & 0x1fff;
+			*rsp->cp0.cr[CP0_REGISTER_DMA_CACHE] = val & 0x1ff8;
 			break;
 
 		case CP0_REGISTER_DMA_DRAM:
-			*rsp->cp0.cr[CP0_REGISTER_DMA_DRAM] = val & 0xffffff;
+			*rsp->cp0.cr[CP0_REGISTER_DMA_DRAM] = val & 0xfffff8;
 			break;
 
 		case CP0_REGISTER_DMA_READ_LENGTH:
@@ -268,6 +295,9 @@ extern "C"
 
 		case CP0_REGISTER_SP_STATUS:
 			return rsp_status_write(rsp, val);
+		case CP0_REGISTER_DMA_FULL:
+		case CP0_REGISTER_DMA_BUSY:
+			break; // Read-only from either processor.
 
 		case CP0_REGISTER_SP_RESERVED:
 			// CXD4 forces this to 0.

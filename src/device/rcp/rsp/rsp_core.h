@@ -102,6 +102,9 @@ struct rsp_core
     struct rdp_core* dp;
     struct ri_controller* ri;
     struct sp_dma fifo[SP_DMA_FIFO_SIZE];
+    int64_t dma_end_clock;
+    uint32_t rsp_completion_status; /* Deferred HALT/BROKE transition. */
+    int cycle_timing;
 };
 
 static osal_inline uint32_t rsp_mem_address(uint32_t address)
@@ -111,12 +114,12 @@ static osal_inline uint32_t rsp_mem_address(uint32_t address)
 
 static osal_inline uint32_t rsp_reg(uint32_t address)
 {
-    return (address & 0xffff) >> 2;
+    return (address & 0x1f) >> 2;
 }
 
 static osal_inline uint32_t rsp_reg2(uint32_t address)
 {
-    return (address & 0xffff) >> 2;
+    return (address & 0x1f) >> 2;
 }
 
 void init_rsp(struct rsp_core* sp,
@@ -140,5 +143,6 @@ void do_SP_Task(struct rsp_core* sp);
 
 void rsp_interrupt_event(void* opaque);
 void rsp_end_of_dma_event(void* opaque);
+void rsp_rebase_dma(struct rsp_core* sp);
 
 #endif

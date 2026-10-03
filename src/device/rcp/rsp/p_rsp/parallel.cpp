@@ -4,9 +4,13 @@
 #include "rsp_jit.hpp"
 #endif
 #include <stdint.h>
+#include "dpc_bridge.h"
 
 #include "m64p_plugin.h"
 #include "rsp_1.1.h"
+#ifdef __LIBRETRO__
+#include "renderer_options.h"
+#endif
 
 #define RSP_PARALLEL_VERSION 0x0101
 #define RSP_PLUGIN_API_VERSION 0x020000
@@ -25,6 +29,36 @@ int SP_STATUS_TIMEOUT;
 
 extern "C"
 {
+    void parallelRSPSaveState(uint32_t* words)
+    {
+        auto& s = RSP::cpu.get_state();
+        *words++ = s.pc; *words++ = s.has_delay_slot;
+        *words++ = s.branch_target; *words++ = s.cycles;
+        *words++ = RSP::SP_STATUS_TIMEOUT;
+        for (auto value : s.sr) *words++ = value;
+        for (auto& reg : s.cp2.regs) for (auto value : reg.e) *words++ = value;
+        for (auto& flag : s.cp2.flags) for (auto value : flag.e) *words++ = value;
+        for (auto value : s.cp2.acc.e) *words++ = value;
+        *words++ = uint16_t(s.cp2.div_out); *words++ = uint16_t(s.cp2.div_in);
+        *words++ = uint8_t(s.cp2.dp_flag);
+    }
+
+    void parallelRSPLoadState(const uint32_t* words)
+    {
+        auto& s = RSP::cpu.get_state();
+        s.pc = *words++; s.has_delay_slot = *words++;
+        s.branch_target = *words++; s.cycles = *words++;
+        RSP::SP_STATUS_TIMEOUT = *words++;
+        for (auto& value : s.sr) value = *words++;
+        for (auto& reg : s.cp2.regs) for (auto& value : reg.e) value = uint16_t(*words++);
+        for (auto& flag : s.cp2.flags) for (auto& value : flag.e) value = uint16_t(*words++);
+        for (auto& value : s.cp2.acc.e) value = uint16_t(*words++);
+        s.cp2.div_out = int16_t(*words++); s.cp2.div_in = int16_t(*words++);
+        s.cp2.dp_flag = int8_t(*words++);
+        s.dirty_blocks = ~0u;
+        RSP::cpu.invalidate_imem();
+    }
+
 	// Hack entry point to use when loading savestates when we're tracing.
 	void rsp_clear_registers()
 	{
@@ -60,6 +94,7 @@ extern "C"
 
 		// Run CPU until we either break or we need to fire an IRQ.
 		RSP::cpu.get_state().pc = *RSP::rsp.SP_PC_REG & 0xfff;
+		RSP::cpu.get_state().cycles = 0;
 
 #ifdef INTENSE_DEBUG
 		fprintf(stderr, "RUN TASK: %u\n", RSP::cpu.get_state().pc);
@@ -77,23 +112,28 @@ extern "C"
 		}
 
 		*RSP::rsp.SP_PC_REG = 0x04001000 | (RSP::cpu.get_state().pc & 0xffc);
+		cycles = RSP::cpu.get_state().cycles;
 
 		// From CXD4.
 		if (*RSP::rsp.SP_STATUS_REG & SP_STATUS_BROKE)
 			return cycles;
 		else if (*RSP::cpu.get_state().cp0.irq & 1)
 			RSP::rsp.CheckInterrupts();
-		else if (*RSP::rsp.SP_SEMAPHORE_REG != 0) // Semaphore lock fixes.
-		{
-		}
-		else
-			RSP::SP_STATUS_TIMEOUT = 16; // From now on, wait 16 times, not 0x7fff
+		// Bound subsequent polls even while the semaphore is held: the CPU
+		// cannot release it until this synchronous RSP invocation yields.
+		RSP::SP_STATUS_TIMEOUT = 16;
 
 		// CPU restarts with the correct SIGs.
 		*RSP::rsp.SP_STATUS_REG &= ~SP_STATUS_HALT;
 
 		return cycles;
 	}
+
+	unsigned int parallelRSPExecutedCycles(void)
+	{
+		return RSP::cpu.get_state().cycles;
+	}
+    void parallelRSPResetExecutedCycles(void) { RSP::cpu.get_state().cycles = 0; }
 
 	EXPORT m64p_error CALL parallelRSPPluginGetVersion(m64p_plugin_type *PluginType, int *PluginVersion,
 	                                                   int *APIVersion, const char **PluginNamePtr, int *Capabilities)
@@ -157,5 +197,8 @@ extern "C"
 		RSP::cpu.set_dmem(reinterpret_cast<uint32_t *>(Rsp_Info.DMEM));
 		RSP::cpu.set_imem(reinterpret_cast<uint32_t *>(Rsp_Info.IMEM));
 		RSP::cpu.set_rdram(reinterpret_cast<uint32_t *>(Rsp_Info.RDRAM));
+#if defined(__LIBRETRO__) && !defined(DEBUG_JIT)
+        RSP::cpu.set_cycle_timing(renderer_settings.rsp_timing);
+#endif
 	}
 }

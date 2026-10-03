@@ -55,10 +55,8 @@ struct vi_controller
     unsigned int clock;
     unsigned int expected_refresh_rate;
 
-    /* Fractional VI-field timing state. The next field is anchored to the
-     * COUNT value at which the current VI is serviced (Racer-compatible
-     * hybrid semantics), while field_tick_phase carries clock / refresh
-     * remainder so the old per-scanline truncation does not accumulate. */
+    /* Oscillator phase: field boundaries follow their scheduled deadlines,
+     * independent of CPU interrupt-service latency or COUNT writes. */
     uint64_t field_tick_phase;
     int64_t field_start_count_clock;
     uint32_t field_ticks;

@@ -63,6 +63,23 @@ static unsigned int vi_v_total(const struct vi_controller* vi)
     return (vi->regs[VI_V_SYNC_REG] & UINT32_C(0x3ff)) + 1u;
 }
 
+/* VI periods are video-clock cycles; interrupt deadlines are COUNT ticks.
+ * COUNT is the fixed 93.75 MHz CPU clock divided by two. */
+static uint64_t vi_period_numerator(const struct vi_controller* vi)
+{
+    if (vi->regs[VI_H_SYNC_REG] && vi->regs[VI_V_SYNC_REG] && vi->clock)
+        return UINT64_C(46875000) * vi_v_total(vi) *
+               ((vi->regs[VI_H_SYNC_REG] & 0xfff) + 1u);
+    return UINT64_C(46875000);
+}
+
+static uint32_t vi_period_denominator(const struct vi_controller* vi)
+{
+    if (vi->regs[VI_H_SYNC_REG] && vi->regs[VI_V_SYNC_REG] && vi->clock)
+        return vi->clock * 2u;
+    return vi->expected_refresh_rate ? vi->expected_refresh_rate : 60u;
+}
+
 static unsigned int vi_next_field_ticks(struct vi_controller* vi)
 {
     uint64_t ticks;
@@ -74,11 +91,10 @@ static unsigned int vi_next_field_ticks(struct vi_controller* vi)
     }
     else
     {
-        const unsigned int refresh = vi->expected_refresh_rate
-            ? vi->expected_refresh_rate : 60u;
-        const uint64_t scaled = (uint64_t)vi->clock + vi->field_tick_phase;
-        ticks = scaled / refresh;
-        vi->field_tick_phase = scaled % refresh;
+        const uint32_t denominator = vi_period_denominator(vi);
+        const uint64_t scaled = vi_period_numerator(vi) + vi->field_tick_phase;
+        ticks = scaled / denominator;
+        vi->field_tick_phase = scaled % denominator;
     }
 
     if (ticks == 0)
@@ -98,10 +114,10 @@ double vi_actual_refresh_rate(const struct vi_controller* vi)
         return 0.0;
 
     if (!CountPerScanlineOverride)
-        return (double)(vi->expected_refresh_rate ? vi->expected_refresh_rate : 60u);
+        return 46875000.0 * vi_period_denominator(vi) / vi_period_numerator(vi);
 
     ticks = (uint64_t)CountPerScanlineOverride * vi_v_total(vi);
-    return ticks != 0 ? (double)vi->clock / (double)ticks : 0.0;
+    return ticks != 0 ? 46875000.0 / (double)ticks : 0.0;
 }
 
 unsigned int vi_legacy_savestate_delay(const struct vi_controller* vi)
@@ -115,9 +131,8 @@ unsigned int vi_legacy_savestate_delay(const struct vi_controller* vi)
         ticks = (uint64_t)CountPerScanlineOverride * vi_v_total(vi);
     else
     {
-        const unsigned int refresh = vi->expected_refresh_rate
-            ? vi->expected_refresh_rate : 60u;
-        ticks = ((uint64_t)vi->clock + refresh / 2u) / refresh;
+        const uint32_t denominator = vi_period_denominator(vi);
+        ticks = (vi_period_numerator(vi) + denominator / 2u) / denominator;
     }
 
     if (ticks > UINT32_MAX)
@@ -268,14 +283,12 @@ void write_vi_regs(void* opaque, uint32_t address, uint32_t value, uint32_t mask
         return;
 
     case VI_V_SYNC_REG:
-        if ((vi->regs[VI_V_SYNC_REG] & mask) != (value & mask))
+    case VI_H_SYNC_REG:
+        if ((vi->regs[reg] & mask) != (value & mask))
         {
-            masked_write(&vi->regs[VI_V_SYNC_REG], value, mask);
-            /* Preserve the current queued VI. The next field uses the new
-             * vertical total only for an explicit CountPerScanlineOverride;
-             * normal timing remains clock / nominal refresh. */
-            if (CountPerScanlineOverride)
-                vi->field_tick_phase = 0;
+            masked_write(&vi->regs[reg], value, mask);
+            /* Keep the queued boundary; subsequent fields use the new period. */
+            vi->field_tick_phase = 0;
             set_vi_vertical_interrupt(vi);
         }
         return;
@@ -305,14 +318,16 @@ void vi_vertical_interrupt_event(void* opaque)
     /* toggle vi field if in interlaced mode */
     vi->field ^= (vi->regs[VI_STATUS_REG] >> 6) & 0x1;
 
-    /* Racer-compatible hybrid scheduling: fractional field periods are
-     * accumulated, but every new field starts from the COUNT value at which
-     * this VI is actually serviced. Late service therefore never shortens the
-     * next software-visible field. */
+    /* The oscillator does not stop while the CPU finishes an instruction.
+     * Anchor to the scheduled field boundary, not its eventual service time,
+     * or every late VI permanently moves video behind the audio DAC. */
+    int64_t boundary = cp0->q.first->data.deadline;
     remove_interrupt_event(cp0);
     cp0_update_count(vi->mi->r4300);
-    vi->field_start_count_clock = cp0->count_clock;
-    add_interrupt_event(cp0, VI_INT, vi_next_field_ticks(vi));
+    vi->field_start_count_clock = boundary;
+    uint32_t ticks = vi_next_field_ticks(vi);
+    add_interrupt_event_count(cp0, VI_INT, cp0->regs[CP0_COUNT_REG] +
+        (uint32_t)(boundary + ticks - cp0->count_clock));
 
     /* trigger interrupt */
     raise_rcp_interrupt(vi->mi, MI_INTR_VI);

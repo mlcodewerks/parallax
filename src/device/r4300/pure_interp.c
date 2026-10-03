@@ -382,6 +382,7 @@ static M64P_FORCE_INLINE int interp_read_aligned_word(struct r4300_core* r4300,
                                                       uint32_t address,
                                                       uint32_t* value)
 {
+    const uint32_t virtual_address = address;
     if (M64P_UNLIKELY((address & UINT32_C(0xc0000000)) != UINT32_C(0x80000000)))
     {
         address = interp_translate_address(r4300, address, 0);
@@ -389,6 +390,10 @@ static M64P_FORCE_INLINE int interp_read_aligned_word(struct r4300_core* r4300,
             return 0;
     }
 
+    if (r4300_data_access_cycles(r4300, virtual_address, address, 0)) {
+        *value = r4300->dcache_words[(virtual_address >> 4) & 511][(address >> 2) & 3];
+        return 1;
+    }
     address &= UINT32_C(0x1ffffffc);
     interp_mem_read32(&r4300->mem->handlers[address >> 16], address, value);
     return 1;
@@ -398,6 +403,7 @@ static M64P_FORCE_INLINE int interp_read_aligned_dword(struct r4300_core* r4300,
                                                        uint32_t address,
                                                        uint64_t* value)
 {
+    const uint32_t virtual_address = address;
     uint32_t w0;
     uint32_t w1;
 
@@ -411,6 +417,11 @@ static M64P_FORCE_INLINE int interp_read_aligned_dword(struct r4300_core* r4300,
             return 0;
     }
 
+    if (r4300_data_access_cycles(r4300, virtual_address, address, 0)) {
+        uint32_t* words = r4300->dcache_words[(virtual_address >> 4) & 511];
+        *value = ((uint64_t)words[(address >> 2) & 3] << 32) | words[((address >> 2) & 3) + 1];
+        return 1;
+    }
     address &= UINT32_C(0x1ffffffc);
     const struct mem_handler* handler = &r4300->mem->handlers[address >> 16];
     interp_mem_read32(handler, address + 0, &w0);
@@ -424,6 +435,7 @@ static M64P_FORCE_INLINE int interp_write_aligned_word(struct r4300_core* r4300,
                                                        uint32_t value,
                                                        uint32_t mask)
 {
+    const uint32_t virtual_address = address;
     if (M64P_UNLIKELY((address & UINT32_C(0xc0000000)) != UINT32_C(0x80000000)))
     {
         address = interp_translate_address(r4300, address, 1);
@@ -434,6 +446,10 @@ static M64P_FORCE_INLINE int interp_write_aligned_word(struct r4300_core* r4300,
     if (M64P_UNLIKELY(r4300->cached_interp != NULL))
         invalidate_r4300_cached_code(r4300, address, 4);
 
+    if (r4300_data_access_cycles(r4300, virtual_address, address, 1)) {
+        masked_write(&r4300->dcache_words[(virtual_address >> 4) & 511][(address >> 2) & 3], value, mask);
+        return 1;
+    }
     address &= UINT32_C(0x1ffffffc);
     interp_mem_write32(&r4300->mem->handlers[address >> 16], address, value, mask);
     return 1;
@@ -444,6 +460,7 @@ static M64P_FORCE_INLINE int interp_write_aligned_dword(struct r4300_core* r4300
                                                         uint64_t value,
                                                         uint64_t mask)
 {
+    const uint32_t virtual_address = address;
     if (M64P_UNLIKELY((address & UINT32_C(7)) != 0))
         DebugMessage(M64MSG_WARNING, "Unaligned dword write %08x", address);
 
@@ -457,6 +474,12 @@ static M64P_FORCE_INLINE int interp_write_aligned_dword(struct r4300_core* r4300
     if (M64P_UNLIKELY(r4300->cached_interp != NULL))
         invalidate_r4300_cached_code(r4300, address, 8);
 
+    if (r4300_data_access_cycles(r4300, virtual_address, address, 1)) {
+        uint32_t* words = r4300->dcache_words[(virtual_address >> 4) & 511];
+        masked_write(&words[(address >> 2) & 3], (uint32_t)(value >> 32), (uint32_t)(mask >> 32));
+        masked_write(&words[((address >> 2) & 3) + 1], (uint32_t)value, (uint32_t)mask);
+        return 1;
+    }
     address &= UINT32_C(0x1ffffffc);
     const struct mem_handler* handler = &r4300->mem->handlers[address >> 16];
     interp_mem_write32(handler, address + 0, (uint32_t)(value >> 32), (uint32_t)(mask >> 32));
@@ -1500,6 +1523,15 @@ DECLARE_JUMP(BC1TL, PCADDR + (iimmediate + 1) * 4, ((r4300->cp1.fcr31) & FCR31_C
 DECLARE_INSTRUCTION(CACHE)
 {
     DECLARE_R4300
+    if (r4300->cache_timing) {
+        uint32_t va = (uint32_t)irs + iimmediate;
+        uint32_t pa = va;
+        if ((va & 0xc0000000) != 0x80000000) {
+            pa = interp_translate_address(r4300, va, 0);
+            if (!pa) return;
+        }
+        r4300_cache_operation(r4300, RT_OF(op), va, pa);
+    }
     ADD_TO_PC(1);
 }
 

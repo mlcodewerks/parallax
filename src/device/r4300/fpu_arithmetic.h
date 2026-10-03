@@ -1,5 +1,4 @@
-/* Included by pure_interp.c. VR4300 arithmetic semantics, following Ares's
- * interpreter-fpu.cpp. Host FP state is isolated from the emulator frontend. */
+
 #include <math.h>
 #include "fpu_native.h"
 
@@ -17,7 +16,6 @@ static int fpu_unimplemented(struct r4300_core* cpu)
     return 1;
 }
 
-/* flags: inexact, underflow, overflow, divide-by-zero, invalid. */
 static int fpu_flags(struct r4300_core* cpu, unsigned int flags)
 {
     unsigned int enabled = (cpu->cp1.fcr31 >> 7) & 31;
@@ -39,7 +37,6 @@ static int fpu_inputs(struct r4300_core* cpu, uint64_t a, uint64_t b, int single
 {
     int ca = fpu_class(a, single), cb = binary ? fpu_class(b, single) : FP_ZERO;
     uint64_t signal = single ? UINT64_C(0x00400000) : UINT64_C(0x0008000000000000);
-    /* Quiet legacy NaNs and denormals take priority over invalid-operation. */
     if ((ca == FP_NAN && !(a & signal)) || (cb == FP_NAN && !(b & signal)) ||
         ca == FP_SUBNORMAL || cb == FP_SUBNORMAL) return fpu_unimplemented(cpu);
     if (ca == FP_NAN || cb == FP_NAN) return fpu_flags(cpu, 16);
@@ -98,8 +95,6 @@ static void fpu_arithmetic(struct r4300_core* cpu, uint32_t op)
             uint64_t magnitude = raw & ~sign;
             uint64_t limit = word ? (single ? UINT64_C(0x4f000000) : UINT64_C(0x41e0000000000000))
                 : (single ? UINT64_C(0x5a000000) : UINT64_C(0x4340000000000000));
-            /* Bitwise bounds keep fast-math from speculating a conversion
-             * before operand validation or changing host exception flags. */
             if (magnitude > limit || (magnitude == limit && (!word || !(raw & sign)))) {
                 fpu_unimplemented(cpu); return;
             }

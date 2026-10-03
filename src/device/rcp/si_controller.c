@@ -53,24 +53,43 @@ static int validate_dma(struct si_controller* si, uint32_t reg)
 static void copy_pif_rdram(struct si_controller* si)
 {
     size_t i;
-    /* DRAM address must be word-aligned */
-    uint32_t dram_addr = si->regs[SI_DRAM_ADDR_REG] & ~UINT32_C(3);
+    uint32_t dram_addr = si->regs[SI_DRAM_ADDR_REG] & UINT32_C(0xfffff8);
 
     uint32_t* pif_ram = (uint32_t*)si->pif->ram;
-    uint32_t* dram = (uint32_t*)(&si->ri->rdram->dram[rdram_dram_address(dram_addr)]);
+    struct rdram* ram = si->ri->rdram;
 
-    if (si->dma_dir == SI_DMA_WRITE) {
-        for(i = 0; i < (PIF_RAM_SIZE / 4); ++i) {
-            pif_ram[i] = fromhl(dram[i]);
-        }
+    for (i = 0; i < PIF_RAM_SIZE / 4; ++i) {
+        uint32_t address = (dram_addr + (uint32_t)i*4) & 0xffffff;
+        if (si->dma_dir == SI_DMA_WRITE)
+            pif_ram[i] = address < ram->dram_size ? fromhl(ram->dram[address/4]) : 0;
+        else if (address < ram->dram_size)
+            ram->dram[address/4] = tohl(pif_ram[i]);
     }
-    else if (si->dma_dir == SI_DMA_READ) {
-        for(i = 0; i < (PIF_RAM_SIZE / 4); ++i) {
-            dram[i] = tohl(pif_ram[i]);
-        }
-
+    if (si->dma_dir == SI_DMA_READ)
         invalidate_r4300_cached_code(si->mi->r4300, dram_addr, PIF_RAM_SIZE);
+}
+
+static unsigned int si_duration(struct si_controller* si, int read)
+{
+    if (si->dma_duration) return si->dma_duration; /* Explicit ROM override. */
+    unsigned clocks = read ? 13600 : 4065;
+    if (read) {
+        unsigned offset = 0, channel = 0;
+        const uint8_t* ram = si->pif->ram;
+        while (offset < 64 && channel < 5) {
+            unsigned send = ram[offset++];
+            if (send == 0xfe) { clocks += 1420; break; }
+            if (send == 0xff) { clocks += 1420; continue; }
+            if (send == 0 || send == 0xfd) { clocks += 1420; ++channel; continue; }
+            if (offset >= 64) break;
+            unsigned receive = ram[offset++] & 63;
+            offset += (send & 63) + receive;
+            clocks += channel == 4 ? 20000 : si->pif->channels[channel].jbd ? 22000 : 18000;
+            ++channel;
+        }
     }
+    /* Ares uses three master clocks per RCP clock; COUNT ticks every four. */
+    return (clocks*3 + 3)/4;
 }
 
 static void dma_si_write(struct si_controller* si)
@@ -80,11 +99,9 @@ static void dma_si_write(struct si_controller* si)
 
     si->dma_dir = SI_DMA_WRITE;
 
-    copy_pif_rdram(si);
-
     cp0_update_count(si->mi->r4300);
     si->regs[SI_STATUS_REG] |= SI_STATUS_DMA_BUSY;
-    add_interrupt_event(&si->mi->r4300->cp0, SI_INT, si->dma_duration + add_random_interrupt_time(si->mi->r4300));
+    add_interrupt_event(&si->mi->r4300->cp0, SI_INT, si_duration(si, 0) + add_random_interrupt_time(si->mi->r4300));
 }
 
 static void dma_si_read(struct si_controller* si)
@@ -94,11 +111,9 @@ static void dma_si_read(struct si_controller* si)
 
     si->dma_dir = SI_DMA_READ;
 
-    update_pif_ram(si->pif);
-
     cp0_update_count(si->mi->r4300);
     si->regs[SI_STATUS_REG] |= SI_STATUS_DMA_BUSY;
-    add_interrupt_event(&si->mi->r4300->cp0, SI_INT, si->dma_duration + add_random_interrupt_time(si->mi->r4300));
+    add_interrupt_event(&si->mi->r4300->cp0, SI_INT, si_duration(si, 1) + add_random_interrupt_time(si->mi->r4300));
 }
 
 void init_si(struct si_controller* si,
@@ -125,7 +140,7 @@ void read_si_regs(void* opaque, uint32_t address, uint32_t* value)
     struct si_controller* si = (struct si_controller*)opaque;
     uint32_t reg = si_reg(address);
 
-    *value = si->regs[reg];
+    *value = reg < SI_REGS_COUNT ? si->regs[reg] : 0;
 }
 
 void write_si_regs(void* opaque, uint32_t address, uint32_t value, uint32_t mask)
@@ -137,6 +152,7 @@ void write_si_regs(void* opaque, uint32_t address, uint32_t value, uint32_t mask
     {
     case SI_DRAM_ADDR_REG:
         masked_write(&si->regs[SI_DRAM_ADDR_REG], value, mask);
+        si->regs[SI_DRAM_ADDR_REG] &= 0xfffff8;
         break;
 
     case SI_PIF_ADDR_RD64B_REG:
@@ -162,11 +178,16 @@ void si_end_of_dma_event(void* opaque)
     struct si_controller* si = (struct si_controller*)opaque;
 
     /* DRAM -> PIF : start the PIF processing */
-    if (si->dma_dir == SI_DMA_WRITE)
+    if (si->dma_dir == SI_DMA_WRITE) {
+        if (!(si->regs[SI_STATUS_REG] & SI_STATUS_IO_BUSY))
+            copy_pif_rdram(si);
         process_pif_ram(si->pif);
+    }
     /* PIF -> DRAM : copy to RDRAM */
-    else if (si->dma_dir == SI_DMA_READ)
+    else if (si->dma_dir == SI_DMA_READ) {
+        update_pif_ram(si->pif);
         copy_pif_rdram(si);
+    }
 
     /* end DMA */
     si->dma_dir = SI_NO_DMA;

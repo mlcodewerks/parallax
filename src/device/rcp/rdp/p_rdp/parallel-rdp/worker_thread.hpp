@@ -28,6 +28,9 @@
 #include <condition_variable>
 #include <utility>
 #include "thread_id.hpp"
+#ifdef HAVE_RENDERER_AFFINITY
+#include "performance_cores.h"
+#endif
 
 #ifdef PARALLEL_RDP_SHADER_DIR
 #include "global_managers.hpp"
@@ -94,6 +97,10 @@ private:
 
 	void main_loop()
 	{
+#ifdef HAVE_RENDERER_AFFINITY
+		struct performance_affinity affinity;
+		performance_core_enter(2, &affinity);
+#endif
 #ifdef PARALLEL_RDP_SHADER_DIR
 		Granite::Global::set_thread_context(*handles);
 		handles.reset();
@@ -122,6 +129,9 @@ private:
 			executor.notify_work_locked(value);
 			to_main_cond.notify_one();
 		}
+#ifdef HAVE_RENDERER_AFFINITY
+		performance_core_leave(&affinity);
+#endif
 	}
 };
 }

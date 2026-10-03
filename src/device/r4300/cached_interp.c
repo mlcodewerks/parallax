@@ -360,7 +360,6 @@ static uint8_t ci_classify_fast_op(enum r4300_opcode opcode, uint32_t op)
     switch (opcode)
     {
     case R4300_OP_NOP:
-    case R4300_OP_CACHE:
     case R4300_OP_SYNC:
         return CI_FAST_NOP;
     case R4300_OP_ADDIU: CI_FAST_RT(ADDIU);

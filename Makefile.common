@@ -1,7 +1,5 @@
 CORE_DIR           = $(ROOT_DIR)
 LIBRETRO_COMM_DIR  = $(ROOT_DIR)/deps/libretro-common
-VIDEODIR_PARALLEL  =  $(CORE_DIR)/src/device/rcp/rdp/p_rdp
-PARALLEL_RDP_IMPLEMENTATION = $(CORE_DIR)/src/device/rcp/rdp/p_rdp
 RSPDIR_PARALLEL    =  $(CORE_DIR)/src/device/rcp/rsp/p_rsp
 
 DYNAREC_USED := 0
@@ -13,8 +11,7 @@ INCFLAGS += \
 	-I$(CORE_DIR)/src \
 	-I$(CORE_DIR)/src/api \
 	-I$(LIBRETRO_COMM_DIR)/include \
-	-I$(CORE_DIR)/src/device/rcp/rdp \
-	-I$(PARALLEL_RDP_IMPLEMENTATION)/vulkan-headers/include
+	-I$(CORE_DIR)/src/device/rcp/rdp
 
 ifneq (,$(findstring win,$(platform)))
 	INCFLAGS += -I$(ROOT_DIR)/deps/mman
@@ -79,21 +76,39 @@ SOURCES_C = \
 	$(CORE_DIR)/src/plugin/plugin.c 
 
 
-HAVE_PARALLEL_RDP ?= 1
-include $(VIDEODIR_PARALLEL)/config.mk
+ANGRYLION_DIR = $(CORE_DIR)/src/device/rcp/rdp/angrylion
+RSP_HLE_DIR = $(CORE_DIR)/src/device/rcp/rsp/hle
+SOURCES_C += $(wildcard $(RSP_HLE_DIR)/*.c) \
+             $(wildcard $(ANGRYLION_DIR)/rdp_emit*.c) \
+             $(CORE_DIR)/src/device/rcp/rsp/optional_rsp.c
+SOURCES_C += $(LIBRETRO_COMM_DIR)/encodings/encoding_crc32.c
+SOURCES_C += $(CORE_DIR)/src/renderer_options.c \
+             $(CORE_DIR)/src/device/rcp/rdp/performance_cores.c
+SOURCES_C += $(ANGRYLION_DIR)/n64video.c \
+             $(ANGRYLION_DIR)/parallel_al.c \
+             $(ANGRYLION_DIR)/output.c \
+             $(LIBRETRO_COMM_DIR)/rthreads/rthreads.c
+# Keep the software rasterizer optimized in debug builds.
+$(ANGRYLION_DIR)/n64video.o $(ANGRYLION_DIR)/parallel_al.o: CFLAGS += -O3
+$(ANGRYLION_DIR)/parallel_al.o: $(CORE_DIR)/src/device/rcp/rdp/performance_cores.h
+$(CORE_DIR)/src/libretro.o: $(CORE_DIR)/src/renderer_options.h
+$(CORE_DIR)/src/renderer_options.o: $(CORE_DIR)/src/renderer_options.h
+$(CORE_DIR)/src/device/rcp/rdp/performance_cores.o: $(CORE_DIR)/src/device/rcp/rdp/performance_cores.h
+$(ANGRYLION_DIR)/n64video.o: $(wildcard $(ANGRYLION_DIR)/*.h $(ANGRYLION_DIR)/n64video/*.c $(ANGRYLION_DIR)/n64video/rdp/* $(ANGRYLION_DIR)/n64video/vi/*)
 
-CFLAGS   += $(PARALLEL_RDP_CFLAGS) -DHAVE_PARALLEL_RDP
-CXXFLAGS += $(PARALLEL_RDP_CXXFLAGS) -DHAVE_PARALLEL_RDP
-CXXFLAGS += $(PARALLEL_RDP_INCLUDE_DIRS) -DHAVE_PARALLEL_RDP
-LDLIBS += -lcomctl32
-SOURCES_CXX +=  $(PARALLEL_RDP_SOURCES_CXX)
+ifeq ($(HAVE_PARALLEL_RDP),1)
+PARALLEL_RDP_IMPLEMENTATION = $(CORE_DIR)/src/device/rcp/rdp/p_rdp
+include $(PARALLEL_RDP_IMPLEMENTATION)/config.mk
+CFLAGS += $(PARALLEL_RDP_CFLAGS) -DHAVE_PARALLEL_RDP
+CXXFLAGS += $(PARALLEL_RDP_CXXFLAGS) $(PARALLEL_RDP_INCLUDE_DIRS) -DHAVE_PARALLEL_RDP -DHAVE_RENDERER_AFFINITY
+INCFLAGS += -I$(PARALLEL_RDP_IMPLEMENTATION)/vulkan-headers/include
 SOURCES_C += $(PARALLEL_RDP_SOURCES_C)
-SOURCES_CXX += $(CORE_DIR)/src/device/rcp/rdp/parallel_imp.cpp
-
+SOURCES_CXX += $(PARALLEL_RDP_SOURCES_CXX) $(CORE_DIR)/src/device/rcp/rdp/parallel_imp.cpp
 LDFLAGS += $(PARALLEL_RDP_LDFLAGS)
-
-
-
+$(PARALLEL_RDP_IMPLEMENTATION)/parallel-rdp/rdp_device.o: $(PARALLEL_RDP_IMPLEMENTATION)/parallel-rdp/worker_thread.hpp $(CORE_DIR)/src/device/rcp/rdp/performance_cores.h
+$(PARALLEL_RDP_IMPLEMENTATION)/parallel-rdp/command_ring.o: $(CORE_DIR)/src/device/rcp/rdp/performance_cores.h
+$(CORE_DIR)/src/device/rcp/rdp/parallel_imp.o: $(CORE_DIR)/src/renderer_options.h $(CORE_DIR)/src/device/rcp/rdp/performance_cores.h
+endif
 
 # MD5 lib
 SOURCES_C += \

@@ -303,13 +303,20 @@ void write_pif_mem(void* opaque, uint32_t address, uint32_t value, uint32_t mask
         return;
     }
 
+    if ((pif->si->regs[SI_STATUS_REG] & (SI_STATUS_DMA_BUSY | SI_STATUS_IO_BUSY)) == SI_STATUS_DMA_BUSY)
+        return;
     masked_write((uint32_t*)(&pif->base[addr]), fromhl(value), fromhl(mask));
+
+    /* CPU word writes share one outstanding PIF processing event. Keep every
+     * word of a command while avoiding duplicate SI completion events. */
+    if (pif->si->regs[SI_STATUS_REG] & SI_STATUS_IO_BUSY) return;
 
     pif->si->dma_dir = SI_DMA_WRITE;
 
     cp0_update_count(pif->r4300);
     pif->si->regs[SI_STATUS_REG] |= (SI_STATUS_DMA_BUSY | SI_STATUS_IO_BUSY);
-    add_interrupt_event(&pif->r4300->cp0, SI_INT, pif->si->dma_duration);
+    add_interrupt_event(&pif->r4300->cp0, SI_INT,
+        pif->si->dma_duration ? pif->si->dma_duration : (2150*3+3)/4);
 }
 
 

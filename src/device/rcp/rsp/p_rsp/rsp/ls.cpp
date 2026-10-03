@@ -7,11 +7,59 @@
 #define TRACE_LS(op) ((void)0)
 #endif
 
+
+// Loads truncate at vector byte 16; stores wrap their vector source bytes.
+// Keep halfword transfers for aligned accesses used by common microcode.
+static inline void load_vector_bytes(RSP::CPUState* rsp, unsigned rt,
+                                     unsigned e, unsigned addr, unsigned count)
+{
+    if (count > 16 - e) count = 16 - e;
+    auto* reg = rsp->cp2.regs[rt].e;
+    if (((addr | e | count) & 1) == 0)
+        for (unsigned i = 0; i < count; i += 2)
+            reg[(e + i) >> 1] = READ_MEM_U16(rsp->dmem, (addr + i) & 0xfff);
+    else
+        for (unsigned i = 0; i < count; ++i)
+            reinterpret_cast<uint8_t*>(reg)[MES(e + i)] = READ_MEM_U8(rsp->dmem, (addr + i) & 0xfff);
+}
+
+static inline void store_vector_bytes(RSP::CPUState* rsp, unsigned rt,
+                                      unsigned e, unsigned addr, unsigned count)
+{
+    const auto* reg = rsp->cp2.regs[rt].e;
+    if (((addr | e | count) & 1) == 0)
+        for (unsigned i = 0; i < count; i += 2)
+            WRITE_MEM_U16(rsp->dmem, (addr + i) & 0xfff, reg[((e + i) & 15) >> 1]);
+    else
+        for (unsigned i = 0; i < count; ++i)
+            WRITE_MEM_U8(rsp->dmem, (addr + i) & 0xfff,
+                         reinterpret_cast<const uint8_t*>(reg)[MES((e + i) & 15)]);
+}
+
+static inline void load_packed_vector(RSP::CPUState* rsp, unsigned rt,
+                                      unsigned e, unsigned addr, unsigned stride, unsigned shift)
+{
+    unsigned index = (addr & 7) - e;
+    addr &= 0xff8;
+    for (unsigned i = 0; i < 8; ++i)
+        rsp->cp2.regs[rt].e[i] = READ_MEM_U8(rsp->dmem, (addr + ((index + i * stride) & 15)) & 0xfff) << shift;
+}
+
+static inline void store_packed_vector(RSP::CPUState* rsp, unsigned rt,
+                                       unsigned e, unsigned addr, unsigned shift)
+{
+    for (unsigned i = 0; i < 8; ++i)
+    {
+        unsigned element = e + i;
+        unsigned bits = (element & 8) ? 15 - shift : shift;
+        WRITE_MEM_U8(rsp->dmem, (addr + i) & 0xfff, rsp->cp2.regs[rt].e[element & 7] >> bits);
+    }
+}
+
 extern "C"
 {
-	// Using mostly CXD4 implementation as a base here since it's easier to follow.
-	// CEN64's implementation seems much better, but takes more effort to port for now.
-	// Reading wide words together with SSE4 blend, SSSE3 pshufb, etc should make this much faster.
+	// DMEM accesses wrap within 4 KiB. Vector loads truncate while stores
+	// wrap their source bytes; packed accesses use rotating 16-byte windows.
 
 	// Load 8-bit
 	void RSP_LBV(RSP::CPUState *rsp, unsigned rt, unsigned e, int offset, unsigned base)
@@ -39,21 +87,7 @@ extern "C"
 	void RSP_LSV(RSP::CPUState *rsp, unsigned rt, unsigned e, int offset, unsigned base)
 	{
 		TRACE_LS(LSV);
-		if (e & 1)
-			return;
-
-		unsigned addr = (rsp->sr[base] + offset * 2) & 0xfff;
-		unsigned correction = addr & 3;
-		if (correction == 3)
-			return;
-
-		uint16_t result;
-		if (correction == 1)
-			result = (READ_MEM_U8(rsp->dmem, addr + 0) << 8) | (READ_MEM_U8(rsp->dmem, addr + 1) << 0);
-		else
-			result = READ_MEM_U16(rsp->dmem, addr);
-
-		rsp->cp2.regs[rt].e[e >> 1] = result;
+		load_vector_bytes(rsp, rt, e, (rsp->sr[base] + offset * 2) & 0xfff, 2);
 	}
 
 	// Store 16-bit
@@ -76,63 +110,21 @@ extern "C"
 	void RSP_LLV(RSP::CPUState *rsp, unsigned rt, unsigned e, int offset, unsigned base)
 	{
 		TRACE_LS(LLV);
-		unsigned addr = (rsp->sr[base] + offset * 4) & 0xfff;
-		if (e & 1)
-			return;
-		if (addr & 1)
-			return;
-		e >>= 1;
-
-		rsp->cp2.regs[rt].e[e] = READ_MEM_U16(rsp->dmem, addr);
-		rsp->cp2.regs[rt].e[(e + 1) & 7] = READ_MEM_U16(rsp->dmem, (addr + 2) & 0xfff);
+		load_vector_bytes(rsp, rt, e, (rsp->sr[base] + offset * 4) & 0xfff, 4);
 	}
 
 	// Store 32-bit
 	void RSP_SLV(RSP::CPUState *rsp, unsigned rt, unsigned e, int offset, unsigned base)
 	{
 		TRACE_LS(SLV);
-		if ((e & 1) || (e > 0xc))
-			return;
-		unsigned addr = (rsp->sr[base] + offset * 4) & 0xfff;
-
-#ifdef INTENSE_DEBUG
-		fprintf(stderr, "SLV 0x%x, e = %u\n", addr, e);
-#endif
-
-		if (addr & 1)
-			return;
-		e >>= 1;
-
-		uint16_t v0 = rsp->cp2.regs[rt].e[e];
-		uint16_t v1 = rsp->cp2.regs[rt].e[e + 1];
-		WRITE_MEM_U16(rsp->dmem, addr, v0);
-		WRITE_MEM_U16(rsp->dmem, (addr + 2) & 0xfff, v1);
+		store_vector_bytes(rsp, rt, e, (rsp->sr[base] + offset * 4) & 0xfff, 4);
 	}
 
 	// Load 64-bit
 	void RSP_LDV(RSP::CPUState *rsp, unsigned rt, unsigned e, int offset, unsigned base)
 	{
 		TRACE_LS(LDV);
-		if (e & 1)
-			return;
-		unsigned addr = (rsp->sr[base] + offset * 8) & 0xfff;
-		auto *reg = rsp->cp2.regs[rt].e;
-		e >>= 1;
-
-		if (addr & 1)
-		{
-			reg[e + 0] = (READ_MEM_U8(rsp->dmem, addr + 0) << 8) | READ_MEM_U8(rsp->dmem, addr + 1);
-			reg[e + 1] = (READ_MEM_U8(rsp->dmem, addr + 2) << 8) | READ_MEM_U8(rsp->dmem, addr + 3);
-			reg[e + 2] = (READ_MEM_U8(rsp->dmem, addr + 4) << 8) | READ_MEM_U8(rsp->dmem, addr + 5);
-			reg[e + 3] = (READ_MEM_U8(rsp->dmem, addr + 6) << 8) | READ_MEM_U8(rsp->dmem, addr + 7);
-		}
-		else
-		{
-			reg[e + 0] = READ_MEM_U16(rsp->dmem, addr);
-			reg[e + 1] = READ_MEM_U16(rsp->dmem, (addr + 2) & 0xfff);
-			reg[e + 2] = READ_MEM_U16(rsp->dmem, (addr + 4) & 0xfff);
-			reg[e + 3] = READ_MEM_U16(rsp->dmem, (addr + 6) & 0xfff);
-		}
+		load_vector_bytes(rsp, rt, e, (rsp->sr[base] + offset * 8) & 0xfff, 8);
 	}
 
 	// Store 64-bit
@@ -145,7 +137,7 @@ extern "C"
 		fprintf(stderr, "SDV 0x%x, e = %u\n", addr, e);
 #endif
 
-		// Handle illegal scenario.
+		// Byte accesses cover odd alignment and wrapping vector sources.
 		if ((e > 8) || (e & 1) || (addr & 1))
 		{
 			for (unsigned i = 0; i < 8; i++)
@@ -168,24 +160,13 @@ extern "C"
 	void RSP_LPV(RSP::CPUState *rsp, unsigned rt, unsigned e, int offset, unsigned base)
 	{
 		TRACE_LS(LPV);
-		if (e != 0)
-			return;
-
-		unsigned addr = (rsp->sr[base] + offset * 8) & 0xfff;
-		auto *reg = rsp->cp2.regs[rt].e;
-		for (unsigned i = 0; i < 8; i++)
-			reg[i] = READ_MEM_U8(rsp->dmem, (addr + i) & 0xfff) << 8;
+		load_packed_vector(rsp, rt, e, (rsp->sr[base] + offset * 8) & 0xfff, 1, 8);
 	}
 
 	void RSP_SPV(RSP::CPUState *rsp, unsigned rt, unsigned e, int offset, unsigned base)
 	{
 		TRACE_LS(SPV);
-		if (e != 0)
-			return;
-		unsigned addr = (rsp->sr[base] + offset * 8) & 0xfff;
-		auto *reg = rsp->cp2.regs[rt].e;
-		for (unsigned i = 0; i < 8; i++)
-			WRITE_MEM_U8(rsp->dmem, (addr + i) & 0xfff, int16_t(reg[i]) >> 8);
+		store_packed_vector(rsp, rt, e, (rsp->sr[base] + offset * 8) & 0xfff, 8);
 	}
 
 	// Load 8x8-bit into high bits, but shift by 7 instead of 8.
@@ -194,37 +175,13 @@ extern "C"
 	void RSP_LUV(RSP::CPUState *rsp, unsigned rt, unsigned e, int offset, unsigned base)
 	{
 		TRACE_LS(LUV);
-		unsigned addr = (rsp->sr[base] + offset * 8) & 0xfff;
-		auto *reg = rsp->cp2.regs[rt].e;
-
-		if (e != 0)
-		{
-			// Special path for Mia Hamm soccer.
-			addr += -e & 0xf;
-			for (unsigned b = 0; b < 8; b++)
-			{
-				reg[b] = READ_MEM_U8(rsp->dmem, addr) << 7;
-				--e;
-				addr -= e ? 0 : 16;
-				++addr;
-			}
-		}
-		else
-		{
-			for (unsigned i = 0; i < 8; i++)
-				reg[i] = READ_MEM_U8(rsp->dmem, (addr + i) & 0xfff) << 7;
-		}
+		load_packed_vector(rsp, rt, e, (rsp->sr[base] + offset * 8) & 0xfff, 1, 7);
 	}
 
 	void RSP_SUV(RSP::CPUState *rsp, unsigned rt, unsigned e, int offset, unsigned base)
 	{
 		TRACE_LS(SUV);
-		if (e != 0)
-			return;
-		unsigned addr = (rsp->sr[base] + offset * 8) & 0xfff;
-		auto *reg = rsp->cp2.regs[rt].e;
-		for (unsigned i = 0; i < 8; i++)
-			WRITE_MEM_U8(rsp->dmem, (addr + i) & 0xfff, int16_t(reg[i]) >> 7);
+		store_packed_vector(rsp, rt, e, (rsp->sr[base] + offset * 8) & 0xfff, 7);
 	}
 
 	// Load 8x8-bits into high bits, but shift by 7 instead of 8.
@@ -232,52 +189,42 @@ extern "C"
 	void RSP_LHV(RSP::CPUState *rsp, unsigned rt, unsigned e, int offset, unsigned base)
 	{
 		TRACE_LS(LHV);
-		if (e != 0)
-			return;
-		unsigned addr = (rsp->sr[base] + offset * 16) & 0xfff;
-		if (addr & 0xe)
-			return;
-
-		auto *reg = rsp->cp2.regs[rt].e;
-		for (unsigned i = 0; i < 8; i++)
-			reg[i] = READ_MEM_U8(rsp->dmem, addr + 2 * i) << 7;
+		load_packed_vector(rsp, rt, e, (rsp->sr[base] + offset * 16) & 0xfff, 2, 7);
 	}
 
 	void RSP_SHV(RSP::CPUState *rsp, unsigned rt, unsigned e, int offset, unsigned base)
 	{
 		TRACE_LS(SHV);
-		if (e != 0)
-			return;
 		unsigned addr = (rsp->sr[base] + offset * 16) & 0xfff;
-		auto *reg = rsp->cp2.regs[rt].e;
-		for (unsigned i = 0; i < 8; i++)
-			WRITE_MEM_U8(rsp->dmem, (addr + 2 * i) & 0xfff, int16_t(reg[i]) >> 7);
+		unsigned index = addr & 7;
+		addr &= 0xff8;
+		const auto* bytes = reinterpret_cast<const uint8_t*>(rsp->cp2.regs[rt].e);
+		for (unsigned i = 0; i < 8; ++i)
+		{
+		    unsigned byte = e + i * 2;
+		    unsigned value = (bytes[MES(byte & 15)] << 1) | (bytes[MES((byte + 1) & 15)] >> 7);
+		    WRITE_MEM_U8(rsp->dmem, (addr + ((index + i * 2) & 15)) & 0xfff, value);
+		}
 	}
 
 	// No idea what the purpose of this is.
 	void RSP_SFV(RSP::CPUState *rsp, unsigned rt, unsigned e, int offset, unsigned base)
 	{
 		TRACE_LS(SFV);
-		unsigned addr = (rsp->sr[base] + offset * 16) & 0xff3;
-		auto *reg = rsp->cp2.regs[rt].e;
-		switch (e)
+		static const uint8_t lanes[16][4] = {
+		    {0,1,2,3}, {6,7,4,5}, {0,0,0,0}, {0,0,0,0},
+		    {1,2,3,0}, {7,4,5,6}, {0,0,0,0}, {0,0,0,0},
+		    {4,5,6,7}, {0,0,0,0}, {0,0,0,0}, {3,0,1,2},
+		    {5,6,7,4}, {0,0,0,0}, {0,0,0,0}, {0,1,2,3}
+		};
+		unsigned addr = (rsp->sr[base] + offset * 16) & 0xfff;
+		unsigned index = addr & 7;
+		addr &= 0xff8;
+		const unsigned valid = (0x9933u >> e) & 1;
+		for (unsigned i = 0; i < 4; ++i)
 		{
-		case 0:
-			WRITE_MEM_U8(rsp->dmem, (addr + 0) & 0xfff, int16_t(reg[0]) >> 7);
-			WRITE_MEM_U8(rsp->dmem, (addr + 4) & 0xfff, int16_t(reg[1]) >> 7);
-			WRITE_MEM_U8(rsp->dmem, (addr + 8) & 0xfff, int16_t(reg[2]) >> 7);
-			WRITE_MEM_U8(rsp->dmem, (addr + 12) & 0xfff, int16_t(reg[3]) >> 7);
-			break;
-
-		case 8:
-			WRITE_MEM_U8(rsp->dmem, (addr + 0) & 0xfff, int16_t(reg[4]) >> 7);
-			WRITE_MEM_U8(rsp->dmem, (addr + 4) & 0xfff, int16_t(reg[5]) >> 7);
-			WRITE_MEM_U8(rsp->dmem, (addr + 8) & 0xfff, int16_t(reg[6]) >> 7);
-			WRITE_MEM_U8(rsp->dmem, (addr + 12) & 0xfff, int16_t(reg[7]) >> 7);
-			break;
-
-		default:
-			break;
+		    unsigned value = valid ? rsp->cp2.regs[rt].e[lanes[e][i]] >> 7 : 0;
+		    WRITE_MEM_U8(rsp->dmem, (addr + ((index + i * 4) & 15)) & 0xfff, value);
 		}
 	}
 
@@ -286,101 +233,49 @@ extern "C"
 	void RSP_LQV(RSP::CPUState *rsp, unsigned rt, unsigned e, int offset, unsigned base)
 	{
 		TRACE_LS(LQV);
-		if (e & 1)
-			return;
 		unsigned addr = (rsp->sr[base] + offset * 16) & 0xfff;
-
-#ifdef INTENSE_DEBUG
-		fprintf(stderr, "LQV: 0x%x, e = %u, vt = %u, base = %u\n", addr, e, rt, base);
-#endif
-
-		if (addr & 1)
-			return;
-
-		unsigned b = (addr & 0xf) >> 1;
-		e >>= 1;
-
-		auto *reg = rsp->cp2.regs[rt].e;
-		for (unsigned i = b; i < 8; i++, e++, addr += 2)
-			reg[e] = READ_MEM_U16(rsp->dmem, addr & 0xfff);
+		load_vector_bytes(rsp, rt, e, addr, 16 - (addr & 15));
 	}
 
 	void RSP_SQV(RSP::CPUState *rsp, unsigned rt, unsigned e, int offset, unsigned base)
 	{
 		TRACE_LS(SQV);
 		unsigned addr = (rsp->sr[base] + offset * 16) & 0xfff;
-		if (addr & 1)
-			return;
-
-		unsigned b = addr & 0xf;
-
-		auto *reg = rsp->cp2.regs[rt].e;
-
-		if (e != 0)
-		{
-			// Mia Hamm Soccer
-			for (unsigned i = 0; i < 16 - b; i++, addr++)
-			{
-				WRITE_MEM_U8(rsp->dmem, addr & 0xfff, reinterpret_cast<const uint8_t *>(reg)[MES((e + i) & 0xf)]);
-			}
-		}
-		else
-		{
-			b >>= 1;
-			for (unsigned i = b; i < 8; i++, e++, addr += 2)
-				WRITE_MEM_U16(rsp->dmem, addr & 0xfff, reg[e]);
-		}
+		store_vector_bytes(rsp, rt, e, addr, 16 - (addr & 15));
 	}
 
 	// Complements LQV?
 	void RSP_LRV(RSP::CPUState *rsp, unsigned rt, unsigned e, int offset, unsigned base)
 	{
 		TRACE_LS(LRV);
-		if (e != 0)
-			return;
 		unsigned addr = (rsp->sr[base] + offset * 16) & 0xfff;
-		if (addr & 1)
-			return;
-
-		unsigned b = (addr & 0xf) >> 1;
-		addr &= ~0xf;
-
-		auto *reg = rsp->cp2.regs[rt].e;
-		for (e = 8 - b; e < 8; e++, addr += 2)
-			reg[e] = READ_MEM_U16(rsp->dmem, addr & 0xfff);
+		unsigned tail = addr & 15;
+		if (tail > e)
+		    load_vector_bytes(rsp, rt, 16 - tail + e, addr & 0xff0, tail - e);
 	}
 
 	void RSP_SRV(RSP::CPUState *rsp, unsigned rt, unsigned e, int offset, unsigned base)
 	{
 		TRACE_LS(SRV);
-		if (e != 0)
-			return;
 		unsigned addr = (rsp->sr[base] + offset * 16) & 0xfff;
-		if (addr & 1)
-			return;
-
-		unsigned b = (addr & 0xf) >> 1;
-		addr &= ~0xf;
-
-		auto *reg = rsp->cp2.regs[rt].e;
-		for (e = 8 - b; e < 8; e++, addr += 2)
-			WRITE_MEM_U16(rsp->dmem, addr & 0xfff, reg[e]);
+		unsigned tail = addr & 15;
+		store_vector_bytes(rsp, rt, (e + 16 - tail) & 15, addr & 0xff0, tail);
 	}
 
-	// Transposed stuff?
+	// Distribute an eight-byte-aligned memory window over VT's register group.
 	void RSP_LTV(RSP::CPUState *rsp, unsigned rt, unsigned e, int offset, unsigned base)
 	{
 		TRACE_LS(LTV);
-		if (e & 1)
-			return;
-		if (rt & 7)
-			return;
 		unsigned addr = (rsp->sr[base] + offset * 16) & 0xfff;
-		if (addr & 0xf)
-			return;
-
-		for (unsigned i = 0; i < 8; i++)
-			rsp->cp2.regs[rt + i].e[(-e / 2 + i) & 7] = READ_MEM_U16(rsp->dmem, addr + 2 * i);
+		unsigned window = addr & 0xff8;
+		unsigned index = e + (addr & 8);
+		unsigned group = rt & ~7u;
+		for (unsigned i = 0; i < 8; ++i)
+		{
+		    unsigned hi = READ_MEM_U8(rsp->dmem, (window + ((index + i * 2) & 15)) & 0xfff);
+		    unsigned lo = READ_MEM_U8(rsp->dmem, (window + ((index + i * 2 + 1) & 15)) & 0xfff);
+		    rsp->cp2.regs[group + (((e >> 1) + i) & 7)].e[i] = (hi << 8) | lo;
+		}
 	}
 
 	void RSP_STV(RSP::CPUState *rsp, unsigned rt, unsigned e, int offset, unsigned base)
@@ -399,4 +294,16 @@ extern "C"
 			WRITE_MEM_U16(rsp->dmem, addr + 2 * i, rsp->cp2.regs[rt + ((e / 2 + i) & 7)].e[i]);
 		}
 	}
+
+    // Store a whole vector into a rotating 16-byte, eight-byte-aligned window.
+    void RSP_SWV(RSP::CPUState* rsp, unsigned rt, unsigned e, int offset, unsigned base)
+    {
+        TRACE_LS(SWV);
+        unsigned addr = (rsp->sr[base] + offset * 16) & 0xfff;
+        unsigned index = addr & 7;
+        addr &= 0xff8;
+        const auto* bytes = reinterpret_cast<const uint8_t*>(rsp->cp2.regs[rt].e);
+        for (unsigned i = 0; i < 16; ++i)
+            WRITE_MEM_U8(rsp->dmem, (addr + ((index + i) & 15)) & 0xfff, bytes[MES((e + i) & 15)]);
+    }
 }

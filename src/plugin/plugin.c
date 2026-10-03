@@ -33,6 +33,10 @@
 #include "device/rcp/mi_controller.h"
 #include "device/rcp/rdp/rdp_core.h"
 #include "device/rcp/rsp/rsp_core.h"
+#ifdef __LIBRETRO__
+#include "device/rcp/rsp/optional_rsp.h"
+#endif
+#include "device/rcp/rsp/p_rsp/dpc_bridge.h"
 #include "device/rcp/rdp/vi_controller.h"
 #include "main/main.h"
 #include "main/rom.h"
@@ -345,6 +349,13 @@ static m64p_error plugin_start_rsp(void)
 
     /* call the RSP plugin  */
     rsp.initiateRSP(rsp_info, NULL);
+#ifdef __LIBRETRO__
+    optional_rsp_init(rsp_info);
+    rsp.doRspCycles = optional_rsp_execute;
+#endif
+#ifdef HAVE_PARALLEL_RSP
+    parallelRSPSetDpcCallbacks(&g_dev.dp, read_rsp_dpc_regs, write_rsp_dpc_regs);
+#endif
 
     return M64ERR_SUCCESS;
 }

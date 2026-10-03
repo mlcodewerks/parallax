@@ -42,6 +42,9 @@ void read_ri_regs(void* opaque, uint32_t address, uint32_t* value)
     uint32_t reg = ri_reg(address);
 
     *value = ri->regs[reg];
+    if (reg == RI_CURRENT_LOAD_REG)
+        *value = (ri->regs[RI_ERROR_REG] & 1) | 6 |
+            (ri->regs[RI_MODE_REG] & 8) | (ri->regs[RI_SELECT_REG] & 16);
 }
 
 void write_ri_regs(void* opaque, uint32_t address, uint32_t value, uint32_t mask)
@@ -49,6 +52,11 @@ void write_ri_regs(void* opaque, uint32_t address, uint32_t value, uint32_t mask
     struct ri_controller* ri = (struct ri_controller*)opaque;
     uint32_t reg = ri_reg(address);
 
-    masked_write(&ri->regs[reg], value, mask);
+    if (reg == RI_ERROR_REG)
+        ri->regs[reg] = 0;
+    else if (reg == RI_WERROR_REG)
+        ri->regs[reg] = 0xff; /* RI bank status after acknowledgement. */
+    else
+        masked_write(&ri->regs[reg], value, mask);
 }
 

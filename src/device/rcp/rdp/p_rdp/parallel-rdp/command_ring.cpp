@@ -25,6 +25,9 @@
 #include "rdp_device.hpp"
 #include "thread_id.hpp"
 #include <assert.h>
+#ifdef HAVE_RENDERER_AFFINITY
+#include "performance_cores.h"
+#endif
 
 namespace RDP
 {
@@ -85,6 +88,10 @@ void CommandRing::enqueue_command(unsigned num_words, const uint32_t *words)
 
 void CommandRing::thread_loop()
 {
+#ifdef HAVE_RENDERER_AFFINITY
+	struct performance_affinity affinity;
+	performance_core_enter(1, &affinity);
+#endif
 	Util::register_thread_index(0);
 
 #ifdef PARALLEL_RDP_SHADER_DIR
@@ -131,5 +138,8 @@ void CommandRing::thread_loop()
 			cond.notify_one();
 		}
 	}
+#ifdef HAVE_RENDERER_AFFINITY
+	performance_core_leave(&affinity);
+#endif
 }
 }

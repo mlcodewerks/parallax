@@ -27,7 +27,13 @@
 #include "libretro_private.h"
 
 #include "mupen64plus-next_common.h"
+#include "device/rcp/rdp/angrylion/n64video.h"
+#include "renderer_options.h"
+#include "device/rcp/rsp/optional_rsp.h"
+#include "device/rcp/rdp/performance_cores.h"
+#ifdef HAVE_PARALLEL_RDP
 #include "device/rcp/rdp/para_intf.h"
+#endif
 
 #ifdef HAVE_LIBNX
 #include <switch.h>
@@ -63,16 +69,6 @@
 
 #define ISHEXDEC ((codeLine[cursor] >= '0') && (codeLine[cursor] <= '9')) || ((codeLine[cursor] >= 'a') && (codeLine[cursor] <= 'f')) || ((codeLine[cursor] >= 'A') && (codeLine[cursor] <= 'F'))
 
-void angrylion_set_filtering(unsigned filter_type);
-void angrylion_set_vi_blur(unsigned value);
-void angrylion_set_threads(unsigned value);
-void angrylion_set_overscan(unsigned value);
-void angrylion_set_synclevel(unsigned value);
-void angrylion_set_vi_dedither(unsigned value);
-void angrylion_set_vi(unsigned value);
-
-uint8_t *prescale = NULL;
-
 struct retro_perf_callback perf_cb;
 retro_get_cpu_features_t perf_get_cpu_features_cb = NULL;
 
@@ -81,6 +77,14 @@ retro_video_refresh_t video_cb = NULL;
 retro_input_poll_t poll_cb = NULL;
 retro_input_state_t input_cb = NULL;
 retro_audio_sample_batch_t audio_batch_cb = NULL;
+#if defined(M64P_AUDIO_SYNC_TRACE) && defined(_WIN32)
+#include "../benchmarks/audio_sync_trace.h"
+#else
+#define sync_open() ((void)0)
+#define sync_close() ((void)0)
+#define sync_begin() ((void)0)
+#define sync_end() ((void)0)
+#endif
 retro_environment_t environ_cb = NULL;
 retro_environment_t environ_clear_thread_waits_cb = NULL;
 
@@ -97,6 +101,7 @@ static unsigned retro_filtering = 0;
 static bool first_context_reset = false;
 static bool initializing = true;
 static bool load_game_successful = false;
+static bool renderer_open = false;
 bool libretro_swap_buffer;
 
 float retro_screen_aspect = 4.0 / 3.0;
@@ -151,9 +156,11 @@ extern m64p_rom_header ROM_HEADER;
 void update_variables(bool startup);
 extern void deinit_audio_libretro(void);
 extern void init_audio_libretro(unsigned max_audio_frames);
+extern void audio_end_frame_libretro(double seconds);
 
 static void setup_variables(void)
 {
+    renderer_register_options(environ_cb);
 
     static const struct retro_controller_description port[] = {
         {"Controller", RETRO_DEVICE_JOYPAD}};
@@ -265,7 +272,14 @@ const char *retro_get_system_directory(void)
 
 void retro_set_video_refresh(retro_video_refresh_t cb) { video_cb = cb; }
 void retro_set_audio_sample(retro_audio_sample_t cb) {}
-void retro_set_audio_sample_batch(retro_audio_sample_batch_t cb) { audio_batch_cb = cb; }
+void retro_set_audio_sample_batch(retro_audio_sample_batch_t cb) {
+#if defined(M64P_AUDIO_SYNC_TRACE) && defined(_WIN32)
+    sync_frontend = cb;
+    audio_batch_cb = sync_audio;
+#else
+    audio_batch_cb = cb;
+#endif
+}
 void retro_set_input_poll(retro_input_poll_t cb) { poll_cb = cb; }
 void retro_set_input_state(retro_input_state_t cb) { input_cb = cb; }
 
@@ -395,8 +409,8 @@ void retro_get_system_av_info(struct retro_system_av_info *info)
 {
     info->geometry.base_width = 640;
     info->geometry.base_height = 480;
-    info->geometry.max_width = 640;
-    info->geometry.max_height = 480;
+    info->geometry.max_width = 640 * (renderer_settings.upscale ? renderer_settings.upscale : 1);
+    info->geometry.max_height = 625 * (renderer_settings.upscale ? renderer_settings.upscale : 1);
     info->geometry.aspect_ratio = 640.0 / 480.0;
     info->timing.fps = vi_expected_refresh_rate_from_tv_standard(ROM_PARAMS.systemtype);
     info->timing.sample_rate = 44100.0;
@@ -418,56 +432,44 @@ void copy_file(char *ininame, char *fileName)
     }
 }
 
-struct retro_hw_render_callback hw_render;
-static struct retro_hw_render_context_negotiation_interface_vulkan hw_context_negotiation;
-static const struct retro_hw_render_interface_vulkan *vulkan_hw;
+#ifdef HAVE_PARALLEL_RDP
+static struct retro_hw_render_callback hw_render;
+static struct retro_hw_render_context_negotiation_interface_vulkan hw_negotiation;
 
 static void context_reset(void)
 {
     const struct retro_hw_render_interface *iface = NULL;
-
-    if (!environ_cb(RETRO_ENVIRONMENT_GET_HW_RENDER_INTERFACE, &iface) || iface == NULL)
-        return;
-    if (iface->interface_type != RETRO_HW_RENDER_INTERFACE_VULKAN ||
+    if (!environ_cb(RETRO_ENVIRONMENT_GET_HW_RENDER_INTERFACE, &iface) || !iface ||
+        iface->interface_type != RETRO_HW_RENDER_INTERFACE_VULKAN ||
         iface->interface_version < RETRO_HW_RENDER_INTERFACE_VULKAN_VERSION)
         return;
-
-    vulkan_hw = (const struct retro_hw_render_interface_vulkan *)iface;
-    vk_set_hw_render_interface(vulkan_hw);
+    vk_set_hw_render_interface((const struct retro_hw_render_interface_vulkan *)iface);
+    if (renderer_open && renderer_settings.renderer == RENDERER_PARALLEL)
+    {
+        vk_destroy();
+        if (!vk_init() && log_cb)
+            log_cb(RETRO_LOG_ERROR, "paraLLEl-RDP: failed to restore Vulkan renderer.\n");
+    }
 }
-
-static void context_destroy(void)
-{
-    vk_context_destroy();
-    vulkan_hw = NULL;
-}
-
-static bool retro_init_hw_context(void)
+static void context_destroy(void) { vk_context_destroy(); }
+static bool request_vulkan_context(void)
 {
     memset(&hw_render, 0, sizeof(hw_render));
-    memset(&hw_context_negotiation, 0, sizeof(hw_context_negotiation));
-
+    memset(&hw_negotiation, 0, sizeof(hw_negotiation));
     hw_render.context_type = RETRO_HW_CONTEXT_VULKAN;
     hw_render.context_reset = context_reset;
     hw_render.context_destroy = context_destroy;
-    hw_render.cache_context = true;
-
-    if (!environ_cb(RETRO_ENVIRONMENT_SET_HW_RENDER, &hw_render))
-        return false;
-
-    hw_context_negotiation.interface_type = RETRO_HW_RENDER_CONTEXT_NEGOTIATION_INTERFACE_VULKAN;
-    hw_context_negotiation.interface_version =
-        RETRO_HW_RENDER_CONTEXT_NEGOTIATION_INTERFACE_VULKAN_VERSION;
-    hw_context_negotiation.get_application_info = vk_get_application_info;
-    hw_context_negotiation.create_device = vk_create_device;
-    hw_context_negotiation.destroy_device = NULL;
-
-    if (!environ_cb(RETRO_ENVIRONMENT_SET_HW_RENDER_CONTEXT_NEGOTIATION_INTERFACE,
-                    &hw_context_negotiation))
-        return false;
-
-    return true;
+    hw_render.cache_context = false;
+    if (!environ_cb(RETRO_ENVIRONMENT_SET_HW_RENDER, &hw_render)) return false;
+    hw_negotiation.interface_type = RETRO_HW_RENDER_CONTEXT_NEGOTIATION_INTERFACE_VULKAN;
+    hw_negotiation.interface_version = RETRO_HW_RENDER_CONTEXT_NEGOTIATION_INTERFACE_VULKAN_VERSION;
+    hw_negotiation.get_application_info = vk_get_application_info;
+    hw_negotiation.create_device = vk_create_device;
+    hw_negotiation.destroy_device = vk_context_destroy;
+    return environ_cb(RETRO_ENVIRONMENT_SET_HW_RENDER_CONTEXT_NEGOTIATION_INTERFACE,
+            &hw_negotiation);
 }
+#endif
 
 void retro_init(void)
 {
@@ -500,7 +502,7 @@ void retro_init(void)
     environ_cb(RETRO_ENVIRONMENT_SET_PIXEL_FORMAT, &colorMode);
     environ_cb(RETRO_ENVIRONMENT_GET_RUMBLE_INTERFACE, &rumble);
 
-    retro_init_hw_context();
+
 
     initializing = true;
 }
@@ -518,7 +520,7 @@ void retro_deinit(void)
 
     rdp_plugin_last[0] = '\0';
 
-    free(prescale);
+
 }
 
 void update_controllers()
@@ -577,6 +579,22 @@ bool retro_load_game(const struct retro_game_info *game)
 {
     char *gamePath;
     char *newPath;
+    renderer_read_options(environ_cb);
+    current_rdp_type = renderer_settings.renderer == RENDERER_ANGRYLION ? RDP_PLUGIN_ANGRYLION : RDP_PLUGIN_PARALLEL;
+    if (log_cb)
+        log_cb(RETRO_LOG_INFO, "Renderer: %s, upscale %ux, performance cores %s.\n",
+                renderer_settings.renderer == RENDERER_ANGRYLION ? "Angrylion" : "paraLLEl-RDP",
+                renderer_settings.upscale, renderer_settings.performance_only ? "only" : "unrestricted");
+    performance_cores_init();
+    performance_cores_set_enabled(renderer_settings.performance_only);
+#ifdef HAVE_PARALLEL_RDP
+    if (renderer_settings.renderer == RENDERER_PARALLEL && !request_vulkan_context())
+    {
+        if (log_cb) log_cb(RETRO_LOG_ERROR, "paraLLEl-RDP requires a Vulkan frontend; content load rejected.\n");
+        return false;
+    }
+#endif
+    initializing = true;
 
     // Workaround for broken subsystem on static platforms
     // Note: game->path can be NULL if loading from a archive
@@ -645,6 +663,7 @@ bool retro_load_game(const struct retro_game_info *game)
 
     format_saved_memory();
     init_audio_libretro(audio_buffer_size);
+    sync_open();
 
     game_data = malloc(game->size);
     memcpy(game_data, game->data, game->size);
@@ -661,6 +680,8 @@ bool retro_load_game(const struct retro_game_info *game)
 
 void retro_unload_game(void)
 {
+    optional_rsp_report();
+    sync_close();
 
     CoreDoCommand(M64CMD_ROM_CLOSE, 0, NULL);
 
@@ -703,25 +724,27 @@ void retro_run(void)
         update_controllers();
     }
 
+    struct performance_affinity emulation_affinity;
+    performance_emulation_enter(&emulation_affinity);
+    sync_begin();
     EmuThreadFunction();
+    ai_flush_samples(&g_dev.ai);
+    audio_end_frame_libretro(1.0 / vi_expected_refresh_rate_from_tv_standard(ROM_PARAMS.systemtype));
+    sync_end();
+    performance_core_leave(&emulation_affinity);
 
-    if (libretro_swap_buffer)
-    {
-        const unsigned frame_width = vk_frame_width() ? vk_frame_width() : 640;
-        const unsigned frame_height = vk_frame_height() ? vk_frame_height() : 480;
-        video_cb(RETRO_HW_FRAME_BUFFER_VALID, frame_width, frame_height, 0);
-    }
+#ifdef HAVE_PARALLEL_RDP
+    if (renderer_settings.renderer == RENDERER_PARALLEL)
+        video_cb(libretro_swap_buffer ? RETRO_HW_FRAME_BUFFER_VALID : NULL,
+                vk_frame_width() ? vk_frame_width() : 640,
+                vk_frame_height() ? vk_frame_height() : 480, 0);
     else
+#endif
     {
-        /* No new Vulkan image was produced. Let the frontend duplicate the
-         * previous frame rather than touching an API-specific framebuffer. */
-        video_cb(NULL,
-                 vk_frame_width() ? vk_frame_width() : 640,
-                 vk_frame_height() ? vk_frame_height() : 480,
-                 0);
+        extern void angrylion_present(bool new_frame);
+        angrylion_present(libretro_swap_buffer);
     }
 }
-
 void retro_reset(void)
 {
     CoreDoCommand(M64CMD_RESET, 0, (void *)0);
@@ -758,19 +781,25 @@ size_t retro_get_memory_size(unsigned type)
 
 size_t retro_serialize_size(void)
 {
-    return 16788288 + 1024 + 4 + 4096;
+    return 16788288 + 1024 + 4 + 151552;
 }
 
 bool retro_serialize(void *data, size_t size)
 {
-    main_statesave(data);
-    return false;
+    if (!data || size < retro_serialize_size()) return false;
+    return main_statesave(data) != 0;
 }
 
 bool retro_unserialize(const void *data, size_t size)
 {
-    main_stateload(data);
-    return false;
+    if (!data || size < 44) return false;
+    const unsigned char* header = data;
+    unsigned version = ((unsigned)header[8] << 24) | ((unsigned)header[9] << 16) |
+                       ((unsigned)header[10] << 8) | header[11];
+    size_t extra = version >= 0x00010e00 ? 151552 : version >= 0x00010d00 ? 20480 : version >= 0x00010c00 ? 16384 :
+                   version >= 0x00010b00 ? 8192 : version >= 0x00010200 ? 4096 : 0;
+    if (size < 16788288 + 1024 + 4 + extra) return false;
+    return main_stateload(data) != 0;
 }
 
 // Needed to be able to detach controllers for Lylat Wars multiplayer
@@ -887,29 +916,74 @@ void angrylionProcessDList(void)
 
 void angrylionProcessRDPList(void)
 {
-    vk_process_commands();
+#ifdef HAVE_PARALLEL_RDP
+    if (renderer_settings.renderer == RENDERER_PARALLEL) { vk_process_commands(); return; }
+#endif
+    n64video_process_list();
 }
 
 void angrylionRomClosed(void)
 {
-    vk_destroy();
+    if (!renderer_open) return;
+    renderer_open = false;
+#ifdef HAVE_PARALLEL_RDP
+    if (renderer_settings.renderer == RENDERER_PARALLEL) { vk_destroy(); return; }
+#endif
+    n64video_close();
 }
 
 int angrylionRomOpen(void)
 {
-    vk_init();
+#ifdef HAVE_PARALLEL_RDP
+    if (renderer_settings.renderer == RENDERER_PARALLEL)
+    {
+        renderer_open = true;
+        if (vk_init()) return 1;
+        if (log_cb) log_cb(RETRO_LOG_ERROR, "paraLLEl-RDP: Vulkan renderer initialization failed.\n");
+        return 0;
+    }
+#endif
+    struct n64video_config config;
+    n64video_config_init(&config);
+    config.parallel = true;
+    config.num_workers = renderer_settings.threads;
+    config.upscale = renderer_settings.upscale;
+    config.dithering = true;
+    config.vi.mode = renderer_settings.vi_filter ? VI_MODE_NORMAL : VI_MODE_COLOR;
+    config.vi.vi_dedither = renderer_settings.dedither;
+    config.vi.vi_blur = renderer_settings.blur;
+    config.vi.hide_overscan = renderer_settings.overscan;
+    config.vi.bob_deinterlace = renderer_settings.bob;
+    config.gfx.rdram = gfx_info.RDRAM;
+    config.gfx.rdram_size = *gfx_info.RDRAM_SIZE;
+    config.gfx.dmem = gfx_info.DMEM;
+    config.gfx.mi_intr_reg = gfx_info.MI_INTR_REG;
+    config.gfx.mi_intr_cb = gfx_info.CheckInterrupts;
+    config.gfx.dp_reg = (uint32_t **)&gfx_info.DPC_START_REG;
+    config.gfx.vi_reg = (uint32_t **)&gfx_info.VI_STATUS_REG;
+    n64video_init(&config);
+    n64video_set_native_lod(renderer_settings.native_lod);
+    if (log_cb) {
+        extern uint32_t parallel_num_workers(void);
+        log_cb(RETRO_LOG_INFO, "Angrylion: %u rendering workers, adaptive synchronization.\n",
+                parallel_num_workers());
+    }
+    renderer_open = true;
 
     return 1;
 }
 
 void angrylionUpdateScreen(void)
 {
-    vk_rasterize();
+#ifdef HAVE_PARALLEL_RDP
+    if (renderer_settings.renderer == RENDERER_PARALLEL) { vk_rasterize(); return; }
+#endif
+    n64video_update_screen();
 }
 
 void angrylionShowCFB(void)
 {
-    vk_rasterize();
+    angrylionUpdateScreen();
 }
 
 void angrylionViStatusChanged(void) {}

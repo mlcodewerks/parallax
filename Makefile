@@ -1,4 +1,5 @@
 DEBUG = 1
+.DEFAULT_GOAL := all
 # Keep the CPU interpreter optimized even when the rest of the tree is built
 # with DEBUG=1. Set INTERP_OPTIMIZE=0 for source-level interpreter debugging.
 INTERP_OPTIMIZE ?= 1
@@ -604,10 +605,14 @@ else
 endif
 
 %.o: %.c
-	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
+	$(CC) $(CPPFLAGS) $(CFLAGS) -MMD -MP -c $< -o $@
 
 %.o: %.cpp
-	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -c $< -o $@
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -MMD -MP -c $< -o $@
+
+# Cache/RSP state layout and inline timing changes must rebuild their users.
+# Missing dependency files are expected on the first build.
+-include $(OBJECTS:.o=.d)
 
 clean:
 	find -name "*.o" -type f -delete

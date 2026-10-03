@@ -59,6 +59,10 @@ struct ai_controller
     unsigned int samples_format_changed;
     uint32_t last_read;
     uint32_t delayed_carry;
+    /* Monotonic device time; CP0 COUNT writes must not move the DAC. */
+    int64_t dma_start_clock;
+    int64_t idle_clock;
+    uint32_t idle_phase;
 
     struct mi_controller* mi;
     struct ri_controller* ri;
@@ -86,5 +90,7 @@ void read_ai_regs(void* opaque, uint32_t address, uint32_t* value);
 void write_ai_regs(void* opaque, uint32_t address, uint32_t value, uint32_t mask);
 
 void ai_end_of_dma_event(void* opaque);
+void ai_flush_samples(struct ai_controller* ai);
+void ai_rebase_timing(struct ai_controller* ai);
 
 #endif

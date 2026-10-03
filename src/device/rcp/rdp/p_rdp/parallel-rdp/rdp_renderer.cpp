@@ -28,6 +28,7 @@
 #include "luts.hpp"
 #include "timer.hpp"
 #include <limits>
+#include <initializer_list>
 #include <stdlib.h>
 #ifdef PARALLEL_RDP_SHADER_DIR
 #include "global_managers.hpp"
@@ -51,6 +52,45 @@ Renderer::~Renderer()
 void Renderer::set_shader_bank(const ShaderBank *bank)
 {
 	shader_bank = bank;
+#ifndef PARALLEL_RDP_SHADER_DIR
+	// Compile common pipelines before the first audio packet can be queued.
+	// A synchronous first-use compile can otherwise exhaust the device buffer.
+	auto cmd = device->request_command_buffer(Vulkan::CommandBuffer::Type::AsyncCompute);
+	auto warm = [&](const auto &program, std::initializer_list<uint32_t> constants) {
+		cmd->set_program(program);
+		cmd->set_specialization_constant_mask((1u << constants.size()) - 1);
+		unsigned index = 0;
+		for (auto value : constants) cmd->set_specialization_constant(index++, value);
+		Vulkan::DeferredPipelineCompile compile;
+		cmd->extract_pipeline_state(compile);
+		Vulkan::CommandBuffer::build_compute_pipeline(device, compile, Vulkan::CommandBuffer::CompileMode::Sync);
+	};
+	warm(bank->tmem_update, {ImplementationConstants::DefaultWorkgroupSize});
+	warm(bank->clear_indirect_buffer, {ImplementationConstants::DefaultWorkgroupSize});
+	for (unsigned scale = 1;; scale = caps.upscaling) {
+		unsigned log2 = trailing_zeroes(scale);
+		unsigned width = scale == 1 ? Limits::MaxWidth : caps.max_width;
+		warm(bank->span_setup, {scale * ImplementationConstants::DefaultWorkgroupSize, log2});
+		warm(bank->rasterizer, {ImplementationConstants::TileWidth, ImplementationConstants::TileHeight,
+		                      log2 << RASTERIZATION_UPSCALING_LOG2_BIT_OFFSET});
+		unsigned subgroup = caps.subgroup_tile_binning ? device->get_device_features().subgroup_properties.subgroupSize : 32;
+		if (caps.subgroup_tile_binning && supports_subgroup_size_control(32, subgroup)) {
+			cmd->enable_subgroup_size_control(true);
+			cmd->set_subgroup_size_log2(true, 5, trailing_zeroes(subgroup));
+		}
+		warm(bank->tile_binning_combined, {subgroup, ImplementationConstants::TileWidth,
+		     ImplementationConstants::TileHeight, Limits::MaxPrimitives, width, caps.max_num_tile_instances, scale});
+		cmd->enable_subgroup_size_control(false);
+		for (auto format : {FBFormat::RGBA5551, FBFormat::RGBA8888})
+			for (unsigned alias = 0; alias < 2; ++alias)
+				warm(caps.ubershader ? bank->ubershader : bank->depth_blend,
+				     {uint32_t(rdram_size), uint32_t(format), alias, ImplementationConstants::TileWidth,
+				      ImplementationConstants::TileHeight, Limits::MaxPrimitives, width,
+				      uint32_t(!is_host_coherent && scale == 1) | (log2 << 1)});
+		if (scale == caps.upscaling) break;
+	}
+	device->submit(cmd);
+#endif
 }
 
 bool Renderer::init_renderer(const RendererOptions &options)

@@ -20,6 +20,9 @@
  * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
 
 #include "r4300_core.h"
+#ifdef __LIBRETRO__
+#include "renderer_options.h"
+#endif
 #include "cached_interp.h"
 #if defined(COUNT_INSTR)
 #include "instr_counters.h"
@@ -65,6 +68,13 @@ void poweron_r4300(struct r4300_core* r4300)
     r4300->skip_jump = 0;
     r4300->reset_hard_job = 0;
     r4300->startup =1;
+    memset(r4300->icache_tags, 0, sizeof(r4300->icache_tags));
+    memset(r4300->dcache_tags, 0, sizeof(r4300->dcache_tags));
+    memset(r4300->dcache_words, 0, sizeof(r4300->dcache_words));
+    r4300->cache_timing = 1;
+#ifdef __LIBRETRO__
+    r4300->cache_timing = renderer_settings.cache_emulation;
+#endif
 
     cached_interp_invalidate(r4300, 0, 0);
 

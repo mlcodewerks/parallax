@@ -127,6 +127,12 @@ struct r4300_core
     uint32_t randomize_interrupt;
 
     uint32_t start_address;
+
+    /* Virtual-indexed caches. DMA observes RAM, not dirty D-cache words. */
+    uint32_t icache_tags[512];
+    uint32_t dcache_tags[512];
+    unsigned int cache_timing;
+    uint32_t dcache_words[512][4];
 };
 
 #define R4300_KSEG0 UINT32_C(0x80000000)

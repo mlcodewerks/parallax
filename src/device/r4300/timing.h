@@ -5,10 +5,10 @@
 #include "r4300_core.h"
 
 /* Ares n64/cpu/interpreter-{ipu,fpu}.cpp: total CPU cycles, including
- * the one-cycle baseline. Cache misses and bus stalls are not modeled here.
+ * the one-cycle baseline. Cache and bus costs are added by cache_timing.h.
  * https://github.com/ares-emulator/ares/tree/master/ares/n64/cpu
  */
-static inline unsigned int r4300_base_cycles(uint32_t op, uint32_t status)
+static osal_force_inline unsigned int r4300_base_cycles(uint32_t op, uint32_t status)
 {
     unsigned int fmt = (op >> 21) & 31;
     unsigned int fn = op & 63;
@@ -38,7 +38,7 @@ static inline unsigned int r4300_base_cycles(uint32_t op, uint32_t status)
     return 1;
 }
 
-static inline void cp0_step_cycles(struct cp0* cp0, unsigned int cycles)
+static osal_force_inline void cp0_step_cycles(struct cp0* cp0, unsigned int cycles)
 {
     /* COUNT runs at half the CPU clock. Retain odd cycles across dispatches,
      * register reads and control-flow changes instead of rounding each time. */
@@ -50,18 +50,26 @@ static inline void cp0_step_cycles(struct cp0* cp0, unsigned int cycles)
     cp0->cycle_count += ticks;
 }
 
-static inline int r4300_begin_instruction(struct r4300_core* r4300, uint32_t op, uint32_t pc)
+#include "cache_timing.h"
+
+static osal_force_inline int r4300_begin_instruction(struct r4300_core* r4300, uint32_t op, uint32_t pc)
 {
+    r4300_fetch_access_cycles(r4300, pc);
+    /* Conservative two-clock interpreter issue envelope, as used by
+     * simple64 v2022.07.7's cache-enabled interpreter. This extra handoff
+     * clock is an approximation of the pipeline, not cycle-accurate issue.
+     * Architectural instruction latency tests can disable the cache model. */
+    unsigned int issue = r4300->cache_timing != 0;
     uint32_t status = r4300->cp0.regs[CP0_STATUS_REG];
     /* COP1 arithmetic charges additional latency only after committing. */
     unsigned int cycles = (op >> 26) == 17 ? 1 : r4300_base_cycles(op, status);
     if ((status & CP0_STATUS_MODE_MASK) && !(status & (CP0_STATUS_EXL | CP0_STATUS_ERL))) {
         r4300->interp_PC.addr = pc;
-        cp0_step_cycles(&r4300->cp0, 1);
+        cp0_step_cycles(&r4300->cp0, 1 + issue);
         if (check_instruction_mode(r4300, op)) return 0;
         cp0_step_cycles(&r4300->cp0, cycles - 1);
     } else {
-        cp0_step_cycles(&r4300->cp0, cycles);
+        cp0_step_cycles(&r4300->cp0, cycles + issue);
     }
     return 1;
 }

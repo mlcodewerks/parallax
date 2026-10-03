@@ -1,4 +1,5 @@
 #include "rsp_jit.hpp"
+#include "rsp/timing.hpp"
 #include "rsp_disasm.hpp"
 #include <utility>
 #include <assert.h>
@@ -517,6 +518,8 @@ void CPU::jit_handle_impossible_delay_slot(jit_state_t *_jit, const InstructionI
                                            const InstructionInfo &last_info, uint32_t base_pc,
                                            uint32_t end_pc)
 {
+	regs.flush_register_window(_jit);
+	jit_branch_stall(_jit, last_info.conditional, false, true);
 	unsigned cond_branch_reg = regs.load_mips_register_noext(_jit, RegisterCache::COND_BRANCH_TAKEN);
 	unsigned scratch_reg = regs.modify_mips_register(_jit, RegisterCache::SCRATCH_REGISTER0);
 	unsigned illegal_cond_reg = regs.modify_mips_register(_jit, RegisterCache::SCRATCH_REGISTER1);
@@ -578,9 +581,32 @@ void CPU::jit_handle_impossible_delay_slot(jit_state_t *_jit, const InstructionI
 		jit_patch(nobranch);
 }
 
+// Taken branches consume a redirect clock after their delay slot (ares RSP
+// instructionBranchEpilogue). NEXT_PC has not been selected at these call
+// sites. Register state must already be flushed and no cached host register
+// may remain live across this helper.
+void CPU::jit_branch_stall(jit_state_t *_jit, bool conditional, bool latent, bool illegal)
+{
+    if (!cycle_timing) return;
+    jit_node_t *skip = nullptr;
+    if (conditional) {
+        if (illegal) jit_restore_illegal_cond_branch_taken(_jit, JIT_REGISTER_NEXT_PC);
+        else jit_ldxi_i(JIT_REGISTER_NEXT_PC, JIT_REGISTER_STATE,
+            latent ? offsetof(CPUState, has_delay_slot) :
+            offsetof(CPUState, sr) + RegisterCache::COND_BRANCH_TAKEN * 4);
+        skip = jit_beqi(JIT_REGISTER_NEXT_PC, 0);
+    }
+    jit_ldxi_ui(JIT_REGISTER_NEXT_PC, JIT_REGISTER_STATE, offsetof(CPUState, cycles));
+    jit_addi(JIT_REGISTER_NEXT_PC, JIT_REGISTER_NEXT_PC, 1);
+    jit_stxi_i(offsetof(CPUState, cycles), JIT_REGISTER_STATE, JIT_REGISTER_NEXT_PC);
+    if (skip) jit_patch(skip);
+}
+
 void CPU::jit_handle_delay_slot(jit_state_t *_jit, const InstructionInfo &last_info,
                                 uint32_t base_pc, uint32_t end_pc)
 {
+	regs.flush_register_window(_jit);
+	jit_branch_stall(_jit, last_info.conditional);
 	unsigned scratch_cond_reg = 0;
 	if (last_info.conditional)
 	{
@@ -653,6 +679,8 @@ void CPU::jit_exit(jit_state_t *_jit, uint32_t pc, const InstructionInfo &last_i
 
 void CPU::jit_exit_dynamic(jit_state_t *_jit, uint32_t pc, const InstructionInfo &last_info, bool first_instruction)
 {
+	if (first_instruction) jit_branch_stall(_jit, true, true);
+	else if (last_info.branch) jit_branch_stall(_jit, last_info.conditional);
 	// We must not touch REGISTER_MODE / TMP1 here, fortunately we don't need to.
 	if (first_instruction)
 	{
@@ -1668,7 +1696,7 @@ void CPU::jit_instruction(jit_state_t *_jit, uint32_t pc, uint32_t instr,
 
 		using SWC2Op = void (*)(RSP::CPUState *, unsigned rt, unsigned imm, int simm, unsigned rs);
 		static const SWC2Op ops[32] = {
-			RSP_SBV, RSP_SSV, RSP_SLV, RSP_SDV, RSP_SQV, RSP_SRV, RSP_SPV, RSP_SUV, RSP_SHV, RSP_SFV, nullptr, RSP_STV,
+			RSP_SBV, RSP_SSV, RSP_SLV, RSP_SDV, RSP_SQV, RSP_SRV, RSP_SPV, RSP_SUV, RSP_SHV, RSP_SFV, RSP_SWV, RSP_STV,
 		};
 
 		auto *op = ops[rd];
@@ -1755,6 +1783,8 @@ void CPU::jit_mark_block_entries(uint32_t pc, uint32_t end, bool *block_entries)
 
 void CPU::jit_handle_latent_delay_slot(jit_state_t *_jit, const InstructionInfo &last_info)
 {
+	regs.flush_register_window(_jit);
+	jit_branch_stall(_jit, false);
 	unsigned cond_branch_reg = JIT_REGISTER_NEXT_PC;
 	if (last_info.branch && last_info.conditional)
 	{
@@ -1812,6 +1842,41 @@ Func CPU::jit_region(uint64_t hash, unsigned pc_word, unsigned instruction_count
 
 	InstructionInfo last_info = {};
 	InstructionInfo first_info = {};
+	RSPTimingPipeline timing = {};
+	unsigned timing_cost[CODE_BLOCK_WORDS * 2] = {};
+	for (unsigned i = 0; i < instruction_count; ++i) {
+        if (!cycle_timing) { timing_cost[i] = 1; continue; }
+		if (block_entry[i]) timing = {};
+		auto op0 = RSPTimingDecoder::decoderEXECUTE(state.imem[pc_word + i]);
+		bool pair = false;
+		RSPTimingOp op1 = {};
+		if (i + 1 < instruction_count && !block_entry[i + 1] && !timing.single &&
+		    !op0.branch() && !op0.mayHalt() && !op0.endBlock()) {
+			op1 = RSPTimingDecoder::decoderEXECUTE(state.imem[pc_word + i + 1]);
+			pair = RSPTimingDecoder::canDualIssue(op0, op1);
+		}
+		timing_cost[i] = timing.issue(op0, pair ? &op1 : nullptr);
+		if (pair) timing_cost[++i] = 0;
+	}
+	// Arithmetic and COP2 helpers cannot observe the clock or exit the JIT.
+	// Coalesce their counter updates, retaining exact costs at every externally
+	// visible boundary. The first instruction may resolve a latent delay slot;
+	// entries, branches and their delay slots must never carry a deferred cost.
+#ifndef TRACE
+	unsigned pending_cycles = 0;
+	bool previous_branch = false;
+	for (unsigned i = 0; i < instruction_count; ++i) {
+		uint32_t instr = state.imem[pc_word + i];
+		auto op = RSPTimingDecoder::decoderEXECUTE(instr);
+		pending_cycles += timing_cost[i];
+		bool flush = i == 0 || i + 1 == instruction_count || block_entry[i + 1] ||
+		             previous_branch || op.branch() || op.mayHalt() || op.endBlock() ||
+		             op.usesDmem() || (instr >> 26) == 0x10;
+		timing_cost[i] = flush ? pending_cycles : 0;
+		if (flush) pending_cycles = 0;
+		previous_branch = op.branch();
+	}
+#endif
 
 	for (unsigned i = 0; i < instruction_count; i++)
 	{
@@ -1824,6 +1889,18 @@ Func CPU::jit_region(uint64_t hash, unsigned pc_word, unsigned instruction_count
 		}
 
 		uint32_t instr = state.imem[pc_word + i];
+
+		// Count execution, including loop iterations and branch delay slots.
+		// Emit before instructions that can return to the task scheduler.
+		// Omit zero-cost pair members and coalesced arithmetic updates, avoiding
+		// both memory traffic and a needless scratch-register eviction.
+		if (timing_cost[i]) {
+			unsigned cycle_reg = regs.modify_mips_register(_jit, RegisterCache::SCRATCH_REGISTER0);
+			jit_ldxi_ui(cycle_reg, JIT_REGISTER_STATE, offsetof(CPUState, cycles));
+			jit_addi(cycle_reg, cycle_reg, timing_cost[i]);
+			jit_stxi_i(offsetof(CPUState, cycles), JIT_REGISTER_STATE, cycle_reg);
+			regs.unlock_mips_register(RegisterCache::SCRATCH_REGISTER0);
+		}
 
 #ifdef TRACE_DISASM
 		mips_disasm += disassemble((pc_word + i) << 2, instr);

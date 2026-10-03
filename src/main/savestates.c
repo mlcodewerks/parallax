@@ -49,6 +49,10 @@
 #include "rom.h"
 #include "savestates.h"
 #include "util.h"
+#include "device/rcp/rsp/p_rsp/dpc_bridge.h"
+#ifdef __LIBRETRO__
+#include "device/rcp/rsp/optional_rsp.h"
+#endif
 
 enum { GB_CART_FINGERPRINT_SIZE = 0x1c };
 enum { GB_CART_FINGERPRINT_OFFSET = 0x134 };
@@ -56,7 +60,7 @@ enum { GB_CART_FINGERPRINT_OFFSET = 0x134 };
 enum { DD_DISK_ID_OFFSET = 0x43670 };
 
 static const char* savestate_magic = "M64+SAVE";
-static const int savestate_latest_version = 0x00010a00;  /* 1.10 */
+static const int savestate_latest_version = 0x00010f00;  /* 1.15: RDP texture/scanline timing state */
 static const unsigned char pj64_magic[4] = { 0xC8, 0xA6, 0xD8, 0x23 };
 
 static savestates_job job = savestates_job_nothing;
@@ -163,7 +167,7 @@ int savestates_load_m64p(struct device* dev, const void *data)
     unsigned char *savestateData, *curr;
     char queue[1024];
     unsigned char using_tlb_data[4];
-    unsigned char data_0001_0200[4096]; // 4k for extra state from v1.2
+    unsigned char data_0001_0200[151552]; // cache, LLE RSP and optional HLE state
 
     uint32_t* cp0_regs = r4300_cp0_regs(&dev->r4300.cp0);
 
@@ -182,7 +186,7 @@ int savestates_load_m64p(struct device* dev, const void *data)
     version = (version << 8) | *curr++;
     version = (version << 8) | *curr++;
     version = (version << 8) | *curr++;
-    if((version >> 16) != (savestate_latest_version >> 16))
+    if((version >> 16) != (savestate_latest_version >> 16) || version > (unsigned)savestate_latest_version)
         return 0;
 
     if(memcmp((char *)curr, ROM_SETTINGS.MD5, 32))
@@ -210,7 +214,9 @@ int savestates_load_m64p(struct device* dev, const void *data)
         memcpy(savestateData, data + 44, savestateSize);
         memcpy(queue, data + 44 + savestateSize, sizeof(queue));
         memcpy(using_tlb_data, data + 44 + savestateSize + sizeof(queue), sizeof(using_tlb_data));
-        memcpy(data_0001_0200, data + 44 + savestateSize + sizeof(queue) + sizeof(using_tlb_data), sizeof(data_0001_0200));
+        memcpy(data_0001_0200, data + 44 + savestateSize + sizeof(queue) + sizeof(using_tlb_data),
+            version >= 0x00010e00 ? 151552 : version >= 0x00010d00 ? 20480 : version >= 0x00010c00 ? 16384 :
+            version >= 0x00010b00 ? 8192 : 4096);
     }
 
     // Parse savestate
@@ -393,6 +399,10 @@ int savestates_load_m64p(struct device* dev, const void *data)
     to_little_endian_buffer(queue, 4, 256);
     load_eventqueue_infos(&dev->r4300.cp0, queue);
     dev->r4300.cp0.count_phase = 0; /* Older states had no fractional cycle. */
+    memset(dev->r4300.icache_tags, 0, sizeof(dev->r4300.icache_tags));
+    memset(dev->r4300.dcache_tags, 0, sizeof(dev->r4300.dcache_tags));
+    memset(&dev->dp.timing, 0, sizeof(dev->dp.timing));
+    dev->dp.timing.right = dev->dp.timing.bottom = 4095;
 
     if (version == 0x00010200)
     {
@@ -774,6 +784,34 @@ int savestates_load_m64p(struct device* dev, const void *data)
             dev->r4300.cp0.latch = GETDATA(curr, uint64_t);
             dev->r4300.cp0.random_state = GETDATA(curr, uint32_t);
         }
+        if (version >= 0x00010b00) {
+            dev->dp.timing.deadline = dev->r4300.cp0.count_clock + GETDATA(curr, int64_t);
+            COPYARRAY(dev->dp.timing.words, curr, uint32_t, 8);
+            dev->dp.timing.pos = GETDATA(curr, uint32_t);
+            dev->dp.timing.length = GETDATA(curr, uint32_t);
+            dev->dp.timing.cycle_type = GETDATA(curr, uint32_t);
+            dev->dp.timing.fb_size = GETDATA(curr, uint32_t);
+            dev->dp.timing.modes = GETDATA(curr, uint32_t);
+            dev->dp.timing.left = GETDATA(curr, uint32_t);
+            dev->dp.timing.top = GETDATA(curr, uint32_t);
+            dev->dp.timing.right = GETDATA(curr, uint32_t);
+            dev->dp.timing.bottom = GETDATA(curr, uint32_t);
+            if (version >= 0x00010f00) {
+                curr = data_0001_0200 + RDP_TIMING_STATE_OFFSET;
+                dev->dp.timing.tex_size = GETDATA(curr, uint32_t) & 3;
+                dev->dp.timing.tex_width = GETDATA(curr, uint32_t);
+                dev->dp.timing.tex_address = GETDATA(curr, uint32_t);
+                dev->dp.timing.fb_width = GETDATA(curr, uint32_t);
+                dev->dp.timing.fb_address = GETDATA(curr, uint32_t);
+                dev->dp.timing.scissor_field = GETDATA(curr, uint32_t) & 3;
+            }
+            curr = data_0001_0200 + 4096;
+            COPYARRAY(dev->r4300.icache_tags, curr, uint32_t, 512);
+            COPYARRAY(dev->r4300.dcache_tags, curr, uint32_t, 512);
+            if (version >= 0x00010c00)
+                COPYARRAY(dev->r4300.dcache_words, curr, uint32_t, 2048);
+            else memset(dev->r4300.dcache_tags, 0, sizeof(dev->r4300.dcache_tags));
+        }
     }
     else
     {
@@ -845,10 +883,34 @@ int savestates_load_m64p(struct device* dev, const void *data)
 
     dev->sp.rsp_task_locked = 0;
     dev->r4300.cp0.interrupt_unsafe_state = 0;
+    if (version >= 0x00010d00) {
+        uint32_t rsp_words[PARALLEL_RSP_STATE_WORDS];
+        curr = data_0001_0200 + 16384;
+        dev->sp.rsp_task_locked = GETDATA(curr, uint32_t);
+        COPYARRAY(rsp_words, curr, uint32_t, PARALLEL_RSP_STATE_WORDS);
+#if defined(HAVE_PARALLEL_RSP)
+        parallelRSPLoadState(rsp_words);
+#endif
+        if (dev->sp.rsp_task_locked)
+            dev->r4300.cp0.interrupt_unsafe_state |= INTR_UNSAFE_RSP;
+    }
 
     *r4300_cp0_last_addr(&dev->r4300.cp0) = *r4300_pc(&dev->r4300);
 
     vi_rebase_timing(&dev->vi, legacy_vi_delay);
+    if (version >= 0x00010d00) {
+        curr = data_0001_0200 + 16384 + 4 + PARALLEL_RSP_STATE_WORDS * 4;
+        dev->vi.field_tick_phase = GETDATA(curr, uint32_t);
+        dev->vi.field_ticks = GETDATA(curr, uint32_t);
+        dev->vi.field_start_count_clock = dev->r4300.cp0.count_clock + GETDATA(curr, int64_t);
+        dev->sp.rsp_completion_status = GETDATA(curr, uint32_t);
+    }
+    else dev->sp.rsp_completion_status = SP_STATUS_HALT | SP_STATUS_BROKE;
+#ifdef __LIBRETRO__
+    optional_rsp_load(version >= 0x00010e00 ? data_0001_0200 + 20480 : NULL);
+#endif
+    ai_rebase_timing(&dev->ai);
+    rsp_rebase_dma(&dev->sp);
 
     free(savestateData);
     return 1;
@@ -900,7 +962,7 @@ int savestates_save_m64p(const struct device* dev, void *data)
     save_eventqueue_infos(&dev->r4300.cp0, queue);
 
     // Allocate memory for the save state data
-    save->size = 16788288 + sizeof(queue) + 4 + 4096;
+    save->size = 16788288 + sizeof(queue) + 4 + 151552;
     save->data = curr = malloc(save->size);
     if (save->data == NULL)
     {
@@ -1263,7 +1325,49 @@ int savestates_save_m64p(const struct device* dev, void *data)
     PUTARRAY(dev->r4300.cp0.tlb_entryhi_hi, curr, uint32_t, 32);
     PUTDATA(curr, uint64_t, dev->r4300.cp0.latch);
     PUTDATA(curr, uint32_t, dev->r4300.cp0.random_state);
+    PUTDATA(curr, int64_t, dev->dp.timing.deadline - dev->r4300.cp0.count_clock);
+    PUTARRAY(dev->dp.timing.words, curr, uint32_t, 8);
+    PUTDATA(curr, uint32_t, dev->dp.timing.pos);
+    PUTDATA(curr, uint32_t, dev->dp.timing.length);
+    PUTDATA(curr, uint32_t, dev->dp.timing.cycle_type);
+    PUTDATA(curr, uint32_t, dev->dp.timing.fb_size);
+    PUTDATA(curr, uint32_t, dev->dp.timing.modes);
+    PUTDATA(curr, uint32_t, dev->dp.timing.left);
+    PUTDATA(curr, uint32_t, dev->dp.timing.top);
+    PUTDATA(curr, uint32_t, dev->dp.timing.right);
+    PUTDATA(curr, uint32_t, dev->dp.timing.bottom);
+    curr = save->data + 16788288 + sizeof(queue) + 4 + RDP_TIMING_STATE_OFFSET;
+    PUTDATA(curr, uint32_t, dev->dp.timing.tex_size);
+    PUTDATA(curr, uint32_t, dev->dp.timing.tex_width);
+    PUTDATA(curr, uint32_t, dev->dp.timing.tex_address);
+    PUTDATA(curr, uint32_t, dev->dp.timing.fb_width);
+    PUTDATA(curr, uint32_t, dev->dp.timing.fb_address);
+    PUTDATA(curr, uint32_t, dev->dp.timing.scissor_field);
 
+
+    /* Fixed extension offset keeps the original extra-state layout intact. */
+    curr = save->data + 16788288 + sizeof(queue) + 4 + 4096;
+    PUTARRAY(dev->r4300.icache_tags, curr, uint32_t, 512);
+    PUTARRAY(dev->r4300.dcache_tags, curr, uint32_t, 512);
+    PUTARRAY(dev->r4300.dcache_words, curr, uint32_t, 2048);
+    {
+        uint32_t rsp_words[PARALLEL_RSP_STATE_WORDS] = {0};
+        curr = save->data + 16788288 + sizeof(queue) + 4 + 16384;
+        PUTDATA(curr, uint32_t, dev->sp.rsp_task_locked);
+#if defined(HAVE_PARALLEL_RSP)
+        parallelRSPSaveState(rsp_words);
+#endif
+        PUTARRAY(rsp_words, curr, uint32_t, PARALLEL_RSP_STATE_WORDS);
+        PUTDATA(curr, uint32_t, dev->vi.field_tick_phase);
+        PUTDATA(curr, uint32_t, dev->vi.field_ticks);
+        PUTDATA(curr, int64_t, dev->vi.field_start_count_clock - dev->r4300.cp0.count_clock);
+        PUTDATA(curr, uint32_t, dev->sp.rsp_completion_status);
+    }
+
+#ifdef __LIBRETRO__
+    if (optional_rsp_state_size() > 131072) { free(save->data); free(save); return 0; }
+    optional_rsp_save(save->data + 16788288 + sizeof(queue) + 4 + 20480);
+#endif
     memcpy(save->mempointer, save->data, save->size);
     free(save->data);
     free(save);

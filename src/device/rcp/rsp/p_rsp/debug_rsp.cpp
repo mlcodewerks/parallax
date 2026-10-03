@@ -86,6 +86,7 @@ void CPU::init_symbol_table()
 	S(SUV);
 	S(SHV);
 	S(SFV);
+	S(SWV);
 	S(STV);
 
 	S(VMULF);
@@ -1017,7 +1018,7 @@ Func CPU::jit_region(uint64_t hash, unsigned pc, unsigned count)
 				rd = (instr >> 11) & 31;
 				imm = (instr >> 7) & 15;
 				static const char *swc2_ops[32] = {
-					"SBV",   "SSV",   "SLV",   "SDV",   "SQV",   "SRV",   "SPV",   "SUV",   "SHV",   "SFV",   nullptr,
+					"SBV",   "SSV",   "SLV",   "SDV",   "SQV",   "SRV",   "SPV",   "SUV",   "SHV",   "SFV",   "SWV",
 					"STV",   nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
 					nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
 				};
@@ -1130,6 +1131,7 @@ DECL_LS(SPV);
 DECL_LS(SUV);
 DECL_LS(SHV);
 DECL_LS(SFV);
+DECL_LS(SWV);
 DECL_LS(STV);
 
 extern void RSP_CALL(void *opaque, unsigned target, unsigned ret);

@@ -367,14 +367,14 @@ static void video_plugin_render_callback(int bScreenRedrawn)
     }
 }
 
-void main_stateload(void *data)
+int main_stateload(const void *data)
 {
-  savestates_load_m64p(&g_dev, data);
+  return savestates_load_m64p(&g_dev, data);
 }
 
-void main_statesave(void *data)
+int main_statesave(void *data)
 {
-    savestates_save_m64p(&g_dev, data);
+    return savestates_save_m64p(&g_dev, data);
 }
 
 void new_frame(void)
@@ -937,8 +937,9 @@ void main_prerun(void)
 
     /* setup backends */
     extern void set_audio_format_via_libretro(void* user_data, unsigned int frequency);
+    extern void push_audio_idle_samples_via_libretro(void* user_data, size_t frames);
     extern void push_audio_samples_via_libretro(void* user_data, const void* buffer, size_t size);
-    audio_out_backend_libretro = (struct audio_out_backend_interface){ set_audio_format_via_libretro, push_audio_samples_via_libretro };
+    audio_out_backend_libretro = (struct audio_out_backend_interface){ set_audio_format_via_libretro, push_audio_samples_via_libretro, push_audio_idle_samples_via_libretro };
     
     /* Fill-in l_pak_type_idx and l_ipaks according to game compatibility */
     k = 0;

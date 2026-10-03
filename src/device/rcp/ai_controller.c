@@ -35,35 +35,58 @@
 #define AI_STATUS_BUSY UINT32_C(0x40000000)
 #define AI_STATUS_FULL UINT32_C(0x80000000)
 
+static void ai_set_format(struct ai_controller* ai)
+{
+    if (ai->samples_format_changed) {
+        unsigned frequency = ai->regs[AI_DACRATE_REG]
+            ? ai->vi->clock / (1u + ai->regs[AI_DACRATE_REG]) : 44100;
+        ai->iaout->set_frequency(ai->aout, frequency);
+        ai->samples_format_changed = 0;
+    }
+}
+
+static void ai_emit_idle(struct ai_controller* ai, int64_t now)
+{
+    int64_t elapsed = now - ai->idle_clock;
+    unsigned divider = ai->regs[AI_DACRATE_REG] + 1u;
+    if (elapsed <= 0) return;
+    ai_set_format(ai);
+    /* Before a DAC rate is configured the backend runs at its 44.1 kHz
+     * power-on rate, not one sample per VI oscillator tick. Otherwise games
+     * that start video first flood the queue with startup silence. */
+    uint64_t ticks = (uint64_t)elapsed;
+    if (!ai->regs[AI_DACRATE_REG]) {
+        ticks *= 44100;
+        divider = ai->vi->clock;
+    }
+    ticks += ai->idle_phase;
+    size_t frames = (size_t)(ticks / divider);
+    ai->idle_phase = ticks % divider;
+    ai->idle_clock = now;
+    if (frames && ai->iaout->push_idle_samples)
+        ai->iaout->push_idle_samples(ai->aout, frames);
+}
 
 static uint32_t get_remaining_dma_length(struct ai_controller* ai)
 {
-    unsigned int* next_ai_event;
-    unsigned int remaining_dma_duration;
-    const uint32_t* cp0_regs;
-
-    if (ai->fifo[0].duration == 0)
+    if (!(ai->regs[AI_STATUS_REG] & AI_STATUS_BUSY) || !ai->fifo[0].duration)
         return 0;
-
     cp0_update_count(ai->mi->r4300);
-    next_ai_event = get_event(&ai->mi->r4300->cp0.q, AI_INT);
-    if (next_ai_event == NULL)
-        return 0;
-
-    cp0_regs = r4300_cp0_regs(&ai->mi->r4300->cp0);
-    if ((int)(cp0_regs[CP0_COUNT_REG] - *next_ai_event) >= 0)
-        return 0;
-
-    remaining_dma_duration = *next_ai_event - cp0_regs[CP0_COUNT_REG];
-
-    uint64_t dma_length = (uint64_t)remaining_dma_duration * ai->fifo[0].length / ai->fifo[0].duration;
-    return dma_length&~7;
+    int64_t elapsed = ai->mi->r4300->cp0.count_clock - ai->dma_start_clock;
+    if (elapsed <= 0) return ai->fifo[0].length;
+    if (elapsed >= ai->fifo[0].duration) return 0;
+    uint64_t consumed = (uint64_t)elapsed * (ai->fifo[0].length / 4) / ai->fifo[0].duration;
+    return ai->fifo[0].length - (uint32_t)consumed * 4;
 }
 
 static unsigned int get_dma_duration(struct ai_controller* ai)
 {
     unsigned int bytes_per_sample = 4; /* 16-bit stereo */
     unsigned int divider = 1 + ai->regs[AI_DACRATE_REG];
+
+    if (!ai->regs[AI_DACRATE_REG])
+        return (unsigned int)((uint64_t)(ai->regs[AI_LEN_REG] / bytes_per_sample)
+                              * ai->vi->clock / 44100);
 
     if (divider == 0)
         return 0;
@@ -75,19 +98,10 @@ static unsigned int get_dma_duration(struct ai_controller* ai)
 }
 
 
-static void do_dma(struct ai_controller* ai, struct ai_dma* dma)
+static void do_dma(struct ai_controller* ai, struct ai_dma* dma, int64_t start)
 {
-    /* lazy initialization of sample format */
-    if (ai->samples_format_changed)
-    {
-        unsigned int frequency = (ai->regs[AI_DACRATE_REG] == 0)
-            ? 44100 /* default sample rate */
-            : ai->vi->clock / (1 + ai->regs[AI_DACRATE_REG]);
-
-        ai->iaout->set_frequency(ai->aout, frequency);
-
-        ai->samples_format_changed = 0;
-    }
+    ai_set_format(ai);
+    ai->dma_start_clock = start;
 
     ai->last_read = dma->length;
 
@@ -100,7 +114,9 @@ static void do_dma(struct ai_controller* ai, struct ai_dma* dma)
 
     /* schedule end of dma event */
     cp0_update_count(ai->mi->r4300);
-    add_interrupt_event(&ai->mi->r4300->cp0, AI_INT, dma->duration);
+    struct cp0* cp0 = &ai->mi->r4300->cp0;
+    add_interrupt_event_count(cp0, AI_INT, cp0->regs[CP0_COUNT_REG] +
+        (uint32_t)(start + dma->duration - cp0->count_clock));
 }
 
 static void fifo_push(struct ai_controller* ai)
@@ -116,17 +132,24 @@ static void fifo_push(struct ai_controller* ai)
     }
     else
     {
+        cp0_update_count(ai->mi->r4300);
+        ai_emit_idle(ai, ai->mi->r4300->cp0.count_clock);
         ai->fifo[0].address = ai->regs[AI_DRAM_ADDR_REG] & UINT32_C(0x00fffff8);
         ai->fifo[0].length = ai->regs[AI_LEN_REG] & ~UINT32_C(7);
         ai->fifo[0].duration = duration;
         ai->regs[AI_STATUS_REG] |= AI_STATUS_BUSY;
 
-        do_dma(ai, &ai->fifo[0]);
+        /* The DAC keeps ticking while the FIFO is empty. Preserve the
+         * incomplete idle sample so starting a DMA cannot reset its phase. */
+        do_dma(ai, &ai->fifo[0], ai->mi->r4300->cp0.count_clock -
+            (ai->regs[AI_DACRATE_REG] ? ai->idle_phase : ai->idle_phase / 44100));
+        ai->idle_phase = 0;
     }
 }
 
 static void fifo_pop(struct ai_controller* ai)
 {
+    int64_t end = ai->dma_start_clock + ai->fifo[0].duration;
     if (ai->regs[AI_STATUS_REG] & AI_STATUS_FULL)
     {
         ai->fifo[0].address = ai->fifo[1].address;
@@ -134,12 +157,13 @@ static void fifo_pop(struct ai_controller* ai)
         ai->fifo[0].duration = ai->fifo[1].duration;
         ai->regs[AI_STATUS_REG] &= ~AI_STATUS_FULL;
 
-        do_dma(ai, &ai->fifo[0]);
+        do_dma(ai, &ai->fifo[0], end);
     }
     else
     {
         ai->regs[AI_STATUS_REG] &= ~AI_STATUS_BUSY;
-        ai->delayed_carry = 0;
+        ai->idle_clock = end;
+        ai->idle_phase = 0;
     }
 }
 
@@ -162,9 +186,11 @@ void poweron_ai(struct ai_controller* ai)
 {
     memset(ai->regs, 0, AI_REGS_COUNT*sizeof(uint32_t));
     memset(ai->fifo, 0, AI_DMA_FIFO_SIZE*sizeof(struct ai_dma));
-    ai->samples_format_changed = 0;
+    ai->samples_format_changed = 1;
     ai->last_read = 0;
     ai->delayed_carry = 0;
+    ai->dma_start_clock = ai->idle_clock = ai->mi->r4300->cp0.count_clock;
+    ai->idle_phase = 0;
 }
 
 static void ai_push_span(struct ai_controller* ai, unsigned int diff,
@@ -201,6 +227,26 @@ static unsigned int ai_hand_over_played(struct ai_controller* ai, uint32_t remai
     return handed;
 }
 
+void ai_flush_samples(struct ai_controller* ai)
+{
+    cp0_update_count(ai->mi->r4300);
+    if (ai->regs[AI_STATUS_REG] & AI_STATUS_BUSY)
+        ai_hand_over_played(ai, get_remaining_dma_length(ai));
+    else
+        ai_emit_idle(ai, ai->mi->r4300->cp0.count_clock);
+}
+
+void ai_rebase_timing(struct ai_controller* ai)
+{
+    struct cp0* cp0 = &ai->mi->r4300->cp0;
+    unsigned *event = get_event(&cp0->q, AI_INT);
+    ai->idle_clock = cp0->count_clock;
+    ai->idle_phase = 0;
+    ai->dma_start_clock = cp0->count_clock - ai->fifo[0].duration;
+    if (event) ai->dma_start_clock += (int32_t)(*event - cp0->regs[CP0_COUNT_REG]);
+    ai->samples_format_changed = 1;
+}
+
 void read_ai_regs(void* opaque, uint32_t address, uint32_t* value)
 {
     struct ai_controller* ai = (struct ai_controller*)opaque;
@@ -225,6 +271,7 @@ void write_ai_regs(void* opaque, uint32_t address, uint32_t value, uint32_t mask
     switch (reg)
     {
     case AI_LEN_REG:
+        if (ai->regs[AI_STATUS_REG] & AI_STATUS_FULL) return;
         masked_write(&ai->regs[AI_LEN_REG], value, mask);
         if (ai->regs[AI_LEN_REG] != 0) {
             fifo_push(ai);
@@ -239,9 +286,12 @@ void write_ai_regs(void* opaque, uint32_t address, uint32_t value, uint32_t mask
         return;
 
     case AI_DACRATE_REG:
+        ai_flush_samples(ai);
         /* lazy audio format setting */
-        if ((ai->regs[reg]) != (value & mask))
+        if ((ai->regs[reg] & mask) != (value & mask)) {
             ai->samples_format_changed = 1;
+            ai->idle_phase = 0; /* The divider's remainder has changed units. */
+        }
 
         masked_write(&ai->regs[reg], value, mask);
         return;

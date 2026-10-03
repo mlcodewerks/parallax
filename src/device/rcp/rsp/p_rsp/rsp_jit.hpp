@@ -113,6 +113,13 @@ public:
 	{
 		return state;
 	}
+    void set_cycle_timing(bool enabled)
+    {
+        if (cycle_timing == enabled) return;
+        cycle_timing = enabled;
+        for (auto &block : blocks) block = nullptr;
+        for (auto &cache : cached_blocks) cache.clear();
+    }
 
 	ReturnMode run();
 
@@ -122,6 +129,7 @@ public:
 
 private:
 	CPUState state;
+    bool cycle_timing = true;
 	Func blocks[IMEM_WORDS] = {};
 
 	void invalidate_code();
@@ -162,6 +170,7 @@ private:
 	void jit_exit_dynamic(jit_state_t *_jit, uint32_t pc, const InstructionInfo &last_info, bool first_instruction);
 	void jit_end_of_block(jit_state_t *_jit, uint32_t pc, const InstructionInfo &last_info);
 
+	void jit_branch_stall(jit_state_t *_jit, bool conditional, bool latent = false, bool illegal = false);
 	void jit_handle_delay_slot(jit_state_t *_jit, const InstructionInfo &last_info, uint32_t base_pc, uint32_t end_pc);
 	void jit_handle_impossible_delay_slot(jit_state_t *_jit, const InstructionInfo &info, const InstructionInfo &last_info,
 	                                      uint32_t base_pc, uint32_t end_pc);

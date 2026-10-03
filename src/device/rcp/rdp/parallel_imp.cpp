@@ -11,6 +11,11 @@
 #include "common.h"
 #include "gfxstructdefs.h"
 #include <libretro_vulkan.h>
+#include "renderer_options.h"
+extern "C" {
+#include "rdp_core.h"
+}
+#include "performance_cores.h"
 
 unsigned rdram_size = 8 * 1024 * 1024;
 
@@ -36,6 +41,12 @@ unsigned width, height;
 
 bool skip_swap_clear;
 static bool vk_initialized;
+struct RenderAffinity
+{
+    performance_affinity state;
+    RenderAffinity() { performance_core_enter(0, &state); }
+    ~RenderAffinity() { performance_core_leave(&state); }
+};
 
 static const unsigned cmd_len_lut[64] = {
 	1,
@@ -150,11 +161,14 @@ static bool vk_publish_scanout(unsigned &out_width, unsigned &out_height)
 		return false;
 
 	opts.persist_frame_on_invalid_input = true;
-	opts.crop_rect.top = true;
-	opts.crop_rect.bottom = true;
-	opts.crop_rect.enable = true;
-	opts.vi.aa = true;
-	opts.downscale_steps = 2;
+	opts.crop_rect.top = 1;
+	opts.crop_rect.bottom = 1;
+	opts.crop_rect.enable = renderer_settings.overscan;
+	opts.vi.aa = renderer_settings.vi_filter;
+	opts.vi.scale = renderer_settings.vi_filter;
+	opts.vi.dither_filter = renderer_settings.dedither;
+	opts.vi.divot_filter = renderer_settings.blur;
+	opts.downscale_steps = renderer_settings.downscale;
 
 	image = frontend->scanout(opts);
 	if (!image || !image->get_width() || !image->get_height())
@@ -203,6 +217,7 @@ static bool vk_publish_scanout(unsigned &out_width, unsigned &out_height)
 
 void vk_rasterize()
 {
+    RenderAffinity affinity;
 	unsigned frame_width = 0;
 	unsigned frame_height = 0;
 
@@ -220,7 +235,7 @@ void vk_rasterize()
 	frontend->set_vi_register(RDP::VIRegister::Width, *GET_GFX_INFO(VI_WIDTH_REG));
 	frontend->set_vi_register(RDP::VIRegister::Intr, *GET_GFX_INFO(VI_INTR_REG));
 	frontend->set_vi_register(RDP::VIRegister::VCurrentLine, *GET_GFX_INFO(VI_V_CURRENT_LINE_REG));
-	frontend->set_vi_register(RDP::VIRegister::Timing, *GET_GFX_INFO(VI_V_BURST_REG));
+	frontend->set_vi_register(RDP::VIRegister::Timing, *GET_GFX_INFO(VI_TIMING_REG));
 	frontend->set_vi_register(RDP::VIRegister::VSync, *GET_GFX_INFO(VI_V_SYNC_REG));
 	frontend->set_vi_register(RDP::VIRegister::HSync, *GET_GFX_INFO(VI_H_SYNC_REG));
 	frontend->set_vi_register(RDP::VIRegister::Leap, *GET_GFX_INFO(VI_LEAP_REG));
@@ -231,8 +246,8 @@ void vk_rasterize()
 	frontend->set_vi_register(RDP::VIRegister::YScale, *GET_GFX_INFO(VI_Y_SCALE_REG));
 
 	RDP::Quirks quirks;
-	quirks.set_native_texture_lod(true);
-	quirks.set_native_resolution_tex_rect(true);
+	quirks.set_native_texture_lod(renderer_settings.native_lod);
+	quirks.set_native_resolution_tex_rect(renderer_settings.native_tex_rect);
 	frontend->set_quirks(quirks);
 
 	if (vk_publish_scanout(frame_width, frame_height))
@@ -251,6 +266,7 @@ void vk_rasterize()
 
 void vk_process_commands()
 {
+    RenderAffinity affinity;
 	if (running)
 	{
 
@@ -288,8 +304,9 @@ void vk_process_commands()
 				do
 				{
 					offset &= 0xFFFFF8;
-					cmd_data[2 * cmd_ptr + 0] = *reinterpret_cast<const uint32_t *>(DRAM + offset);
-					cmd_data[2 * cmd_ptr + 1] = *reinterpret_cast<const uint32_t *>(DRAM + offset + 4);
+                    const uint32_t *synthetic = rdp_hle_command_buffer(offset);
+                    cmd_data[2 * cmd_ptr + 0] = synthetic ? synthetic[0] : *reinterpret_cast<const uint32_t *>(DRAM + offset);
+                    cmd_data[2 * cmd_ptr + 1] = synthetic ? synthetic[1] : *reinterpret_cast<const uint32_t *>(DRAM + offset + 4);
 					offset += sizeof(uint64_t);
 					cmd_ptr++;
 				} while (--length > 0);
@@ -304,7 +321,7 @@ void vk_process_commands()
 
 			if (cmd_ptr - cmd_cur - cmd_length < 0)
 			{
-				*GET_GFX_INFO(DPC_START_REG) = *GET_GFX_INFO(DPC_CURRENT_REG) = *GET_GFX_INFO(DPC_END_REG);
+				*GET_GFX_INFO(DPC_CURRENT_REG) = *GET_GFX_INFO(DPC_END_REG);
 				return;
 			}
 
@@ -313,7 +330,8 @@ void vk_process_commands()
 
 			if (RDP::Op(command) == RDP::Op::SyncFull)
 			{
-				// For synchronous RDP:
+				/* Finish GPU writes before exposing the full-sync interrupt. */
+				frontend->wait_for_timeline(frontend->signal_timeline());
 				*gfx_info.MI_INTR_REG |= DP_INTERRUPT;
 				gfx_info.CheckInterrupts();
 			}
@@ -323,7 +341,7 @@ void vk_process_commands()
 
 		cmd_ptr = 0;
 		cmd_cur = 0;
-		*GET_GFX_INFO(DPC_START_REG) = *GET_GFX_INFO(DPC_CURRENT_REG) = *GET_GFX_INFO(DPC_END_REG);
+		*GET_GFX_INFO(DPC_CURRENT_REG) = *GET_GFX_INFO(DPC_END_REG);
 	}
 }
 
@@ -412,6 +430,8 @@ bool vk_init()
 {
 	unsigned sync_frames;
 	unsigned slots;
+	RDP::CommandProcessorFlags flags = 0;
+	struct performance_affinity affinity;
 
 	running = false;
 	if (!context || !vk_hw)
@@ -443,8 +463,16 @@ bool vk_init()
 	retro_images.resize(slots);
 	retro_image_handles.resize(slots);
 
+	if (renderer_settings.upscale == 2) flags |= RDP::COMMAND_PROCESSOR_FLAG_UPSCALING_2X_BIT;
+	if (renderer_settings.upscale == 4) flags |= RDP::COMMAND_PROCESSOR_FLAG_UPSCALING_4X_BIT;
+	if (renderer_settings.upscale == 8) flags |= RDP::COMMAND_PROCESSOR_FLAG_UPSCALING_8X_BIT;
+	if (renderer_settings.ss_readbacks) flags |= RDP::COMMAND_PROCESSOR_FLAG_SUPER_SAMPLED_READ_BACK_BIT;
+	if (renderer_settings.ss_dither) flags |= RDP::COMMAND_PROCESSOR_FLAG_SUPER_SAMPLED_DITHER_BIT;
+	rdram_size = *gfx_info.RDRAM_SIZE;
+	performance_core_enter(0, &affinity);
 	frontend.reset(new RDP::CommandProcessor(*device, reinterpret_cast<void *>(gfx_info.RDRAM),
-	                                         0, rdram_size, rdram_size / 2, 0));
+	                                         0, rdram_size, rdram_size / 2, flags));
+	performance_core_leave(&affinity);
 	if (!frontend->device_is_supported())
 	{
 		frontend.reset();
@@ -455,9 +483,11 @@ bool vk_init()
 	running = true;
 	vk_initialized = true;
 	RDP::Quirks quirks;
-	quirks.set_native_texture_lod(true);
-	quirks.set_native_resolution_tex_rect(true);
+	quirks.set_native_texture_lod(renderer_settings.native_lod);
+	quirks.set_native_resolution_tex_rect(renderer_settings.native_tex_rect);
 	frontend->set_quirks(quirks);
+	cmd_cur = cmd_ptr = 0;
+	width = height = 0;
 	return true;
 }
 
