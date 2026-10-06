@@ -1618,3 +1618,8 @@ int f3dex2_run_dl_streaming(GSPState *gsp, RdpFifo *fifo,
         s_stream_active = 0;
     return s_stream_stalled;
 }
+
+#include "rdp_emit_state.h"
+#define WALKER_FIELDS(X) X(s_seg_table) X(s_half1) X(s_ucode_class) X(s_variant_cbfd) X(s_variant_acclaim) X(s_textured) X(s_zbuffered) X(s_othermode_h) X(s_othermode_l) X(s_dl_stack) X(s_dl_sp) X(s_streaming) X(s_stream_resume) X(s_stream_active) X(s_stream_stalled) X(s_stream_pc) X(s_dl_has_fullsync)
+EMIT_STATE_DEFINE(f3dex2, WALKER_FIELDS)
+#undef WALKER_FIELDS

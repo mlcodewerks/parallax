@@ -1,4 +1,6 @@
-
+/* Strict host arithmetic backend. Guest register/exception handling remains in
+ * the fast-math interpreter; only this translation unit needs FP environment
+ * semantics. No host floating-point value crosses the public integer ABI. */
 #include "fpu_native.h"
 #include "cp1.h"
 #include <fenv.h>
@@ -19,7 +21,7 @@ static FPU_NOINLINE float fpu_calc_s(unsigned int fn, float x, float y)
     case 2: result = a * b; break;
     case 3: result = a / b; break;
     case 4:
-
+        /* Some CRTs return a NaN for domain errors without raising FE_INVALID. */
         if (a < 0) { feraiseexcept(FE_INVALID); result = NAN; }
         else result = sqrtf(a);
         break;
@@ -68,11 +70,14 @@ static FPU_NOINLINE uint64_t fpu_convert(unsigned int fmt, unsigned int fn, uint
     return (uint64_t)output.dword;
 }
 
-
+/* A function boundary keeps the arithmetic between the MXCSR writes/reads.
+ * SSE scalar instructions also avoid CRT sqrt domain-error differences. */
 #if defined(OSAL_SSE) && (defined(__SSE2__) || defined(_M_X64)) && !defined(M64P_FPU_PORTABLE)
 #define FPU_NATIVE_SSE2 1
 #if defined(__x86_64__) || defined(_M_X64)
-
+/* Intrinsics can be speculated by the compiler even with strict FP flags.
+ * Separate side-effecting calls prevent executing the unselected precision
+ * and contaminating MXCSR with exceptions from unrelated register bits. */
 static FPU_NOINLINE int64_t fpu_sse_integer_s(float input)
 {
     volatile int64_t result = _mm_cvtss_si64(_mm_set_ss(input));
@@ -89,6 +94,8 @@ static FPU_NOINLINE uint64_t fpu_sse_calc(unsigned int fmt, unsigned int fn,
     uint64_t abits, uint64_t bbits)
 {
     cp1_reg a, b;
+    /* Prevent IPA from treating this helper as a pure function independent of
+     * MXCSR and moving/reusing its result across environment changes. */
     volatile cp1_reg result;
     a.dword = (int64_t)abits;
     b.dword = (int64_t)bbits;
@@ -153,6 +160,39 @@ unsigned int fpu_native_eval(unsigned int fmt, unsigned int fn,
 #endif
     ) {
         static const unsigned int modes[4] = {0, 3, 2, 1};
+        /* Exact conversions neither depend on rounding nor raise exceptions.
+         * Avoid touching the caller's FP environment for the common cases.
+         * Exclude denormals/NaNs so DAZ and invalid exceptions remain handled
+         * by the controlled environment below. */
+        if (fmt == 16 && fn == 33) {
+            uint32_t magnitude = (uint32_t)abits & UINT32_C(0x7fffffff);
+            uint32_t exponent = magnitude >> 23;
+            if (!magnitude || (exponent && exponent != 255)) {
+                *bits = ((abits & UINT64_C(0x80000000)) << 32) |
+                    (magnitude ? ((uint64_t)(exponent + 896) << 52) |
+                        ((uint64_t)(magnitude & UINT32_C(0x7fffff)) << 29) : 0);
+                return 0;
+            }
+        } else if ((fn == 32 || fn == 33) && (fmt == 20 || fmt == 21)) {
+            int64_t value = fmt == 20 ? (int64_t)(int32_t)abits : (int64_t)abits;
+            uint64_t magnitude = value < 0 ? UINT64_C(0) - (uint64_t)value : (uint64_t)value;
+            unsigned int precision = fn == 32 ? 23 : 52;
+            if (magnitude <= (UINT64_C(1) << (precision + 1))) {
+                unsigned int top = 0;
+                if (magnitude) {
+#if defined(__GNUC__) || defined(__clang__)
+                    top = 63 - (unsigned int)__builtin_clzll(magnitude);
+#else
+                    for (uint64_t remaining = magnitude; remaining >>= 1;) ++top;
+#endif
+                }
+                uint64_t significand = top <= precision ? magnitude << (precision - top) : magnitude >> (top - precision);
+                *bits = ((uint64_t)(value < 0) << (fn == 32 ? 31 : 63)) |
+                    (magnitude ? ((uint64_t)(top + (fn == 32 ? 127 : 1023)) << precision) |
+                        (significand & ((UINT64_C(1) << precision) - 1)) : 0);
+                return 0;
+            }
+        }
         unsigned int saved = _mm_getcsr();
         _mm_setcsr(0x1f80 | (modes[rm] << 13));
         *bits = fpu_sse_calc(fmt, fn, abits, bbits);

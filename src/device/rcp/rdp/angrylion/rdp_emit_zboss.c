@@ -72,6 +72,7 @@ typedef struct ZbState
 } ZbState;
 
 static ZbState zb;
+static int session_init;
 
 static unsigned char *s_rdram;
 static unsigned int   s_rdram_size;
@@ -1075,7 +1076,6 @@ int zboss_run(unsigned char *rdram, unsigned int rdram_size,
          * IMEM 0x894 compares the object's three list pointers against
          * it), so the real cache starts cold each task and the first
          * object's lists are always re-run. */
-        static int session_init;
         if (!session_init)
         {
             memset(&zb, 0, sizeof(zb));
@@ -1260,3 +1260,8 @@ int zboss_run(unsigned char *rdram, unsigned int rdram_size,
     }
     return -1;
 }
+
+#include "rdp_emit_state.h"
+#define WALKER_FIELDS(X) X(zb) X(session_init)
+EMIT_STATE_DEFINE(zboss, WALKER_FIELDS)
+#undef WALKER_FIELDS

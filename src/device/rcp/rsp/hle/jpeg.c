@@ -457,8 +457,30 @@ static void EmitRGBATileLine(struct hle_t* hle, const int16_t *y, const int16_t 
 /***************************************************************************
  * JPEG decoding ucode found in Japanese exclusive version of Pokemon Stadium.
  **************************************************************************/
+static int jpeg_range(uint32_t address, uint32_t bytes, unsigned alignment)
+{
+    address &= 0xffffff;
+    return !(address & (alignment - 1)) && address < 0x800000 &&
+        bytes <= 0x800000 - address;
+}
+
+static int jpeg_std_supported(struct hle_t* hle)
+{
+    uint32_t p = *dmem_u32(hle, TASK_DATA_PTR);
+    if ((*dmem_u32(hle, TASK_FLAGS) & 1) || !jpeg_range(p, 24, 4)) return 0;
+    uint32_t mode = *dram_u32(hle, p + 8);
+    if (mode != 0 && mode != 2) return 0;
+    uint32_t count = *dram_u32(hle, p + 4), bytes = (mode + 4) * 128;
+    if (count > 0x800000 / bytes ||
+        !jpeg_range(*dram_u32(hle, p), count * bytes, 2)) return 0;
+    for (unsigned i = 0; i < 3; ++i)
+        if (!jpeg_range(*dram_u32(hle, p + 12 + i * 4), 128, 2)) return 0;
+    return 1;
+}
+
 void jpeg_decode_PS0(struct hle_t* hle)
 {
+    if (!jpeg_std_supported(hle)) { HleForwardTask(hle->user_defined); return; }
     jpeg_decode_std(hle, "PS0", RescaleYSubBlock, RescaleUVSubBlock, EmitYUVTileLine);
     rsp_break(hle, SP_STATUS_TASKDONE);
 }
@@ -469,6 +491,7 @@ void jpeg_decode_PS0(struct hle_t* hle)
  **************************************************************************/
 void jpeg_decode_PS(struct hle_t* hle)
 {
+    if (!jpeg_std_supported(hle)) { HleForwardTask(hle->user_defined); return; }
     jpeg_decode_std(hle, "PS", NULL, NULL, EmitRGBATileLine);
     rsp_break(hle, SP_STATUS_TASKDONE);
 }
@@ -498,6 +521,13 @@ static void ScaleSubBlock(int16_t *dst, const int16_t *src, int16_t scale)
  **************************************************************************/
 void jpeg_decode_OB(struct hle_t* hle)
 {
+    uint32_t count = *dmem_u32(hle, TASK_DATA_SIZE);
+    int32_t scale = (int32_t)*dmem_u32(hle, TASK_YIELD_DATA_SIZE);
+    if ((*dmem_u32(hle, TASK_FLAGS) & 1) || count > 0x800000 / 768 ||
+        !jpeg_range(*dmem_u32(hle, TASK_DATA_PTR), count * 768, 2) || scale < -31) {
+        HleForwardTask(hle->user_defined);
+        return;
+    }
     /* Transcribed from the microcode (Ogre Battle boot scene, 300
      * macroblocks, verified byte-exact against cxd4):
      *

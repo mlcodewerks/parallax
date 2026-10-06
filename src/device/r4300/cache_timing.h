@@ -1,6 +1,9 @@
 #ifndef M64P_R4300_CACHE_TIMING_H
 #define M64P_R4300_CACHE_TIMING_H
 #include "device/memory.h"
+
+/* Shared compatibility hit estimate, including the existing cache handoff. */
+enum { R4300_DCACHE_HIT_CYCLES = 1 };
 #if defined(__GNUC__) || defined(__clang__)
 #define R4300_CACHE_NOINLINE __attribute__((noinline))
 #elif defined(_MSC_VER)
@@ -9,6 +12,12 @@
 #define R4300_CACHE_NOINLINE
 #endif
 
+/* Ares CPU cache model: 16 KiB I-cache / 32-byte lines, 8 KiB D-cache /
+ * 16-byte lines, direct mapped with virtual indices and physical tags.
+ * I-cache fills cost 48 CPU cycles; D-cache fills and writebacks cost
+ * Ares's 40 CPU cycles (CEN64 models a 44-cycle pipelined miss interlock).
+ * D-cache contents are write-back; bus arbitration remains unmodeled. */
+/* Keep the uncommon mapped-address scan out of every load/store handler. */
 static R4300_CACHE_NOINLINE int r4300_mapped_access_cached(struct r4300_core* r, uint32_t va)
 {
     unsigned int i;
@@ -27,6 +36,37 @@ static osal_force_inline int r4300_access_cached(struct r4300_core* r, uint32_t 
         return (r->cp0.regs[CP0_CONFIG_REG] & 7) != 2;
     if ((va & 0xe0000000) == 0xa0000000) return 0;
     return r4300_mapped_access_cached(r, va);
+}
+
+/* The VR4300 instruction micro-TLB is a fully-associative two-entry cache of
+ * 4 KiB JTLB translations. A hit is free; refilling a valid JTLB translation
+ * costs three PClocks. Store the current LUT translation with the VPN so a
+ * TLB rewrite cannot leave a stale micro-TLB hit in this boundary model. */
+static osal_force_inline unsigned int r4300_itlb_access_cycles(struct r4300_core* r,
+                                                               uint32_t vpn,
+                                                               uint32_t map)
+{
+    unsigned int valid = r->pipeline_itlb_valid;
+    unsigned int slot;
+
+    if ((valid & 1) && r->pipeline_itlb_vpn[0] == vpn && r->pipeline_itlb_map[0] == map) {
+        r->pipeline_itlb_lru = 1;
+        return 0;
+    }
+    if ((valid & 2) && r->pipeline_itlb_vpn[1] == vpn && r->pipeline_itlb_map[1] == map) {
+        r->pipeline_itlb_lru = 0;
+        return 0;
+    }
+
+    if (!(valid & 1)) slot = 0;
+    else if (!(valid & 2)) slot = 1;
+    else slot = r->pipeline_itlb_lru & 1;
+
+    r->pipeline_itlb_vpn[slot] = vpn;
+    r->pipeline_itlb_map[slot] = map;
+    r->pipeline_itlb_valid = valid | (1u << slot);
+    r->pipeline_itlb_lru = slot ^ 1u;
+    return 3;
 }
 
 static inline void r4300_dcache_writeback(struct r4300_core* r, uint32_t va)
@@ -54,7 +94,9 @@ static R4300_CACHE_NOINLINE void r4300_dcache_refill(struct r4300_core* r,
     r->dcache_tags[index] = (pa & 0x1ffff000) | 1;
 }
 
-
+/* Return cacheability as well as charging the access, so callers do not repeat
+ * the segment/config checks or mapped-address TLB scan. Keep the hit path
+ * inline; the compiler can retain the larger refill/writeback paths as calls. */
 static osal_force_inline int r4300_data_access_cycles(struct r4300_core* r, uint32_t va,
                                            uint32_t pa, int write)
 {
@@ -75,32 +117,40 @@ static osal_force_inline int r4300_data_access_cycles(struct r4300_core* r, uint
     key = (pa & 0x1ffff000) | 1;
     if ((*tag & ~2u) != key) {
         r4300_dcache_refill(r, va, pa);
-    } else cp0_step_cycles(&r->cp0, 1);
+    } else cp0_step_cycles(&r->cp0, R4300_DCACHE_HIT_CYCLES);
     if (write) *tag |= 2;
     return 1;
 }
 
-static osal_force_inline void r4300_fetch_access_cycles(struct r4300_core* r, uint32_t va)
+static osal_force_inline unsigned int r4300_fetch_cycles(struct r4300_core* r, uint32_t va)
 {
     uint32_t pa = va;
     uint32_t* tag;
     uint32_t key;
-    if (!r->cache_timing) return;
+    unsigned int cycles = 0;
+    if (!r->cache_timing) return 0;
     if ((va & 0xc0000000) != 0x80000000) {
         uint32_t page = r->cp0.tlb.LUT_r[va >> 12];
-        if (!page) return; 
+        if (!page) return 0; /* The dispatcher handles translation faults. */
+        cycles += r4300_itlb_access_cycles(r, va >> 12, page & UINT32_C(0xfffff000));
         pa = (page & 0xfffff000) | (va & 0xfff);
     }
     if (!r4300_access_cached(r, va)) {
-        cp0_step_cycles(&r->cp0, 40);
-        return;
+        return cycles + 40;
     }
     tag = &r->icache_tags[(va >> 5) & 511];
     key = (pa & 0x1ffff000) | 1;
     if (*tag != key) {
-        cp0_step_cycles(&r->cp0, 48);
         *tag = key;
+        return cycles + 48;
     }
+    return cycles;
+}
+
+static osal_force_inline void r4300_fetch_access_cycles(struct r4300_core* r, uint32_t va)
+{
+    unsigned int cycles = r4300_fetch_cycles(r, va);
+    if (cycles) cp0_step_cycles(&r->cp0, cycles);
 }
 
 static inline void r4300_cache_operation(struct r4300_core* r, unsigned op,

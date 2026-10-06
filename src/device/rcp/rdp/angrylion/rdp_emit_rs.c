@@ -1556,3 +1556,16 @@ void rs_run_dl(GSPState *gsp, RdpFifo *fifo, unsigned int dl_addr)
         pc += size;
     }
 }
+
+#include "rdp_emit_state.h"
+#define WALKER_FIELDS(X) X(s_rs_om_h) X(s_rs_om_l) X(s_rs_colors) X(s_rs_geom) X(s_rs_fog_mi) X(s_rs_fog_mf) X(s_rs_fog_oi) X(s_rs_fog_of) X(s_rs_fog_k) X(s_rs_fog_block) X(s_rs_streaming) X(s_rs_stream_active) X(s_rs_stream_stall) X(s_rs_stream_pc) X(s_rs_stream_page) X(s_rs_stream_stack) X(s_rs_stream_sp) X(s_rs_stream_result) X(s_rs_tex_on) X(s_rs_tile_w) X(s_rs_tile_h) X(s_rs_tsc_s) X(s_rs_tsc_t) X(s_rs_stage)
+EMIT_STATE_DEFINE(rs_saved, WALKER_FIELDS)
+#undef WALKER_FIELDS
+
+unsigned int rs_state_size(void) { return rs_saved_state_size(); }
+void rs_state_save(void *p) { rs_saved_state_save(p); }
+void rs_state_load(const void *p)
+{
+    rs_saved_state_load(p);
+    if (!p) { s_rs_fog_k = 0xff; s_rs_tile_w = s_rs_tile_h = 32; }
+}

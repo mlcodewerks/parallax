@@ -413,6 +413,8 @@ void nmi_int_handler(void* opaque)
     // clear all interrupts, reset interrupt counters back to 0
     cp0_regs[CP0_COUNT_REG] = 0;
     r4300->cp0.count_phase = 0;
+    r4300_pipeline_reset(r4300);
+    r4300_itlb_reset(r4300);
     g_gs_vi_counter = 0;
     init_interrupt(&r4300->cp0);
 

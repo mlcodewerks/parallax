@@ -131,6 +131,7 @@ struct CPUState
 	CP2 cp2 = {};
 	CP0 cp0;
 	uint32_t cycles = 0; // Estimated RSP clocks in the current scheduler slice.
+	uint32_t cycle_limit = UINT32_MAX; // Host scheduling boundary; not architectural state.
 };
 
 enum ReturnMode
@@ -139,7 +140,8 @@ enum ReturnMode
 	MODE_CONTINUE = 1,
 	MODE_BREAK = 2,
 	MODE_DMA_READ = 3,
-	MODE_CHECK_FLAGS = 4
+	MODE_CHECK_FLAGS = 4,
+	MODE_TIMESLICE = 5
 };
 
 } // namespace RSP

@@ -237,6 +237,7 @@ void *mem_alloc(size_t boundary, size_t size)
     void **place;
     uintptr_t addr = 0;
     void *ptr = malloc(boundary + size + sizeof(uintptr_t));
+    if (ptr == NULL) return NULL;
     addr = ((uintptr_t)ptr + sizeof(uintptr_t) + boundary) & ~(boundary - 1);
     place = (void **) addr;
     place[-1] = ptr;
@@ -254,7 +255,7 @@ void* init_mem_base(void)
 
 void release_mem_base(void* mem_base)
 {
-    free(mem_base);
+    if (mem_base != NULL) free(((void**)mem_base)[-1]);
 }
 
 uint32_t* mem_base_u32(void* mem_base, uint32_t address)

@@ -115,6 +115,9 @@ static M64P_FORCE_INLINE uint32_t interp_select_u32(unsigned int condition,
 
 static void InterpretOpcode(struct r4300_core* r4300, bool continuous) M64P_HOT;
 
+#include "interp_branch.h"
+#include "interp_pair.h"
+
 #define DECLARE_R4300
 #define PCADDR r4300->interp_PC.addr
 #define ADD_TO_PC(x) r4300->interp_PC.addr += (x) * 4;
@@ -132,44 +135,15 @@ static void InterpretOpcode(struct r4300_core* r4300, bool continuous) M64P_HOT;
             *link_register = SE32(r4300->interp_PC.addr + 8); \
             if ((op >> 26) == 1 && ((op >> 16) & 31) != 17) take_jump = (condition); \
         } \
-        if (!likely || take_jump) \
-        { \
-            r4300->interp_PC.addr += 4; \
-            r4300->delay_slot = 1; \
-            r4300->execute_one(r4300); \
-            cp0_update_count(r4300); \
-            r4300->delay_slot = 0; \
-            r4300->interp_PC.addr = interp_select_u32( \
-                (unsigned int)take_jump & (unsigned int)(r4300->skip_jump == 0), \
-                jump_target, r4300->interp_PC.addr); \
-        } \
-        else \
-        { \
-            r4300->interp_PC.addr += 8; \
-            cp0_update_count(r4300); \
-        } \
-        r4300->cp0.last_addr = r4300->interp_PC.addr; \
-        if (r4300->cp0.cycle_count >= 0) gen_interrupt(r4300); \
+        interp_branch_finish(r4300, take_jump, jump_target, likely); \
     } \
     static void name##_IDLE(struct r4300_core* r4300, uint32_t op) \
     { \
-        uint32_t* cp0_regs = r4300->cp0.regs; \
-        int64_t* cp0_cycle_count = &r4300->cp0.cycle_count; \
         const int take_jump = (condition); \
         if (cop1 && check_cop1_unusable(r4300)) return; \
         if ((op >> 26) == 1 && ((op >> 16) & 16) && ((op >> 21) & 31) == 31) \
         { name(r4300, op); return; } \
-        if (take_jump) \
-        { \
-            cp0_update_count(r4300); \
-            if (*cp0_cycle_count < 0) \
-            { \
-                cp0_regs[CP0_COUNT_REG] += (uint32_t)(-*cp0_cycle_count); \
-                r4300->cp0.count_clock += -*cp0_cycle_count; \
-                r4300->cp0.count_phase = 0; \
-                *cp0_cycle_count = 0; \
-            } \
-        } \
+        if (take_jump) interp_idle_advance(r4300); \
         name(r4300, op); \
     }
 
@@ -185,14 +159,16 @@ static void InterpretOpcode(struct r4300_core* r4300, bool continuous) M64P_HOT;
 #define JUMP_OF(op)    ((op) & UINT32_C(0x3FFFFFF))
 
 
+static M64P_FORCE_INLINE int interp_idle_delay_nop(struct r4300_core* r4300, uint32_t address);
+
 #define IS_RELATIVE_IDLE_LOOP(r4300, op, addr) \
-    (IMM16S_OF(op) == -1 && *interp_fast_mem_access((r4300), (addr) + 4) == 0)
+    (IMM16S_OF(op) == -1 && interp_idle_delay_nop((r4300), (addr) + 4))
 
 
 #define IS_ABSOLUTE_IDLE_LOOP(r4300, op, addr) \
     (JUMP_OF(op) == ((addr) & UINT32_C(0x0FFFFFFF)) >> 2 \
      && ((addr) & UINT32_C(0x0FFFFFFF)) != UINT32_C(0x0FFFFFFC) \
-     && *interp_fast_mem_access((r4300), (addr) + 4) == 0)
+     && interp_idle_delay_nop((r4300), (addr) + 4))
 
 /* These macros parse opcode fields. */
 #define rrt r4300->regs[RT_OF(op)]
@@ -322,170 +298,20 @@ static M64P_FORCE_INLINE uint32_t* interp_fast_mem_access(struct r4300_core* r43
     return (uint32_t*)((uint8_t*)r4300->mem->base + address);
 }
 
-/* Interpreter-side TLB hit path. The existing translator remains the sole
- * miss/exception path, so refill behavior and NEW_DYNAREC validation stay
- * unchanged. w == 1 selects the writable LUT; all other values use read LUT. */
-static M64P_FORCE_INLINE uint32_t interp_translate_address(struct r4300_core* r4300,
-                                                           uint32_t address,
-                                                           int w)
+/* Idle-loop recognition is speculative: an absent delay-slot mapping must
+ * neither dereference NULL nor raise a premature exception at the branch PC.
+ * The actual delay-slot fetch supplies the architectural EPC/BD exception. */
+static M64P_FORCE_INLINE int interp_idle_delay_nop(struct r4300_core* r4300, uint32_t address)
 {
-#if defined(NEW_DYNAREC)
-    if (M64P_UNLIKELY(r4300->emumode == EMUMODE_DYNAREC))
-        return virtual_to_physical_address(r4300, address, w);
-#endif
-
-    const uint32_t page = address >> 12;
-    const uint32_t mapped = (w == 1)
-        ? r4300->cp0.tlb.LUT_w[page]
-        : r4300->cp0.tlb.LUT_r[page];
-
-    if (M64P_LIKELY(mapped != 0))
-        return (mapped & UINT32_C(0xfffff000)) | (address & UINT32_C(0x00000fff));
-
-    return virtual_to_physical_address(r4300, address, w);
+    if ((address & UINT32_C(0xc0000000)) != UINT32_C(0x80000000)) {
+        uint32_t mapped = r4300->cp0.tlb.LUT_r[address >> 12];
+        if (!mapped) return 0;
+        address = (mapped & UINT32_C(0xfffff000)) | (address & UINT32_C(0xfff));
+    }
+    return *(uint32_t*)((uint8_t*)r4300->mem->base + (address & UINT32_C(0x1ffffffc))) == 0;
 }
 
-/* Keep the dynamic memory map authoritative. Normal RDRAM is overwhelmingly
- * common for Conker, so inline its tiny handler after confirming the currently
- * installed handler is the normal one. Debug/breakpoint/corruption handlers
- * still take the generic dispatch path. */
-static M64P_FORCE_INLINE void interp_mem_read32(const struct mem_handler* handler,
-                                                uint32_t address,
-                                                uint32_t* value)
-{
-    if (M64P_LIKELY(handler->read32 == read_rdram_dram))
-    {
-        const struct rdram* rdram = (const struct rdram*)handler->opaque;
-        *value = rdram->dram[rdram_dram_address(address)];
-        return;
-    }
-
-    handler->read32(handler->opaque, address, value);
-}
-
-static M64P_FORCE_INLINE void interp_mem_write32(const struct mem_handler* handler,
-                                                 uint32_t address,
-                                                 uint32_t value,
-                                                 uint32_t mask)
-{
-    if (M64P_LIKELY(handler->write32 == write_rdram_dram))
-    {
-        struct rdram* rdram = (struct rdram*)handler->opaque;
-        masked_write(&rdram->dram[rdram_dram_address(address)], value, mask);
-        return;
-    }
-
-    handler->write32(handler->opaque, address, value, mask);
-}
-
-static M64P_FORCE_INLINE int interp_read_aligned_word(struct r4300_core* r4300,
-                                                      uint32_t address,
-                                                      uint32_t* value)
-{
-    const uint32_t virtual_address = address;
-    if (M64P_UNLIKELY((address & UINT32_C(0xc0000000)) != UINT32_C(0x80000000)))
-    {
-        address = interp_translate_address(r4300, address, 0);
-        if (M64P_UNLIKELY(address == 0))
-            return 0;
-    }
-
-    if (r4300_data_access_cycles(r4300, virtual_address, address, 0)) {
-        *value = r4300->dcache_words[(virtual_address >> 4) & 511][(address >> 2) & 3];
-        return 1;
-    }
-    address &= UINT32_C(0x1ffffffc);
-    interp_mem_read32(&r4300->mem->handlers[address >> 16], address, value);
-    return 1;
-}
-
-static M64P_FORCE_INLINE int interp_read_aligned_dword(struct r4300_core* r4300,
-                                                       uint32_t address,
-                                                       uint64_t* value)
-{
-    const uint32_t virtual_address = address;
-    uint32_t w0;
-    uint32_t w1;
-
-    if (M64P_UNLIKELY((address & UINT32_C(7)) != 0))
-        DebugMessage(M64MSG_WARNING, "Unaligned dword read %08x", address);
-
-    if (M64P_UNLIKELY((address & UINT32_C(0xc0000000)) != UINT32_C(0x80000000)))
-    {
-        address = interp_translate_address(r4300, address, 0);
-        if (M64P_UNLIKELY(address == 0))
-            return 0;
-    }
-
-    if (r4300_data_access_cycles(r4300, virtual_address, address, 0)) {
-        uint32_t* words = r4300->dcache_words[(virtual_address >> 4) & 511];
-        *value = ((uint64_t)words[(address >> 2) & 3] << 32) | words[((address >> 2) & 3) + 1];
-        return 1;
-    }
-    address &= UINT32_C(0x1ffffffc);
-    const struct mem_handler* handler = &r4300->mem->handlers[address >> 16];
-    interp_mem_read32(handler, address + 0, &w0);
-    interp_mem_read32(handler, address + 4, &w1);
-    *value = ((uint64_t)w0 << 32) | w1;
-    return 1;
-}
-
-static M64P_FORCE_INLINE int interp_write_aligned_word(struct r4300_core* r4300,
-                                                       uint32_t address,
-                                                       uint32_t value,
-                                                       uint32_t mask)
-{
-    const uint32_t virtual_address = address;
-    if (M64P_UNLIKELY((address & UINT32_C(0xc0000000)) != UINT32_C(0x80000000)))
-    {
-        address = interp_translate_address(r4300, address, 1);
-        if (M64P_UNLIKELY(address == 0))
-            return 0;
-    }
-
-    if (M64P_UNLIKELY(r4300->cached_interp != NULL))
-        invalidate_r4300_cached_code(r4300, address, 4);
-
-    if (r4300_data_access_cycles(r4300, virtual_address, address, 1)) {
-        masked_write(&r4300->dcache_words[(virtual_address >> 4) & 511][(address >> 2) & 3], value, mask);
-        return 1;
-    }
-    address &= UINT32_C(0x1ffffffc);
-    interp_mem_write32(&r4300->mem->handlers[address >> 16], address, value, mask);
-    return 1;
-}
-
-static M64P_FORCE_INLINE int interp_write_aligned_dword(struct r4300_core* r4300,
-                                                        uint32_t address,
-                                                        uint64_t value,
-                                                        uint64_t mask)
-{
-    const uint32_t virtual_address = address;
-    if (M64P_UNLIKELY((address & UINT32_C(7)) != 0))
-        DebugMessage(M64MSG_WARNING, "Unaligned dword write %08x", address);
-
-    if (M64P_UNLIKELY((address & UINT32_C(0xc0000000)) != UINT32_C(0x80000000)))
-    {
-        address = interp_translate_address(r4300, address, 1);
-        if (M64P_UNLIKELY(address == 0))
-            return 0;
-    }
-
-    if (M64P_UNLIKELY(r4300->cached_interp != NULL))
-        invalidate_r4300_cached_code(r4300, address, 8);
-
-    if (r4300_data_access_cycles(r4300, virtual_address, address, 1)) {
-        uint32_t* words = r4300->dcache_words[(virtual_address >> 4) & 511];
-        masked_write(&words[(address >> 2) & 3], (uint32_t)(value >> 32), (uint32_t)(mask >> 32));
-        masked_write(&words[((address >> 2) & 3) + 1], (uint32_t)value, (uint32_t)mask);
-        return 1;
-    }
-    address &= UINT32_C(0x1ffffffc);
-    const struct mem_handler* handler = &r4300->mem->handlers[address >> 16];
-    interp_mem_write32(handler, address + 0, (uint32_t)(value >> 32), (uint32_t)(mask >> 32));
-    interp_mem_write32(handler, address + 4, (uint32_t)value, (uint32_t)mask);
-    return 1;
-}
+#include "interp_memory.h"
 
 /* Assists unaligned memory accessors with making masks to preserve or apply
  * bits in registers and memory.
@@ -550,18 +376,6 @@ DECLARE_INSTRUCTION(BREAK)
 /* Reserved */
 
 /* Load instructions */
-
-static M64P_FORCE_INLINE int check_alignment(struct r4300_core* r4300, uint32_t address, unsigned int mask, int store)
-{
-    if ((address & mask) == 0) return 0;
-    r4300->cp0.regs[CP0_BADVADDR_REG] = address;
-    r4300->cp0.regs_hi[CP0_BADVADDR_REG] = (int32_t)address < 0 ? UINT32_MAX : 0;
-    r4300->cp0.regs[CP0_CAUSE_REG] =
-        (r4300->cp0.regs[CP0_CAUSE_REG] & ~UINT32_C(0x3000007c)) |
-        (store ? CP0_CAUSE_EXCCODE_ADES : CP0_CAUSE_EXCCODE_ADEL);
-    exception_general(r4300);
-    return 1;
-}
 
 DECLARE_INSTRUCTION(LLD)
 {
@@ -665,31 +479,12 @@ DECLARE_INSTRUCTION(LL)
 
 DECLARE_INSTRUCTION(LW)
 {
-    DECLARE_R4300
-    const uint32_t lsaddr = (uint32_t) irs32 + (uint32_t) iimmediate;
-    int64_t *lsrtp = &irt;
-    if (check_alignment(r4300, lsaddr, 3, 0)) return;
-    ADD_TO_PC(1);
-    uint32_t value;
-
-    if (interp_read_aligned_word(r4300, lsaddr, &value)) {
-        *lsrtp = SE32(value);
-    }
+    interp_load_word(r4300, op, 1);
 }
 
 DECLARE_INSTRUCTION(LWU)
 {
-    DECLARE_R4300
-    const uint32_t lsaddr = (uint32_t) irs32 + (uint32_t) iimmediate;
-    int64_t *lsrtp = &irt;
-    if (check_alignment(r4300, lsaddr, 3, 0)) return;
-    ADD_TO_PC(1);
-
-    uint32_t value;
-
-    if (interp_read_aligned_word(r4300, lsaddr, &value)) {
-        *lsrtp = value;
-    }
+    interp_load_word(r4300, op, 0);
 }
 
 DECLARE_INSTRUCTION(LWL)
@@ -822,13 +617,7 @@ DECLARE_INSTRUCTION(SC)
 
 DECLARE_INSTRUCTION(SW)
 {
-    DECLARE_R4300
-    const uint32_t lsaddr = (uint32_t) irs32 + (uint32_t) iimmediate;
-    int64_t *lsrtp = &irt;
-    if (check_alignment(r4300, lsaddr, 3, 1)) return;
-    ADD_TO_PC(1);
-
-    interp_write_aligned_word(r4300, lsaddr, (uint32_t)*lsrtp, ~UINT32_C(0));
+    interp_store_word(r4300, op);
 }
 
 DECLARE_INSTRUCTION(SWL)
@@ -1683,7 +1472,8 @@ static void TLBWrite(struct r4300_core* r4300, unsigned int idx)
     r4300->cp0.tlb.entries[idx].phys_odd = r4300->cp0.tlb.entries[idx].pfn_odd << 12;
 
     tlb_map(&r4300->cp0.tlb, idx);
-    invalidate_r4300_cached_code(r4300, 0, 0);
+    /* Decoded blocks validate their physical code page against the current
+     * read LUT. A data mapping change must not flush unrelated CPU code. */
 }
 
 DECLARE_INSTRUCTION(TLBWR)
@@ -2536,7 +2326,16 @@ next_opcode: ;
         XORI(r4300, op);
         break;
     M64P_MAJOR_CASE(15) /* Major opcode 15: LUI */
-        LUI(r4300, op);
+        if (continuous && sequential_op && !r4300->cache_timing &&
+            !r4300->delay_slot &&
+            r4300->cp0.cycle_count + ((1 + r4300->cp0.count_phase) >> 1) < 0 &&
+            interp_lui_pair(op, *sequential_op)) {
+            r4300->regs[(op >> 16) & 31] = interp_lui_pair_value(op, *sequential_op);
+            cp0_step_cycles(&r4300->cp0, 1);
+            r4300->interp_PC.addr = pc + 8;
+            if (--sequential_left) { sequential_op++; sequential_pc = pc + 8; }
+            else sequential_op = NULL;
+        } else LUI(r4300, op);
         break;
     M64P_MAJOR_CASE(16) COP0(r4300, op); break;
     M64P_MAJOR_CASE(17) /* Coprocessor 1 prefix */
@@ -2881,6 +2680,7 @@ void run_r4300(struct r4300_core* r4300)
         r4300->interp_PC.addr = r4300->cp0.last_addr = r4300->start_address;
         if (r4300->emumode == EMUMODE_INTERPRETER && !cached_interp_init(r4300))
             r4300->emumode = EMUMODE_PURE_INTERPRETER;
+        DebugMessage(M64MSG_INFO, "CPU interpreter: %s", r4300->emumode == EMUMODE_INTERPRETER ? "cached" : "pure");
         r4300->startup = 0;
     }
 

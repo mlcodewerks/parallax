@@ -103,9 +103,15 @@ struct rsp_core
     struct ri_controller* ri;
     struct sp_dma fifo[SP_DMA_FIFO_SIZE];
     int64_t dma_end_clock;
-    uint32_t rsp_completion_status; /* Deferred HALT/BROKE transition. */
+    /* Pending HALT/BROKE and SIG values in low bits; changed SIG mask in
+     * bits 23..30, IRQ clear in bit 15, IRQ set in bit 31. Save format 1.17. */
+    uint32_t rsp_completion_status;
     int cycle_timing;
 };
+
+#define RSP_PENDING_SIGNALS UINT32_C(0x7f80)
+#define RSP_PENDING_IRQ_CLEAR UINT32_C(0x8000)
+#define RSP_PENDING_IRQ_SET UINT32_C(0x80000000)
 
 static osal_inline uint32_t rsp_mem_address(uint32_t address)
 {

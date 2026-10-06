@@ -55,7 +55,7 @@ void write_ri_regs(void* opaque, uint32_t address, uint32_t value, uint32_t mask
     if (reg == RI_ERROR_REG)
         ri->regs[reg] = 0;
     else if (reg == RI_WERROR_REG)
-        ri->regs[reg] = 0xff; /* RI bank status after acknowledgement. */
+        ri->regs[reg] = 0xff; 
     else
         masked_write(&ri->regs[reg], value, mask);
 }

@@ -1,5 +1,5 @@
 /* Included by pure_interp.c. Ares/VR4300 compare predicates and legacy NaNs. */
-static void fpu_compare(struct r4300_core* r4300, uint32_t op)
+void pure_interp_fpu_compare(struct r4300_core* r4300, uint32_t op)
 {
     const unsigned int fmt = RS_OF(op);
     const unsigned int fs = (r4300->cp0.regs[CP0_STATUS_REG] & CP0_STATUS_FR)
@@ -41,7 +41,8 @@ static void fpu_compare(struct r4300_core* r4300, uint32_t op)
     }
     if (unordered) result = predicate & 1;
     else {
-
+        /* IEEE encodings are monotonic within each sign. Compare integer bits
+         * so fast-math and host DAZ cannot collapse subnormal operands. */
         uint64_t sign = fmt == 16 ? UINT64_C(0x80000000) : UINT64_C(0x8000000000000000);
         int equal = lhs == rhs || ((lhs | rhs) & ~sign) == 0;
         int less = !equal && (((lhs ^ rhs) & sign) ? (lhs & sign) != 0 :
@@ -53,8 +54,8 @@ static void fpu_compare(struct r4300_core* r4300, uint32_t op)
 }
 
 #define FPU_COMPARE_PAIR(name) \
-    DECLARE_INSTRUCTION(name##_S) { fpu_compare(r4300, op); } \
-    DECLARE_INSTRUCTION(name##_D) { fpu_compare(r4300, op); }
+    DECLARE_INSTRUCTION(name##_S) { pure_interp_fpu_compare(r4300, op); } \
+    DECLARE_INSTRUCTION(name##_D) { pure_interp_fpu_compare(r4300, op); }
 FPU_COMPARE_PAIR(C_F)
 FPU_COMPARE_PAIR(C_UN)
 FPU_COMPARE_PAIR(C_EQ)

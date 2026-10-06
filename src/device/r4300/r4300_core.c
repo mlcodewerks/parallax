@@ -52,6 +52,7 @@ void init_r4300(struct r4300_core* r4300, struct memory* mem, struct mi_controll
     r4300->start_address = start_address;
     r4300->execute_one = NULL;
     r4300->cached_interp = NULL;
+    r4300->cached_code_pages = NULL;
     srand((unsigned int) time(NULL));
 }
 
@@ -67,13 +68,16 @@ void poweron_r4300(struct r4300_core* r4300)
     r4300->delay_slot = 0;
     r4300->skip_jump = 0;
     r4300->reset_hard_job = 0;
+    r4300->stop = 0;
     r4300->startup =1;
+    r4300_pipeline_reset(r4300);
+    r4300_itlb_reset(r4300);
     memset(r4300->icache_tags, 0, sizeof(r4300->icache_tags));
     memset(r4300->dcache_tags, 0, sizeof(r4300->dcache_tags));
     memset(r4300->dcache_words, 0, sizeof(r4300->dcache_words));
     r4300->cache_timing = 1;
 #ifdef __LIBRETRO__
-    r4300->cache_timing = renderer_settings.cache_emulation;
+    r4300->cache_timing = renderer_settings.per_cycle_timing;
 #endif
 
     cached_interp_invalidate(r4300, 0, 0);

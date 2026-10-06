@@ -95,7 +95,6 @@ static void dma_pi_read(struct pi_controller* pi)
 
     pre_framebuffer_read(&pi->dp->fb, dram_addr);
 
-    /* PI seems to treat the first 128 bytes differently, see https://n64brew.dev/wiki/Peripheral_Interface#Unaligned_DMA_transfer */
     length = (length + 1) & ~1u;
     unsigned int cycles = pi_dma_duration(pi, cart_addr, length);
     uint32_t available = dram_addr < pi->ri->rdram->dram_size
@@ -103,13 +102,9 @@ static void dma_pi_read(struct pi_controller* pi)
     if (available > length) available = length;
     if (available) handler->dma_read(opaque, dram, dram_addr, cart_addr, available);
 
-    /* Mark DMA as busy */
     pi->regs[PI_STATUS_REG] |= PI_STATUS_DMA_BUSY;
-    /* Update PI_DRAM_ADDR_REG and PI_CART_ADDR_REG */
     pi->regs[PI_DRAM_ADDR_REG] = (dram_addr + length + 7) & 0xfffff8;
     pi->regs[PI_CART_ADDR_REG] = cart_addr + length;
-
-    /* schedule end of dma interrupt event */
     cp0_update_count(pi->mi->r4300);
     add_interrupt_event(&pi->mi->r4300->cp0, PI_INT, cycles);
 }
@@ -136,7 +131,6 @@ static void dma_pi_write(struct pi_controller* pi)
         return;
     }
 
-    /* PI seems to treat the first 128 bytes differently, see https://n64brew.dev/wiki/Peripheral_Interface#Unaligned_DMA_transfer */
     if (length >= 0x7f && (length & 1))
         length += 1;
     if (length <= 0x80)
@@ -153,11 +147,10 @@ static void dma_pi_write(struct pi_controller* pi)
 
     /* Mark DMA as busy */
     pi->regs[PI_STATUS_REG] |= PI_STATUS_DMA_BUSY;
-    /* Update PI_DRAM_ADDR_REG and PI_CART_ADDR_REG */
     pi->regs[PI_DRAM_ADDR_REG] = (dram_addr + length + 7) & 0xfffff8;
     pi->regs[PI_CART_ADDR_REG] = cart_addr + bus_length;
 
-    /* schedule end of dma interrupt event */
+   
     cp0_update_count(pi->mi->r4300);
     add_interrupt_event(&pi->mi->r4300->cp0, PI_INT, cycles);
 }

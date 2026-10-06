@@ -50,5 +50,15 @@ void hle_init(struct hle_t* hle,
 
 void hle_execute(struct hle_t* hle);
 
+enum hle_task_kind {
+    HLE_TASK_UNKNOWN,
+    HLE_TASK_GRAPHICS,
+    HLE_TASK_AUDIO,
+    HLE_TASK_OTHER,
+    HLE_TASK_BOOT
+};
+/* Uses the same detector as execution, including nonstandard OSTask tags. */
+enum hle_task_kind hle_get_task_kind(struct hle_t* hle);
+
 #endif
 

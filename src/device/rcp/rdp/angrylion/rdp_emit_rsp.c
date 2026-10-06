@@ -3498,3 +3498,16 @@ int rsp_tri_write(int32_t *ew,
     }
     return nw;
 }
+
+#include "rdp_emit_state.h"
+#define WALKER_FIELDS(X) X(s_clip_lerp_l3dex) X(s_clip_lerp_seed3) X(s_vtx_invw_2rd) X(s_tri_attr_rs) X(s_tri_attr_zboss) X(s_rs_stale_w_i) X(s_rs_stale_w_f) X(s_rs_stale_l_sf) X(s_rs_stale_l_tf) X(s_vtx_invw_raw) X(s_vtx_y_round) X(s_vtx_x_round) X(s_keep_degenerate) X(s_attr_lowp) X(s_affine_tex) X(s_persp_skip) X(s_vtx_z_quant) X(s_clip_lerp_204h) X(s_rs_last_ndc2z) X(s_rs_last_pw) X(s_rs_last_outcode) X(s_rs_lut_sort) X(s_d64_lut_sort)
+EMIT_STATE_DEFINE(rsp_emit_saved, WALKER_FIELDS)
+#undef WALKER_FIELDS
+
+unsigned int rsp_emit_state_size(void) { return rsp_emit_saved_state_size(); }
+void rsp_emit_state_save(void *p) { rsp_emit_saved_state_save(p); }
+void rsp_emit_state_load(const void *p)
+{
+    rsp_emit_saved_state_load(p);
+    if (!p) { s_rs_stale_w_i[0] = s_rs_stale_w_i[1] = s_rs_stale_w_i[2] = 0x7fff; }
+}

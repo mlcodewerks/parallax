@@ -7,7 +7,8 @@ extern "C" {
 enum renderer_type { RENDERER_ANGRYLION, RENDERER_PARALLEL };
 struct renderer_settings {
     bool rsp_hle, lle_graphics, lle_audio;
-    bool cache_emulation, rsp_timing, rdp_timing;
+    bool per_cycle_timing;
+    bool cached_interpreter;
     enum renderer_type renderer;
     unsigned threads, upscale, downscale;
     bool performance_only, vi_filter, dedither, blur, overscan, bob;

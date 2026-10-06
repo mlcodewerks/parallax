@@ -84,6 +84,7 @@ static uint32_t dpc_clock_now(struct rdp_core* dp, int from_rsp)
     cp0_regs = r4300_cp0_regs(&dp->mi->r4300->cp0);
     uint32_t clock = rdp_dpc_clock_value(dp, cp0_regs[CP0_COUNT_REG]);
 #if defined(HAVE_PARALLEL_RSP)
+    /* The synchronous RSP slice has not reached CPU COUNT yet. */
     if (from_rsp) clock += parallelRSPExecutedCycles();
 #else
     (void)from_rsp;
@@ -93,7 +94,9 @@ static uint32_t dpc_clock_now(struct rdp_core* dp, int from_rsp)
 
 uint32_t rdp_sync_full_delay(const struct rdp_core* dp)
 {
-
+    /* Whole-frame completion approximation used by simple64. Unlike the
+     * previous fixed 4000 ticks, scale with native VI output geometry.
+     * This is not a per-command RDP pipeline or RDRAM contention model. */
     if (!dp->vi_regs) return 4000;
     const uint32_t* vi = dp->vi_regs;
     uint32_t hs = (vi[VI_H_START_REG] >> 16) & 1023, he = vi[VI_H_START_REG] & 1023;
@@ -103,6 +106,14 @@ uint32_t rdp_sync_full_delay(const struct rdp_core* dp)
     if (!w) w = vi[VI_WIDTH_REG];
     w = (vi[VI_X_SCALE_REG] & 4095) ? w * (vi[VI_X_SCALE_REG] & 4095) / 1024 : 320;
     h = (vi[VI_Y_SCALE_REG] & 4095) ? h * (vi[VI_Y_SCALE_REG] & 4095) / 2048 : 240;
+    /* A doubled VI pitch scans alternate rows of an interlaced color image.
+     * The geometry above counts one field, but SyncFull completes the whole
+     * rendered frame. Y_SCALE-based interlace already counts both fields;
+     * distinguish the two layouts using the native color-image pitch. */
+    if (dp->instruction_timing && (vi[VI_STATUS_REG] & 0x40) &&
+        dp->timing.fb_width &&
+        (vi[VI_WIDTH_REG] & 0xfff) == dp->timing.fb_width * 2u)
+        h *= 2;
     uint32_t ticks = w * h * 2;
     return ticks > 4000 ? ticks : 4000;
 }
@@ -110,6 +121,7 @@ uint32_t rdp_sync_full_delay(const struct rdp_core* dp)
 static void process_dpc_commands(struct rdp_core* dp, int from_rsp)
 {
     uint32_t dp_pending;
+    struct rdp_timing_sync sync = {0};
     if (dp->dpc_regs[DPC_STATUS_REG] & DPC_STATUS_FREEZE)
         return;
     if (dp->dpc_regs[DPC_CURRENT_REG] == dp->dpc_regs[DPC_END_REG])
@@ -123,12 +135,41 @@ static void process_dpc_commands(struct rdp_core* dp, int from_rsp)
 #endif
         uint32_t begin = dp->dpc_regs[DPC_CURRENT_REG] & 0xfffff8;
         uint32_t end = dp->dpc_regs[DPC_END_REG] & 0xfffff8;
-        for (uint32_t at = begin; at < end; at += 4) {
+        for (uint32_t at = begin; at < end;) {
+            uint32_t count = (end - at) / 4;
             const uint32_t *synthetic = rdp_hle_command_buffer(at);
-            uint32_t word = synthetic ? *synthetic : (dp->dpc_regs[DPC_STATUS_REG] & DPC_STATUS_XBUS_DMEM_DMA)
-                ? dp->sp->mem[(at & 4095) >> 2]
-                : (at < 0x800000 ? dp->fb.rdram->dram[at >> 2] : 0);
-            rdp_timing_word(&dp->timing, word, submitted);
+            const uint32_t *source;
+            if (synthetic) {
+                uint32_t available = (hle_bytes - (at - hle_base)) / 4;
+                if (count > available) count = available;
+                source = synthetic;
+            } else if (dp->dpc_regs[DPC_STATUS_REG] & DPC_STATUS_XBUS_DMEM_DMA) {
+                uint32_t available = (4096 - (at & 4095)) / 4;
+                if (count > available) count = available;
+                source = dp->sp->mem + ((at & 4095) >> 2);
+            } else if (at < 0x800000) {
+                uint32_t available = (0x800000 - at) / 4;
+                if (count > available) count = available;
+                /* A synthetic FIFO may begin within a guest command window. */
+                if (hle_words && at < hle_base && hle_base - at < count * 4)
+                    count = (hle_base - at) / 4;
+                source = dp->fb.rdram->dram + (at >> 2);
+            } else {
+                const uint32_t zero = 0;
+                rdp_timing_words_sync(&dp->timing, &zero, 1, submitted, &sync);
+                at += 4;
+                continue;
+            }
+            if (!count) {
+                /* A malformed unaligned synthetic window must not stall
+                 * command progress. Valid backend FIFOs are word-aligned. */
+                const uint32_t zero = 0;
+                rdp_timing_words_sync(&dp->timing, &zero, 1, submitted, &sync);
+                at += 4;
+                continue;
+            }
+            rdp_timing_words_sync(&dp->timing, source, count, submitted, &sync);
+            at += count * 4;
         }
     }
     unprotect_framebuffers(&dp->fb);
@@ -136,12 +177,13 @@ static void process_dpc_commands(struct rdp_core* dp, int from_rsp)
     protect_framebuffers(&dp->fb);
     dp->dpc_regs[DPC_STATUS_REG] |= DPC_STATUS_CBUF_READY;
 
-
+    /* Only SyncFull raises a DP edge. Preserve already pending interrupts. */
     if (!dp_pending && (dp->mi->regs[MI_INTR_REG] & MI_INTR_DP))
     {
         if (from_rsp || dp->vi_regs)
         {
-     
+            /* Retain the LLE completion approximation at SyncFull, rather
+             * than consuming any pending DP bit at graphics-task return. */
             dp->mi->regs[MI_INTR_REG] &= ~MI_INTR_DP;
             if (!get_event(&dp->mi->r4300->cp0.q, DP_INT))
             {
@@ -151,7 +193,11 @@ static void process_dpc_commands(struct rdp_core* dp, int from_rsp)
                 if (from_rsp)
                     delay += (uint32_t)(((uint64_t)parallelRSPExecutedCycles() * 3 + 3) / 4);
 #endif
-                int64_t work = dp->instruction_timing ? dp->timing.deadline - dp->mi->r4300->cp0.count_clock : 0;
+                /* Work after the first FullSync belongs to the next fence.
+                 * Keep a fallback for backends that raise DP without a
+                 * matching native packet in this submission. */
+                int64_t deadline = sync.seen ? sync.deadline : dp->timing.deadline;
+                int64_t work = dp->instruction_timing ? deadline - dp->mi->r4300->cp0.count_clock : 0;
                 if (work > delay) delay = work > UINT32_MAX ? UINT32_MAX : (uint32_t)work;
                 add_interrupt_event(&dp->mi->r4300->cp0, DP_INT, delay);
             }
@@ -218,7 +264,7 @@ void init_rdp(struct rdp_core* dp,
     dp->vi_regs = NULL;
     dp->instruction_timing = 1;
 #ifdef __LIBRETRO__
-    dp->instruction_timing = renderer_settings.rdp_timing;
+    dp->instruction_timing = renderer_settings.per_cycle_timing;
 #endif
 
     init_fb(&dp->fb, mem, rdram, r4300);

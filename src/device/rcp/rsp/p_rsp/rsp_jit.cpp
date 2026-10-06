@@ -44,6 +44,11 @@ CPU::~CPU()
 
 void CPU::invalidate_imem()
 {
+	// Polling redispatches normally keep the same microcode. Compare the whole
+	// image once; locate individual changed blocks only when it differs. Keep
+	// any dirty bits already raised by an RSP DMA or save-state restore.
+	if (!memcmp(cached_imem, state.imem, sizeof(cached_imem)))
+		return;
 	for (unsigned i = 0; i < CODE_BLOCKS; i++)
 		if (memcmp(cached_imem + i * CODE_BLOCK_WORDS, state.imem + i * CODE_BLOCK_WORDS, CODE_BLOCK_SIZE))
 			state.dirty_blocks |= (0x3 << i) >> 1;
@@ -1862,6 +1867,8 @@ Func CPU::jit_region(uint64_t hash, unsigned pc_word, unsigned instruction_count
 	// Coalesce their counter updates, retaining exact costs at every externally
 	// visible boundary. The first instruction may resolve a latent delay slot;
 	// entries, branches and their delay slots must never carry a deferred cost.
+	// Without detailed timing, scalar/vector DMEM helpers also share updates:
+	// they cannot inspect clocks or return to the scheduler. COP0 still flushes.
 #ifndef TRACE
 	unsigned pending_cycles = 0;
 	bool previous_branch = false;
@@ -1871,7 +1878,7 @@ Func CPU::jit_region(uint64_t hash, unsigned pc_word, unsigned instruction_count
 		pending_cycles += timing_cost[i];
 		bool flush = i == 0 || i + 1 == instruction_count || block_entry[i + 1] ||
 		             previous_branch || op.branch() || op.mayHalt() || op.endBlock() ||
-		             op.usesDmem() || (instr >> 26) == 0x10;
+		             (cycle_timing && op.usesDmem()) || (instr >> 26) == 0x10;
 		timing_cost[i] = flush ? pending_cycles : 0;
 		if (flush) pending_cycles = 0;
 		previous_branch = op.branch();
@@ -1880,12 +1887,24 @@ Func CPU::jit_region(uint64_t hash, unsigned pc_word, unsigned instruction_count
 
 	for (unsigned i = 0; i < instruction_count; i++)
 	{
-		if (block_entry[i])
+		if (block_entry[i] || (cycle_timing && i == 0))
 		{
 			// Before we enter into a new block, we have to flush register window since someone can branch here.
 			regs.flush_register_window(_jit);
 			regs.reset();
 			branch_targets[i] = jit_label();
+			// A local target may also be a fallthrough delay slot. Resolve
+			// its preceding branch before yielding; only region-entry delay
+			// slots already have their pending branch in CPUState.
+			if (cycle_timing && !last_info.branch) {
+				jit_ldxi_ui(JIT_REGISTER_MODE, JIT_REGISTER_STATE, offsetof(CPUState, cycles));
+				jit_ldxi_ui(JIT_REGISTER_NEXT_PC, JIT_REGISTER_STATE, offsetof(CPUState, cycle_limit));
+				auto *continue_slice = jit_bltr_u(JIT_REGISTER_MODE, JIT_REGISTER_NEXT_PC);
+				jit_movi(JIT_REGISTER_MODE, MODE_TIMESLICE);
+				jit_movi(JIT_REGISTER_NEXT_PC, (pc_word + i) << 2);
+				jit_patch_abs(jit_jmpi(), thunks.return_thunk);
+				jit_patch(continue_slice);
+			}
 		}
 
 		uint32_t instr = state.imem[pc_word + i];
@@ -1991,8 +2010,9 @@ Func CPU::jit_region(uint64_t hash, unsigned pc_word, unsigned instruction_count
 	return ret;
 }
 
-ReturnMode CPU::run()
+ReturnMode CPU::run(uint32_t cycle_limit)
 {
+	state.cycle_limit = cycle_limit;
 	invalidate_code();
 	for (;;)
 	{
@@ -2009,6 +2029,7 @@ ReturnMode CPU::run()
 			return MODE_BREAK;
 
 		case MODE_CHECK_FLAGS:
+		case MODE_TIMESLICE:
 		case MODE_DMA_READ:
 			return static_cast<ReturnMode>(ret);
 

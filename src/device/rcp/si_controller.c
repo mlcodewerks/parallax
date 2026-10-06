@@ -71,7 +71,7 @@ static void copy_pif_rdram(struct si_controller* si)
 
 static unsigned int si_duration(struct si_controller* si, int read)
 {
-    if (si->dma_duration) return si->dma_duration; /* Explicit ROM override. */
+    if (si->dma_duration) return si->dma_duration; 
     unsigned clocks = read ? 13600 : 4065;
     if (read) {
         unsigned offset = 0, channel = 0;
@@ -88,7 +88,6 @@ static unsigned int si_duration(struct si_controller* si, int read)
             ++channel;
         }
     }
-    /* Ares uses three master clocks per RCP clock; COUNT ticks every four. */
     return (clocks*3 + 3)/4;
 }
 

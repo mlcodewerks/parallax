@@ -47,16 +47,20 @@ extern "C"
 			*rsp->cp0.cr[rd] = 1; // Atomic semaphore test-and-set, even for r0.
 
 #ifdef PARALLEL_INTEGRATION
-		if (rd == CP0_REGISTER_SP_RESERVED)
+		if (rd == CP0_REGISTER_SP_RESERVED && res)
 		{
-			// Synchronize after the atomic access. The task scheduler gives
-			// the CPU a turn before this RSP can acquire the semaphore again.
+			// A failed atomic acquisition needs the CPU to release the lock.
+			// A successful acquisition can proceed within this slice.
 			*RSP::rsp.SP_STATUS_REG |= SP_STATUS_HALT;
 			return MODE_CHECK_FLAGS;
 		}
-		// WAIT_FOR_CPU_HOST. From CXD4. DPC polling also needs to yield:
-		// the CPU can unfreeze the RDP only after this synchronous slice ends.
-		if (rd == CP0_REGISTER_SP_STATUS || rd >= CP0_REGISTER_CMD_START)
+		// Hardware-counted slices must let CPU-owned DMA advance through
+		// the CPU event queue. Bound its flag reads like status/DPC polls.
+		// UINT32_MAX is the integration's untimed, fixed-delay mode; retain
+		// its existing polling cadence when detailed timing is disabled.
+		if (rd == CP0_REGISTER_SP_STATUS || rd >= CP0_REGISTER_CMD_START ||
+		    (rsp->cycle_limit != UINT32_MAX &&
+		     (rd == CP0_REGISTER_DMA_FULL || rd == CP0_REGISTER_DMA_BUSY)))
 		{
 			RSP::MFC0_count[rt] += 1;
 			if (RSP::MFC0_count[rt] >= RSP::SP_STATUS_TIMEOUT)

@@ -21,11 +21,15 @@ void rdp_emit_hle_reset(void);
 unsigned int rdp_emit_hle_state_size(void);
 void rdp_emit_hle_save(void *);
 void rdp_emit_hle_load(const void *);
+unsigned int rdp_emit_stream_state_size(void);
+void rdp_emit_stream_save(void *);
+void rdp_emit_stream_load(const void *);
 
 /* streaming display-list service for the Gauntlet Legends microcode;
  * see rdp_emit_hle.c for the contract */
 int angrylion_streaming_dlist(int resume);
 int angrylion_rs_dlist(int resume);
+int angrylion_naboo_dlist(int resume, int emit);
 
 /* sliced ZSortBOSS service (WDC / Stunt Racer); see rdp_emit_hle.c */
 int angrylion_zboss_dlist(int resume, unsigned int *sp_status);

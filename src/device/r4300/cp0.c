@@ -190,6 +190,8 @@ fault:
 void cp0_update_count(struct r4300_core* r4300)
 {
     struct cp0* cp0 = &r4300->cp0;
+    /* Dispatch already charges executed cycles, including delay slots.
+     * Keep this synchronization hook for devices and exception handlers. */
     cp0->last_addr = *r4300_pc(r4300);
 
 #ifdef COMPARE_CORE
@@ -204,6 +206,7 @@ void cp0_update_count(struct r4300_core* r4300)
 
 static void exception_epilog(struct r4300_core* r4300)
 {
+    r4300_pipeline_reset(r4300);
         if (r4300->delay_slot)
         {
             r4300->skip_jump = *r4300_pc(r4300);

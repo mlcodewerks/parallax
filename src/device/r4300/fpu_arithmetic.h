@@ -1,4 +1,5 @@
-
+/* Included by pure_interp.c. VR4300 arithmetic semantics, following Ares's
+ * interpreter-fpu.cpp. Host FP state is isolated from the emulator frontend. */
 #include <math.h>
 #include "fpu_native.h"
 
@@ -16,6 +17,7 @@ static int fpu_unimplemented(struct r4300_core* cpu)
     return 1;
 }
 
+/* flags: inexact, underflow, overflow, divide-by-zero, invalid. */
 static int fpu_flags(struct r4300_core* cpu, unsigned int flags)
 {
     unsigned int enabled = (cpu->cp1.fcr31 >> 7) & 31;
@@ -37,6 +39,7 @@ static int fpu_inputs(struct r4300_core* cpu, uint64_t a, uint64_t b, int single
 {
     int ca = fpu_class(a, single), cb = binary ? fpu_class(b, single) : FP_ZERO;
     uint64_t signal = single ? UINT64_C(0x00400000) : UINT64_C(0x0008000000000000);
+    /* Quiet legacy NaNs and denormals take priority over invalid-operation. */
     if ((ca == FP_NAN && !(a & signal)) || (cb == FP_NAN && !(b & signal)) ||
         ca == FP_SUBNORMAL || cb == FP_SUBNORMAL) return fpu_unimplemented(cpu);
     if (ca == FP_NAN || cb == FP_NAN) return fpu_flags(cpu, 16);
@@ -61,7 +64,7 @@ static int fpu_output(struct r4300_core* cpu, uint64_t* bits, int single)
     return 0;
 }
 
-static void fpu_arithmetic(struct r4300_core* cpu, uint32_t op)
+void pure_interp_fpu_arithmetic(struct r4300_core* cpu, uint32_t op)
 {
     unsigned int fmt = RS_OF(op), fn = op & 63, fd = FD_OF(op);
     unsigned int fs = (cpu->cp0.regs[CP0_STATUS_REG] & CP0_STATUS_FR) ? FS_OF(op) : (FS_OF(op) & ~1);
@@ -95,6 +98,8 @@ static void fpu_arithmetic(struct r4300_core* cpu, uint32_t op)
             uint64_t magnitude = raw & ~sign;
             uint64_t limit = word ? (single ? UINT64_C(0x4f000000) : UINT64_C(0x41e0000000000000))
                 : (single ? UINT64_C(0x5a000000) : UINT64_C(0x4340000000000000));
+            /* Bitwise bounds keep fast-math from speculating a conversion
+             * before operand validation or changing host exception flags. */
             if (magnitude > limit || (magnitude == limit && (!word || !(raw & sign)))) {
                 fpu_unimplemented(cpu); return;
             }
@@ -125,8 +130,8 @@ static void fpu_arithmetic(struct r4300_core* cpu, uint32_t op)
 }
 
 #define FPU_ARITH_PAIR(name) \
-    DECLARE_INSTRUCTION(name##_S) { fpu_arithmetic(r4300, op); } \
-    DECLARE_INSTRUCTION(name##_D) { fpu_arithmetic(r4300, op); }
+    DECLARE_INSTRUCTION(name##_S) { pure_interp_fpu_arithmetic(r4300, op); } \
+    DECLARE_INSTRUCTION(name##_D) { pure_interp_fpu_arithmetic(r4300, op); }
 FPU_ARITH_PAIR(ABS)
 FPU_ARITH_PAIR(ADD)
 FPU_ARITH_PAIR(DIV)
@@ -145,7 +150,7 @@ FPU_ARITH_PAIR(FLOOR_W)
 FPU_ARITH_PAIR(FLOOR_L)
 FPU_ARITH_PAIR(CVT_W)
 FPU_ARITH_PAIR(CVT_L)
-#define FPU_CONVERT(name) DECLARE_INSTRUCTION(name) { fpu_arithmetic(r4300, op); }
+#define FPU_CONVERT(name) DECLARE_INSTRUCTION(name) { pure_interp_fpu_arithmetic(r4300, op); }
 FPU_CONVERT(CVT_S_D)
 FPU_CONVERT(CVT_S_W)
 FPU_CONVERT(CVT_S_L)

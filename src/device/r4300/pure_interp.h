@@ -33,5 +33,8 @@ extern bool breakloop;
 
 r4300_interp_handler pure_interp_decode(uint32_t op, int idle);
 void pure_interp_execute_one(struct r4300_core* r4300);
+/* Shared COP1 bodies; callers have decoded a legal arithmetic/compare opcode. */
+void pure_interp_fpu_arithmetic(struct r4300_core* r4300, uint32_t op);
+void pure_interp_fpu_compare(struct r4300_core* r4300, uint32_t op);
 
 #endif /* M64P_DEVICE_R4300_PURE_INTERP_H */

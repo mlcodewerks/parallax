@@ -696,6 +696,9 @@ void romdatabase_close(void)
         free(g_romdatabase.list);
         g_romdatabase.list = search;
         }
+    /* The indices point into the freed list. A subsequent CoreStartup must
+     * rebuild the database rather than treating those pointers as live. */
+    memset(&g_romdatabase, 0, sizeof(g_romdatabase));
 }
 
 static romdatabase_entry* ini_search_by_md5(md5_byte_t* md5)

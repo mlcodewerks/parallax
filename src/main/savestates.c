@@ -60,7 +60,7 @@ enum { GB_CART_FINGERPRINT_OFFSET = 0x134 };
 enum { DD_DISK_ID_OFFSET = 0x43670 };
 
 static const char* savestate_magic = "M64+SAVE";
-static const int savestate_latest_version = 0x00010f00;  /* 1.15: RDP texture/scanline timing state */
+static const int savestate_latest_version = 0x00011500;  /* 1.21: fractional RDP clock conversion */
 static const unsigned char pj64_magic[4] = { 0xC8, 0xA6, 0xD8, 0x23 };
 
 static savestates_job job = savestates_job_nothing;
@@ -398,7 +398,22 @@ int savestates_load_m64p(struct device* dev, const void *data)
 
     to_little_endian_buffer(queue, 4, 256);
     load_eventqueue_infos(&dev->r4300.cp0, queue);
+    if (version >= 0x00011400) {
+        /* Event reconstruction starts at clock zero. Preserve the monotonic
+         * clock's epoch as well: AI's COUNT-to-video conversion depends on
+         * its fractional oscillator phase, even before COUNT wraps. */
+        curr = data_0001_0200 + 3900;
+        int64_t clock = GETDATA(curr, int64_t);
+        if (clock < 0 || clock > INT64_MAX - INT64_C(0x100000000)) {
+            free(savestateData); return 0;
+        }
+        for (struct node* n = dev->r4300.cp0.q.first; n; n = n->next)
+            n->data.deadline += clock;
+        dev->r4300.cp0.count_clock = clock;
+    }
     dev->r4300.cp0.count_phase = 0; /* Older states had no fractional cycle. */
+    r4300_pipeline_reset(&dev->r4300);
+    r4300_itlb_reset(&dev->r4300);
     memset(dev->r4300.icache_tags, 0, sizeof(dev->r4300.icache_tags));
     memset(dev->r4300.dcache_tags, 0, sizeof(dev->r4300.dcache_tags));
     memset(&dev->dp.timing, 0, sizeof(dev->dp.timing));
@@ -804,6 +819,28 @@ int savestates_load_m64p(struct device* dev, const void *data)
                 dev->dp.timing.fb_width = GETDATA(curr, uint32_t);
                 dev->dp.timing.fb_address = GETDATA(curr, uint32_t);
                 dev->dp.timing.scissor_field = GETDATA(curr, uint32_t) & 3;
+                dev->dp.timing.clock_overhang = version >= 0x00011500 ?
+                    GETDATA(curr, uint32_t) & 3 : 0;
+            }
+            if (version >= 0x00011200) {
+                curr = data_0001_0200 + 4032;
+                dev->r4300.pipeline_load_mask = GETDATA(curr, uint64_t) & ~UINT64_C(1);
+                dev->r4300.pipeline_cached_store = GETDATA(curr, uint32_t) & 1;
+                if (version >= 0x00011300) {
+                    dev->r4300.pipeline_fpu_result_mask = GETDATA(curr, uint64_t) & UINT64_C(0xffffffff00000000);
+                    dev->r4300.pipeline_fpu_cc = GETDATA(curr, uint32_t) & 1;
+                    COPYARRAY(dev->r4300.pipeline_itlb_vpn, curr, uint32_t, 2);
+                    COPYARRAY(dev->r4300.pipeline_itlb_map, curr, uint32_t, 2);
+                    dev->r4300.pipeline_itlb_valid = GETDATA(curr, uint32_t) & 3;
+                    dev->r4300.pipeline_itlb_lru = GETDATA(curr, uint32_t) & 1;
+                } else {
+                    dev->r4300.pipeline_fpu_result_mask = 0;
+                    dev->r4300.pipeline_fpu_cc = 0;
+                    r4300_itlb_reset(&dev->r4300);
+                }
+            } else {
+                r4300_pipeline_reset(&dev->r4300);
+                r4300_itlb_reset(&dev->r4300);
             }
             curr = data_0001_0200 + 4096;
             COPYARRAY(dev->r4300.icache_tags, curr, uint32_t, 512);
@@ -906,10 +943,19 @@ int savestates_load_m64p(struct device* dev, const void *data)
         dev->sp.rsp_completion_status = GETDATA(curr, uint32_t);
     }
     else dev->sp.rsp_completion_status = SP_STATUS_HALT | SP_STATUS_BROKE;
+    if (version < 0x00011100)
+        dev->sp.rsp_completion_status &= SP_STATUS_HALT | SP_STATUS_BROKE;
 #ifdef __LIBRETRO__
-    optional_rsp_load(version >= 0x00010e00 ? data_0001_0200 + 20480 : NULL);
+    if (version >= 0x00011000) optional_rsp_load(data_0001_0200 + 20480);
+    else optional_rsp_load_legacy(version >= 0x00010e00 ? data_0001_0200 + 20480 : NULL);
 #endif
     ai_rebase_timing(&dev->ai);
+    if (version >= 0x00011400) {
+        curr = data_0001_0200 + 3908;
+        dev->ai.dma_start_clock = GETDATA(curr, int64_t);
+        dev->ai.idle_clock = GETDATA(curr, int64_t);
+        dev->ai.idle_phase = GETDATA(curr, uint64_t);
+    }
     rsp_rebase_dma(&dev->sp);
 
     free(savestateData);
@@ -1343,7 +1389,27 @@ int savestates_save_m64p(const struct device* dev, void *data)
     PUTDATA(curr, uint32_t, dev->dp.timing.fb_width);
     PUTDATA(curr, uint32_t, dev->dp.timing.fb_address);
     PUTDATA(curr, uint32_t, dev->dp.timing.scissor_field);
+    PUTDATA(curr, uint32_t, dev->dp.timing.clock_overhang);
 
+
+    /* Preserve the oscillator phase used by COUNT-to-AI conversion. These
+     * reserved bytes do not change the legacy layout or total state size. */
+    curr = save->data + 16788288 + sizeof(queue) + 4 + 3900;
+    PUTDATA(curr, int64_t, dev->r4300.cp0.count_clock);
+    PUTDATA(curr, int64_t, dev->ai.dma_start_clock);
+    PUTDATA(curr, int64_t, dev->ai.idle_clock);
+    PUTDATA(curr, uint64_t, dev->ai.idle_phase);
+
+    /* Reserved bytes before the cache extension; older states clear history. */
+    curr = save->data + 16788288 + sizeof(queue) + 4 + 4032;
+    PUTDATA(curr, uint64_t, dev->r4300.pipeline_load_mask);
+    PUTDATA(curr, uint32_t, dev->r4300.pipeline_cached_store);
+    PUTDATA(curr, uint64_t, dev->r4300.pipeline_fpu_result_mask);
+    PUTDATA(curr, uint32_t, dev->r4300.pipeline_fpu_cc);
+    PUTARRAY(dev->r4300.pipeline_itlb_vpn, curr, uint32_t, 2);
+    PUTARRAY(dev->r4300.pipeline_itlb_map, curr, uint32_t, 2);
+    PUTDATA(curr, uint32_t, dev->r4300.pipeline_itlb_valid);
+    PUTDATA(curr, uint32_t, dev->r4300.pipeline_itlb_lru);
 
     /* Fixed extension offset keeps the original extra-state layout intact. */
     curr = save->data + 16788288 + sizeof(queue) + 4 + 4096;

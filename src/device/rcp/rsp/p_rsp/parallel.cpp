@@ -106,7 +106,14 @@ extern "C"
 
 		while (!(*RSP::rsp.SP_STATUS_REG & SP_STATUS_HALT))
 		{
+#ifdef DEBUG_JIT
 			auto mode = RSP::cpu.run();
+#else
+			// Streaming microcode can compute indefinitely without a CP0 poll.
+			// Return at a basic-block boundary so CPU events and DMA can progress.
+			auto mode = RSP::cpu.run(RSP::cpu.cycle_timing_enabled() ? 32768 : UINT32_MAX);
+			if (mode == RSP::MODE_TIMESLICE) break;
+#endif
 			if (mode == RSP::MODE_CHECK_FLAGS && (*RSP::cpu.get_state().cp0.irq & 1))
 				break;
 		}
@@ -198,7 +205,7 @@ extern "C"
 		RSP::cpu.set_imem(reinterpret_cast<uint32_t *>(Rsp_Info.IMEM));
 		RSP::cpu.set_rdram(reinterpret_cast<uint32_t *>(Rsp_Info.RDRAM));
 #if defined(__LIBRETRO__) && !defined(DEBUG_JIT)
-        RSP::cpu.set_cycle_timing(renderer_settings.rsp_timing);
+        RSP::cpu.set_cycle_timing(renderer_settings.per_cycle_timing);
 #endif
 	}
 }

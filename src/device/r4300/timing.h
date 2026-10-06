@@ -51,27 +51,52 @@ static osal_force_inline void cp0_step_cycles(struct cp0* cp0, unsigned int cycl
 }
 
 #include "cache_timing.h"
+#include "pipeline.h"
 
-static osal_force_inline int r4300_begin_instruction(struct r4300_core* r4300, uint32_t op, uint32_t pc)
+static osal_force_inline unsigned int r4300_pipeline_issue_cycles(
+    unsigned int cache_timing, unsigned int stalls)
 {
-    r4300_fetch_access_cycles(r4300, pc);
-    /* Conservative two-clock interpreter issue envelope, as used by
-     * simple64 v2022.07.7's cache-enabled interpreter. This extra handoff
-     * clock is an approximation of the pipeline, not cycle-accurate issue.
-     * Architectural instruction latency tests can disable the cache model. */
-    unsigned int issue = r4300->cache_timing != 0;
+    unsigned int issue = cache_timing != 0;
+    return stalls > issue ? stalls : issue;
+}
+
+static osal_force_inline int r4300_begin_instruction_cycles(struct r4300_core* r4300,
+    uint32_t op, uint32_t pc, unsigned int cycles, unsigned int cache_timing)
+{
+    if (cache_timing) r4300_fetch_access_cycles(r4300, pc);
+    /* The compatibility issue envelope already reserves one pipeline clock.
+     * An explicit interlock consumes that reservation; charge only a stall
+     * exceeding it. Adding both clocks serially regresses Racer's intro.
+     * Removing the reservation altogether regresses DK64's vine sequence.
+     * This remains an instruction-boundary estimate, not stage scheduling. */
+    unsigned int issue = cache_timing != 0;
     uint32_t status = r4300->cp0.regs[CP0_STATUS_REG];
-    /* COP1 arithmetic charges additional latency only after committing. */
-    unsigned int cycles = (op >> 26) == 17 ? 1 : r4300_base_cycles(op, status);
     if ((status & CP0_STATUS_MODE_MASK) && !(status & (CP0_STATUS_EXL | CP0_STATUS_ERL))) {
         r4300->interp_PC.addr = pc;
         cp0_step_cycles(&r4300->cp0, 1 + issue);
         if (check_instruction_mode(r4300, op)) return 0;
+        if (cache_timing) {
+            unsigned int stalls = r4300_pipeline_cycles(r4300, op);
+            cp0_step_cycles(&r4300->cp0, r4300_pipeline_issue_cycles(cache_timing, stalls) - issue);
+        }
+        else r4300_pipeline_reset(r4300);
         cp0_step_cycles(&r4300->cp0, cycles - 1);
     } else {
+        if (cache_timing) {
+            unsigned int stalls = r4300_pipeline_cycles(r4300, op);
+            cycles += r4300_pipeline_issue_cycles(cache_timing, stalls) - issue;
+        }
+        else r4300_pipeline_reset(r4300);
         cp0_step_cycles(&r4300->cp0, cycles + issue);
     }
     return 1;
+}
+
+static osal_force_inline int r4300_begin_instruction(struct r4300_core* r4300, uint32_t op, uint32_t pc)
+{
+    /* COP1 arithmetic charges additional latency only after committing. */
+    unsigned int cycles = (op >> 26) == 17 ? 1 : r4300_base_cycles(op, 0);
+    return r4300_begin_instruction_cycles(r4300, op, pc, cycles, r4300->cache_timing);
 }
 
 #endif

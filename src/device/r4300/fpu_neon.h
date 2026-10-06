@@ -89,7 +89,8 @@ static FPU_NOINLINE uint64_t fpu_neon_calc(unsigned int fmt, unsigned int fn,
 static unsigned int fpu_neon_eval(unsigned int fmt, unsigned int fn,
     uint64_t a, uint64_t b, unsigned int rm, uint64_t* result)
 {
-
+    /* MIPS RN/RZ/RP/RM -> ARM RN/RZ/RP/RM (00/11/01/10). Clearing
+     * the remaining FPCR fields disables flushing, default NaNs and traps. */
     static const unsigned int modes[4] = {0, 3, 1, 2};
     uint64_t control = (uint64_t)modes[rm] << 22;
     uint64_t saved_control, saved_status, status;
@@ -103,7 +104,7 @@ static unsigned int fpu_neon_eval(unsigned int fmt, unsigned int fn,
         if (value > INT32_MAX || value < INT32_MIN) return 32;
         *result = (uint32_t)value;
     }
-
+    /* FPSR IXC/UFC/OFC/DZC/IOC -> guest I/U/O/Z/V. */
     return ((status >> 4) & 1) | ((status >> 2) & 2) | (status & 4) |
         ((status << 2) & 8) | ((status << 4) & 16);
 }

@@ -33,6 +33,7 @@
 
 #include "hle_external.h"
 #include "hle_internal.h"
+#include "hle.h"
 #include "memory.h"
 #include "ucodes.h"
 
@@ -68,6 +69,8 @@ static int l_rs_gfx_running;
 /* ZSortBOSS task state (see zboss_gfx_task) */
 static int l_zboss_wait;
 static int l_zboss_running;
+static int l_naboo_gfx_running;
+static int l_naboo_emit;
 
 void hle_init(struct hle_t* hle,
     unsigned char* dram,
@@ -121,6 +124,9 @@ void hle_init(struct hle_t* hle,
     l_streaming_gfx_running = 0;
     l_zboss_running = 0;
     l_rs_gfx_running = 0;
+    l_naboo_gfx_running = 0;
+    l_zboss_wait = 0;
+    l_naboo_emit = 0;
 }
 
 void rs_set_fog_block(unsigned int rdram_addr);
@@ -129,6 +135,12 @@ void rs_set_fog_block(unsigned int rdram_addr);
 
 void hle_execute(struct hle_t* hle)
 {
+    /* Direct RSP programs have no OSTask header. Do not inspect stale guest
+     * pointers or reuse a task-cache entry when handling CIC boot code. */
+    if (!is_task(hle)) {
+        non_task_detection(hle)(hle);
+        return;
+    }
     audit_capture_task(hle);
 
     uint32_t uc_start = *dmem_u32(hle, TASK_UCODE);
@@ -253,10 +265,8 @@ static void task_done(struct hle_t* hle)
  * the CPU appends to a ring buffer live, with flow control through the
  * SP_STATUS signal bits. A one-shot dlist walk with a forced TASKDONE
  * ends the server after its first slice, so the game's render loop
- * deadlocks. These tasks must run on the LLE fallback, which reproduces
- * the full yield/signal protocol. If no fallback is linked, degrade to
- * the plain dlist forward: it cannot animate these titles but keeps the
- * task-done signalling flowing. */
+ * deadlocks. The streaming handlers below preserve that protocol and
+ * use this native fallback when their walker cannot service a task. */
 static void forward_gfx_task_to_lle(struct hle_t* hle)
 {
     if (HleForwardTask(hle->user_defined) != 0)
@@ -366,9 +376,6 @@ static void zboss_gfx_task(struct hle_t* hle)
  * the task is re-dispatched through the incomplete-return protocol
  * until the end survives a slice. */
 int angrylion_naboo_dlist(int resume, int emit);
-static int l_naboo_gfx_running;
-static int l_naboo_emit;
-
 /* Naboo-era Factor 5 streaming server (Battle for Naboo, Indiana
  * Jones): same libultra yield protocol as Rogue Squadron; the walker
  * is incremental and returns negative on commands it does not yet
@@ -381,7 +388,7 @@ static void naboo_gfx_task(struct hle_t* hle)
     resume = l_naboo_gfx_running
           || ((*dmem_u32(hle, TASK_FLAGS) & 1) != 0);
 
-    if (!resume)
+    if (!l_naboo_gfx_running || (*dmem_u32(hle, TASK_FLAGS) & 1))
         *hle->sp_status &= ~(SP_STATUS_SIG1 | SP_STATUS_TASKDONE);
 
     r = angrylion_naboo_dlist(resume, l_naboo_emit);
@@ -417,7 +424,7 @@ static void rs_gfx_task(struct hle_t* hle)
     resume = l_rs_gfx_running
           || ((*dmem_u32(hle, TASK_FLAGS) & 1) != 0);
 
-    if (!resume) {
+    if (!l_rs_gfx_running || (*dmem_u32(hle, TASK_FLAGS) & 1)) {
         /* the microcode clears SIG1 and SIG2 at task start */
         *hle->sp_status &= ~(SP_STATUS_SIG1 | SP_STATUS_TASKDONE);
     }
@@ -772,6 +779,22 @@ static ucode_func_t task_detection(struct hle_t* hle)
     }
 }
 
+enum hle_task_kind hle_get_task_kind(struct hle_t* hle)
+{
+    ucode_func_t handler = task_detection(hle);
+    if (handler == unknown_task || handler == unknown_ucode)
+        return HLE_TASK_UNKNOWN;
+    if (handler == cicx105_ucode)
+        return HLE_TASK_BOOT;
+    if (handler == send_dlist_to_gfx_plugin || handler == streaming_gfx_task ||
+        handler == rs_gfx_task || handler == zboss_gfx_task || handler == naboo_gfx_task)
+        return HLE_TASK_GRAPHICS;
+    if (*dmem_u32(hle, TASK_TYPE) == 2 &&
+        (handler == send_alist_to_audio_plugin || handler == try_audio_task_detection(hle)))
+        return HLE_TASK_AUDIO;
+    return HLE_TASK_OTHER;
+}
+
 #ifdef ENABLE_TASK_DUMP
 static void dump_unknown_task(struct hle_t* hle, unsigned int uc_start)
 {
@@ -869,3 +892,18 @@ static void dump_task(struct hle_t* hle, const char *const filename)
         fclose(f);
 }
 #endif
+
+#include "../../rdp/angrylion/rdp_emit_state.h"
+#define STREAM_FIELDS(X) X(l_streaming_gfx_running) X(l_rs_gfx_running) X(l_zboss_wait) X(l_zboss_running) X(l_naboo_gfx_running) X(l_naboo_emit)
+EMIT_STATE_DEFINE(hle_stream, STREAM_FIELDS)
+#undef STREAM_FIELDS
+int hle_stream_can_resume(unsigned int checksum)
+{
+    switch (checksum) {
+    case 0x28b9e: return l_streaming_gfx_running;
+    case 0x2095b: return l_rs_gfx_running;
+    case 0x1f7bb: return l_zboss_running;
+    case 0x25c16: case 0x25c53: return l_naboo_gfx_running;
+    default: return 0;
+    }
+}

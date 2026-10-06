@@ -185,7 +185,9 @@ static void update_sp_status(struct rsp_core* sp, uint32_t w)
     if ((w & 0x1800000) == 0x800000) sp->regs[SP_STATUS_REG] &= ~SP_STATUS_SIG7;
     if ((w & 0x1800000) == 0x1000000) sp->regs[SP_STATUS_REG] |= SP_STATUS_SIG7;
 
-    if (sp->rsp_task_locked && get_event(&sp->mi->r4300->cp0.q, SP_INT))
+    /* A completed synchronous slice still owns the SP until its scheduled
+     * completion. CLR_HALT/CLR_BROKE must not replay it before that event. */
+    if (get_event(&sp->mi->r4300->cp0.q, SP_INT))
         return;
     if (!((w & 0x3) == 1) && !(w & 0x4) && !sp->rsp_task_locked)
         return;
@@ -203,7 +205,7 @@ void init_rsp(struct rsp_core* sp,
     sp->mem = sp_mem;
     sp->cycle_timing = 1;
 #ifdef __LIBRETRO__
-    sp->cycle_timing = renderer_settings.rsp_timing;
+    sp->cycle_timing = renderer_settings.per_cycle_timing;
 #endif
     sp->mi = mi;
     sp->dp = dp;
@@ -318,6 +320,8 @@ void do_SP_Task(struct rsp_core* sp)
 
     uint32_t sp_delay_time;
     uint32_t executed_cycles = 0;
+    uint32_t previous_status = sp->regs[SP_STATUS_REG];
+    uint32_t previous_irq = sp->mi->regs[MI_INTR_REG] & MI_INTR_SP;
 
     if (sp->mem[0xfc0/4] == 1)
     {
@@ -335,8 +339,7 @@ void do_SP_Task(struct rsp_core* sp)
         sp->regs2[SP_PC_REG] |= save_pc;
         new_frame();
 
-        /* DPC writes schedule SyncFull through the shared RDP handler.
-         * Preserve any DP interrupt already pending when the task started. */
+       
         sp_delay_time = 1000;
 
         protect_framebuffers(&sp->dp->fb);
@@ -366,32 +369,28 @@ void do_SP_Task(struct rsp_core* sp)
     }
 
 #if defined(HAVE_PARALLEL_RSP)
-    /* RSP is clocked at 62.5 MHz; COUNT at 46.875 MHz. Device completion
-     * must wait for executed work instead of treating an entire task as 1000 ticks. */
+   
     uint32_t task_ticks = (uint32_t)(((uint64_t)executed_cycles * 3 + 3) / 4);
     if (sp->cycle_timing) sp_delay_time = task_ticks;
 #endif
+    uint32_t current_irq = sp->mi->regs[MI_INTR_REG] & MI_INTR_SP;
+    if (sp->cycle_timing) sp->rsp_completion_status = 0;
     sp->rsp_task_locked = 0;
     sp->mi->r4300->cp0.interrupt_unsafe_state &= ~INTR_UNSAFE_RSP;
     if ((sp->regs[SP_STATUS_REG] & (SP_STATUS_HALT | SP_STATUS_BROKE)) == 0)
     {
-        /* Keep an incomplete streaming task alive without consuming a real
-         * task-raised MI_INTR_SP.  The SP event is the pump, not the MI bit. */
+       
         sp->rsp_task_locked = 1;
         sp->mi->r4300->cp0.interrupt_unsafe_state |= INTR_UNSAFE_RSP;
         cp0_update_count(sp->mi->r4300);
-        /* A polling RSP must leave time for the CPU to change the shared
-         * registers. Zero-delay pumps can outrun the IPL3 semaphore handshake. */
         add_interrupt_event(&sp->mi->r4300->cp0, SP_INT, sp_delay_time ? sp_delay_time : 64);
     }
     else
     {
-        /* Completion is a status transition even when INTR_BREAK is off.
-         * Using MI_INTR_SP as the completion condition leaves a BREAK task
-         * permanently running when it did not request a CPU interrupt. */
         sp->rsp_completion_status = sp->regs[SP_STATUS_REG] & (SP_STATUS_HALT | SP_STATUS_BROKE);
         cp0_update_count(sp->mi->r4300);
-        if ((sp->regs[SP_STATUS_REG] & SP_STATUS_INTR_BREAK) &&
+        if ((!sp->cycle_timing || !previous_irq) &&
+            (sp->regs[SP_STATUS_REG] & SP_STATUS_INTR_BREAK) &&
             (sp->mi->regs[MI_INTR_REG] & MI_INTR_SP))
         {
             clear_rcp_interrupt(sp->mi, MI_INTR_SP);
@@ -401,7 +400,20 @@ void do_SP_Task(struct rsp_core* sp)
         add_interrupt_event(&sp->mi->r4300->cp0, SP_INT, sp_delay_time);
     }
 
-    /* SIG2 is a software-controlled signal, not a hardware BREAK flag. */
+    if (sp->cycle_timing) {
+        /* CPU task handoffs must not see SIG/IRQ completion before the
+         * emulated clocks elapse. Keep unrelated CPU signal writes intact. */
+        uint32_t changed = (previous_status ^ sp->regs[SP_STATUS_REG]) & RSP_PENDING_SIGNALS;
+        sp->rsp_completion_status |= (changed << 16) | (sp->regs[SP_STATUS_REG] & changed);
+        sp->regs[SP_STATUS_REG] = (sp->regs[SP_STATUS_REG] & ~changed) | (previous_status & changed);
+        if (!previous_irq && current_irq) {
+            sp->rsp_completion_status |= RSP_PENDING_IRQ_SET;
+            clear_rcp_interrupt(sp->mi, MI_INTR_SP);
+        } else if (previous_irq && !current_irq) {
+            sp->rsp_completion_status |= RSP_PENDING_IRQ_CLEAR;
+            signal_rcp_interrupt(sp->mi, MI_INTR_SP);
+        }
+    }
     sp->regs[SP_STATUS_REG] &= ~(SP_STATUS_BROKE | SP_STATUS_HALT);
 }
 
@@ -409,16 +421,24 @@ void rsp_interrupt_event(void* opaque)
 {
     struct rsp_core* sp = (struct rsp_core*)opaque;
 
+    uint32_t pending = sp->rsp_completion_status;
+    uint32_t changed = (pending >> 16) & RSP_PENDING_SIGNALS;
+    sp->regs[SP_STATUS_REG] = (sp->regs[SP_STATUS_REG] & ~changed) | (pending & changed);
+    sp->rsp_completion_status &= SP_STATUS_HALT | SP_STATUS_BROKE;
+    if (pending & RSP_PENDING_IRQ_CLEAR)
+        clear_rcp_interrupt(sp->mi, MI_INTR_SP);
     if (sp->rsp_task_locked)
     {
+        if (pending & RSP_PENDING_IRQ_SET) signal_rcp_interrupt(sp->mi, MI_INTR_SP);
         do_SP_Task(sp);
         return;
     }
 
-    sp->regs[SP_STATUS_REG] |= sp->rsp_completion_status;
+    sp->regs[SP_STATUS_REG] |= sp->rsp_completion_status & (SP_STATUS_HALT | SP_STATUS_BROKE);
 
-    if ((sp->rsp_completion_status & SP_STATUS_BROKE) &&
-        (sp->regs[SP_STATUS_REG] & SP_STATUS_INTR_BREAK))
+    if ((pending & RSP_PENDING_IRQ_SET) ||
+        ((sp->rsp_completion_status & SP_STATUS_BROKE) &&
+         (sp->regs[SP_STATUS_REG] & SP_STATUS_INTR_BREAK)))
     {
         raise_rcp_interrupt(sp->mi, MI_INTR_SP);
     }

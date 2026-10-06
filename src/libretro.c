@@ -511,7 +511,7 @@ void retro_deinit(void)
 {
     // Prevent yield to game_thread on unsuccessful context request
     if (load_game_successful)
-        CoreDoCommand(M64CMD_STOP, 0, NULL);
+        retro_unload_game();
 
     deinit_audio_libretro();
 
@@ -683,11 +683,17 @@ void retro_unload_game(void)
     optional_rsp_report();
     sync_close();
 
+    /* ROM_CLOSE is rejected while the emulator is running. Stop plugins
+     * first so closing content can release the decoded CPU cache too. */
+    CoreDoCommand(M64CMD_STOP, 0, NULL);
     CoreDoCommand(M64CMD_ROM_CLOSE, 0, NULL);
+    CoreShutdown();
 
     cleanup_global_paths();
 
     emu_initialized = false;
+    load_game_successful = false;
+    initializing = true;
 }
 
 void update_variables(bool startup)
@@ -700,8 +706,10 @@ void update_variables(bool startup)
         CountPerScanlineOverride = 0;
 #if defined(M64P_HEADLESS_BENCH_PURE)
         r4300_emumode = EMUMODE_PURE_INTERPRETER;
+#elif defined(M64P_HEADLESS_BENCHMARK)
+        r4300_emumode = EMUMODE_INTERPRETER;
 #else
-        r4300_emumode = EMUMODE_PURE_INTERPRETER;
+        r4300_emumode = renderer_settings.cached_interpreter ? EMUMODE_INTERPRETER : EMUMODE_PURE_INTERPRETER;
 #endif
         retro_screen_aspect = 4.0 / 3.0;
         AspectRatio = 1; // Aspect::a43

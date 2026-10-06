@@ -59,7 +59,7 @@ struct ai_controller
     unsigned int samples_format_changed;
     uint32_t last_read;
     uint32_t delayed_carry;
-    /* Monotonic device time; CP0 COUNT writes must not move the DAC. */
+    /* Monotonic video-clock time; CP0 COUNT writes must not move the DAC. */
     int64_t dma_start_clock;
     int64_t idle_clock;
     uint32_t idle_phase;

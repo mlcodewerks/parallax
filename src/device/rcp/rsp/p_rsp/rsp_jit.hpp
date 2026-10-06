@@ -113,6 +113,7 @@ public:
 	{
 		return state;
 	}
+    bool cycle_timing_enabled() const { return cycle_timing; }
     void set_cycle_timing(bool enabled)
     {
         if (cycle_timing == enabled) return;
@@ -121,7 +122,7 @@ public:
         for (auto &cache : cached_blocks) cache.clear();
     }
 
-	ReturnMode run();
+	ReturnMode run(uint32_t cycle_limit = UINT32_MAX);
 
 	void print_registers();
 

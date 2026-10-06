@@ -121,6 +121,7 @@ void naboo_task_reset(unsigned int dl)
  * segment is DMA'd once at server start and never again -- so the
  * live DMEM at (re)launch IS the authoritative state. */
 static int nb_emit_on;
+static short nb_morph_v28[8], nb_morph_v29[8];
 
 /* Per-build emission gate: the triangle/attribute conventions are
  * verified bit-exact against the Battle for Naboo microcode build
@@ -152,6 +153,17 @@ void naboo_seed_dmem(const unsigned char *dmem)
     unsigned int i;
     for (i = 0; i < 0x1000u; i++)
         nb.dmem[i ^ 3u] = dmem[i ^ 3u];
+
+    /* HLE intercepts the boot stub before its data DMA. Load constants into
+     * the private shadow; physical DMEM stays untouched for native fallback. */
+    if (!(nb_dmem_r32(0xfc4u) & 1u)) {
+        unsigned int data = nb_dmem_r32(0xfd8u) & 0x00ffffffu;
+        unsigned int bytes = nb_dmem_r32(0xfdcu);
+        if (bytes > 0xfc0u) bytes = 0xfc0u;
+        if (data <= s_rdram_size && bytes <= s_rdram_size - data)
+            for (i = 0; i < bytes; i++)
+                nb.dmem[i ^ 3u] = s_rdram[(data + i) ^ 3u];
+    }
 
     /* Boot init (overlay at IMEM 0xd60, also the op 0x80 handler),
      * skipped when the task flags carry the resume bit: reset the
@@ -789,7 +801,7 @@ static void nb_ovl09_morph(unsigned int r8, unsigned int r9,
     /* v28/v29 carry the previous invocation's lanes: the microcode
      * reads them before writing them on the first iteration, and the
      * RSP's vector file persists across overlay dispatches. */
-    static short v28[8], v29[8];
+    short *v28 = nb_morph_v28, *v29 = nb_morph_v29;
     short vz[8];
     unsigned int a2 = 0xda0u;
     unsigned int r12, r13, r14, r15, r22, r23;
@@ -2130,12 +2142,18 @@ static int nb_tri(RdpFifo *fifo, unsigned int w0, unsigned int w1, int quad)
 
 int naboo_run_dl(RdpFifo *fifo, unsigned int dl_addr, int resume)
 {
+    unsigned int guard = 0;
     if (!resume)
         naboo_task_reset(dl_addr);
     if (!nb.active)
         return NABOO_R_FALLBACK;
 
     for (;;) {
+        if (++guard > 200000u || nb.dl > s_rdram_size ||
+            s_rdram_size - nb.dl < 8u) {
+            nb.active = 0;
+            return NABOO_R_FALLBACK;
+        }
         unsigned int w0 = nb_read_u32(nb.dl);
         unsigned int w1 = nb_read_u32(nb.dl + 4);
         {
@@ -2558,3 +2576,8 @@ int naboo_clip_unit(void *fifo, unsigned int ra, unsigned int rb,
         r = nb_clip_fan((RdpFifo *)fifo);
     return r;
 }
+
+#include "rdp_emit_state.h"
+#define WALKER_FIELDS(X) X(nb) X(nb_emit_on) X(nb_task_ordinal) X(nb_morph_v28) X(nb_morph_v29)
+EMIT_STATE_DEFINE(naboo, WALKER_FIELDS)
+#undef WALKER_FIELDS

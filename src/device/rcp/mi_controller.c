@@ -111,10 +111,6 @@ void write_mi_regs(void* opaque, uint32_t address, uint32_t value, uint32_t mask
     }
 }
 
-/* interrupt execution is immediate (if not masked)
- * Should only be called inside interrupt event handlers.
- * For other cases use signal_rcp_interrupt
- */
 void raise_rcp_interrupt(struct mi_controller* mi, uint32_t mi_intr)
 {
     mi->regs[MI_INTR_REG] |= mi_intr;

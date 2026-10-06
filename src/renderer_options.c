@@ -13,11 +13,10 @@ struct renderer_settings renderer_settings;
 static const struct retro_variable options[] = {
     {"wtfn64_renderer", "Renderer (restart required); " RENDERERS},
     {"wtfn64_rsp_hle", "RSP HLE (restart required); disabled|enabled"},
+    {"wtfn64_cached_interpreter", "Cached CPU interpreter (restart required); enabled|disabled"},
     {"wtfn64_lle_graphics", "Send display lists to LLE RSP (restart required); disabled|enabled"},
     {"wtfn64_lle_audio", "Send audio lists to LLE RSP (restart required); disabled|enabled"},
-    {"wtfn64_cache_emulation", "CPU cache emulation (restart required); enabled|disabled"},
-    {"wtfn64_rsp_timing", "RSP cycle timing (restart required); enabled|disabled"},
-    {"wtfn64_rdp_timing", "RDP instruction timing (restart required); enabled|disabled"},
+    {"wtfn64_per_cycle_timing", "Per-cycle timing (restart required); enabled|disabled"},
     {"wtfn64_angrylion_threads", "Angrylion rendering threads (restart required); 6|2|4|8|10|auto"},
     {"wtfn64_performance_cores", "Performance cores only (restart required); enabled|disabled"},
     {"wtfn64_angrylion_upscale", "Angrylion upscaling (restart required); 1|2|4"},
@@ -73,9 +72,13 @@ void renderer_register_options(retro_environment_t environment)
             d->category_key = "video";
             if (strstr(d->key, "angrylion")) d->category_key = "angrylion";
             else if (strstr(d->key, "parallel") || strstr(d->key, "ss_") || strstr(d->key, "native_tex_rect")) d->category_key = "parallel";
-            else if (strstr(d->key, "rsp_") || strstr(d->key, "lle_") || strstr(d->key, "cache_emulation") || strstr(d->key, "rdp_timing")) d->category_key = "emulation";
+            else if (strstr(d->key, "rsp_") || strstr(d->key, "lle_") || strstr(d->key, "per_cycle_timing") || strstr(d->key, "cached_interpreter")) d->category_key = "emulation";
+            if (!strcmp(d->key, "wtfn64_per_cycle_timing"))
+                d->info = "Enable CPU cache emulation, RSP cycle timing and RDP instruction timing together. Disabling trades timing accuracy for performance. Restart content to apply.";
+            if (!strcmp(d->key, "wtfn64_cached_interpreter"))
+                d->info = "Cache decoded CPU instructions for faster execution. Disabled selects the pure interpreter. CPU cache emulation is controlled by Per-cycle timing. Restart content to apply.";
             if (!strcmp(d->key, "wtfn64_rsp_hle"))
-                d->info = "Use upstream audio HLE and RDP command emission for supported graphics microcodes. Unsupported tasks use LLE. Restart content to apply.";
+                d->info = "Use HLE for supported RSP microcodes. Unsupported RSP tasks use LLE. Graphics/audio LLE overrides apply to their respective tasks. Restart content to apply.";
             if (!strcmp(d->key, "wtfn64_lle_graphics"))
                 d->info = "Force display lists through the LLE RSP instead of the HLE microcode emitters. Restart content to apply.";
             if (!strcmp(d->key, "wtfn64_lle_audio"))
@@ -126,9 +129,8 @@ void renderer_read_options(retro_environment_t env)
     s->rsp_hle = toggle(env, "wtfn64_rsp_hle", false);
     s->lle_graphics = toggle(env, "wtfn64_lle_graphics", false);
     s->lle_audio = toggle(env, "wtfn64_lle_audio", false);
-    s->cache_emulation = toggle(env, "wtfn64_cache_emulation", true);
-    s->rsp_timing = toggle(env, "wtfn64_rsp_timing", true);
-    s->rdp_timing = toggle(env, "wtfn64_rdp_timing", true);
+    s->per_cycle_timing = toggle(env, "wtfn64_per_cycle_timing", true);
+    s->cached_interpreter = toggle(env, "wtfn64_cached_interpreter", true);
 #ifdef HAVE_PARALLEL_RDP
     if (strcmp(value(env, "wtfn64_renderer", "angrylion"), "parallel-rdp") == 0)
         s->renderer = RENDERER_PARALLEL;

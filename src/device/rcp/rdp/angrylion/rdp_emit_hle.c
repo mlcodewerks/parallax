@@ -19,6 +19,7 @@
 #include "rdp_emit_hle.h"
 #include "rdp_emit_f3dex2.h"
 #include "rdp_emit_zboss.h"
+#include "rdp_emit_zsort.h"
 #include "rdp_emit_f3d.h"
 #include "rdp_emit_f3ddkr.h"
 #include "rdp_emit_t3dux.h"
@@ -26,6 +27,7 @@
 #include "rdp_emit_rs.h"
 #include "rdp_emit_rsp.h"
 #include "rdp_emit_backend.h"
+#include "rdp_emit_state.h"
 
 /* The active rasterizer backend (angrylion or parallel-rdp).  Installed via
  * rdp_emit_set_backend() at plugin connect time.  The display-list walk,
@@ -45,7 +47,11 @@ static GSPState s_gsp;
 static RdpFifo  s_fifo;
 static int      s_inited = 0;
 
-void rdp_emit_hle_reset(void) { memset(&s_gsp, 0, sizeof(s_gsp)); s_inited = 0; }
+void rdp_emit_hle_reset(void) {
+    memset(&s_gsp, 0, sizeof(s_gsp)); s_inited = 0;
+    f3dex2_state_load(0); rs_state_load(0); naboo_state_load(0);
+    zboss_state_load(0); rsp_emit_state_load(0);
+}
 unsigned int rdp_emit_hle_state_size(void) { return sizeof(s_gsp) + sizeof(s_inited); }
 void rdp_emit_hle_save(void *p)
 {
@@ -729,6 +735,7 @@ int rdp_emit_hle_supported(const unsigned char *ram, unsigned int size,
 {
     unsigned int i;
     static const char *names[] = {"F3D", "S2DEX", "L3D"};
+    if (zsort_ucode_match(ram, size, data, bytes)) return 1;
     if (!ram || size < 0x1b8u || data > size || text > size) return 0;
     if (f3d_is_ucode(ram, size, text) || f3d_is_seta_ucode(ram, size, text) ||
         f3dex1_data_family(ram, size, data) || f3d_gbi1_othermode_data(ram, size, data) ||
@@ -880,6 +887,10 @@ void rdp_emit_hle_process_dlist(void)
             rsp_tri_set_d64_sort(0);
             s_gsp.rs_clip_model = 0;
             s_gsp.clip_fan_first = 0;
+        }
+        else if (zsort_ucode_match(rdram, rdram_size, ud, read_dmem_u32(dmem, 0xfdc)))
+        {
+            zsort_run_dl(&s_gsp, &s_fifo, rdram, rdram_size, dmem, dl_addr);
         }
         else if (turbo3d_ucode_match(rdram, rdram_size, ut))
         {
@@ -1185,6 +1196,8 @@ int angrylion_rs_dlist(int resume)
 
 #include "rdp_emit_naboo.h"
 
+static void fifo_discard(RdpFifo *fifo) { fifo->used = 0; }
+
 int angrylion_naboo_dlist(int resume, int emit)
 {
     unsigned char *rdram;
@@ -1220,6 +1233,27 @@ int angrylion_naboo_dlist(int resume, int emit)
     naboo_set_emit(emit);
     if (!resume)
         naboo_seed_dmem(dmem);
+    /* Unsupported overlays must be rejected before an overflow flush can
+     * send any commands to the RDP. The walker changes only its private DMEM
+     * and emitter state, so replay a read-only probe with a discard sink. */
+    {
+        unsigned int ns = naboo_state_size(), rs = rsp_emit_state_size();
+        unsigned int fs = f3dex2_state_size();
+        unsigned char *saved = (unsigned char *)malloc(ns + rs + fs);
+        if (!saved) return -1;
+        naboo_state_save(saved);
+        rsp_emit_state_save(saved + ns);
+        f3dex2_state_save(saved + ns + rs);
+        s_fifo.flush = fifo_discard;
+        r = naboo_run_dl(&s_fifo, dl_addr, resume);
+        naboo_state_load(saved);
+        rsp_emit_state_load(saved + ns);
+        f3dex2_state_load(saved + ns + rs);
+        free(saved);
+        s_fifo.used = 0;
+        s_fifo.flush = fifo_flush_to_rdp;
+        if (r < 0) return r;
+    }
     r = naboo_run_dl(&s_fifo, dl_addr, resume);
     {
         static int done, fb, t = -1;
@@ -1466,4 +1500,29 @@ int angrylion_zboss_dlist(int resume, unsigned int *sp_status)
 
     zb_ring_flush_to_rdp(&s_fifo);
     return r;
+}
+
+#define TRANSPORT_FIELDS(X) X(s_zb_ring_base) X(s_zb_ring_end) X(s_zb_ring_pos) X(s_zb_ring_live)
+EMIT_STATE_DEFINE(transport, TRANSPORT_FIELDS)
+#undef TRANSPORT_FIELDS
+unsigned int rdp_emit_stream_state_size(void)
+{
+    return f3dex2_state_size() + rs_state_size() + naboo_state_size()
+        + zboss_state_size() + rsp_emit_state_size() + transport_state_size();
+}
+void rdp_emit_stream_save(void *buffer)
+{
+    unsigned char *p = (unsigned char *)buffer;
+#define SAVE_PART(name) name##_state_save(p); p += name##_state_size();
+    SAVE_PART(f3dex2) SAVE_PART(rs) SAVE_PART(naboo) SAVE_PART(zboss)
+    SAVE_PART(rsp_emit) SAVE_PART(transport)
+#undef SAVE_PART
+}
+void rdp_emit_stream_load(const void *buffer)
+{
+    const unsigned char *p = (const unsigned char *)buffer;
+#define LOAD_PART(name) name##_state_load(p); if (p) p += name##_state_size();
+    LOAD_PART(f3dex2) LOAD_PART(rs) LOAD_PART(naboo) LOAD_PART(zboss)
+    LOAD_PART(rsp_emit) LOAD_PART(transport)
+#undef LOAD_PART
 }

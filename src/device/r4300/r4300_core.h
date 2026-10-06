@@ -113,6 +113,7 @@ struct r4300_core
     struct precomp_instr interp_PC;
     void (*execute_one)(struct r4300_core* r4300);
     struct cached_interp_state* cached_interp;
+    uint64_t* cached_code_pages;
 
     unsigned int emumode;
 
@@ -132,8 +133,39 @@ struct r4300_core
     uint32_t icache_tags[512];
     uint32_t dcache_tags[512];
     unsigned int cache_timing;
+    /* Instruction-boundary approximation of the VR4300 pipeline hazards.
+     * The interpreter commits architecturally one instruction at a time, so
+     * only state which survives to the following issue boundary is kept here.
+     */
+    uint64_t pipeline_load_mask;
+    uint64_t pipeline_fpu_result_mask;
+    unsigned int pipeline_fpu_cc;
+    unsigned int pipeline_cached_store;
+    /* The real VR4300 has a fully-associative two-entry instruction micro-TLB.
+     * Store the 4 KiB virtual page together with the current LUT translation;
+     * matching the translation makes JTLB rewrites self-invalidating here. */
+    uint32_t pipeline_itlb_vpn[2];
+    uint32_t pipeline_itlb_map[2];
+    unsigned int pipeline_itlb_valid;
+    unsigned int pipeline_itlb_lru;
     uint32_t dcache_words[512][4];
 };
+
+static osal_force_inline void r4300_pipeline_reset(struct r4300_core* r)
+{
+    r->pipeline_load_mask = 0;
+    r->pipeline_fpu_result_mask = 0;
+    r->pipeline_fpu_cc = 0;
+    r->pipeline_cached_store = 0;
+}
+
+static osal_force_inline void r4300_itlb_reset(struct r4300_core* r)
+{
+    r->pipeline_itlb_vpn[0] = r->pipeline_itlb_vpn[1] = 0;
+    r->pipeline_itlb_map[0] = r->pipeline_itlb_map[1] = 0;
+    r->pipeline_itlb_valid = 0;
+    r->pipeline_itlb_lru = 0;
+}
 
 #define R4300_KSEG0 UINT32_C(0x80000000)
 #define R4300_KSEG1 UINT32_C(0xa0000000)

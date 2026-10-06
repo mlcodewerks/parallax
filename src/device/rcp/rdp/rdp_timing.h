@@ -2,6 +2,7 @@
 #define WTFN64_RDP_TIMING_H
 
 #include <stdint.h>
+#include <string.h>
 
 /* Reserved extra-state space before the CPU-cache extension at 4096. */
 #define RDP_TIMING_STATE_OFFSET 4000
@@ -14,6 +15,8 @@ struct rdp_timing {
     uint32_t left, top, right, bottom;
     uint32_t tex_size, tex_width, tex_address;
     uint32_t fb_width, fb_address, scissor_field;
+    /* Quarter COUNT ticks by which the rounded deadline exceeds real work. */
+    uint32_t clock_overhang;
 };
 
 static int32_t rdp_timing_signed(uint32_t value, unsigned bits)
@@ -77,7 +80,7 @@ static uint64_t rdp_timing_rectangle(const struct rdp_timing* t,
  * follow the documented 1/2-cycle pixel and 64-bit fill/copy throughputs.
  * Edge/coverage and RDRAM arbitration remain estimates, not a cycle-accurate
  * rasterizer. A packet can arrive over several DPC END writes. */
-static uint32_t rdp_timing_command(struct rdp_timing* t)
+static uint64_t rdp_timing_clocks(struct rdp_timing* t)
 {
     const uint32_t* w = t->words;
     unsigned op = (w[0] >> 24) & 63;
@@ -184,8 +187,47 @@ static uint32_t rdp_timing_command(struct rdp_timing* t)
     uint64_t clocks = t->length / 2 + work;
     /* Raster/transfer work is serialized with packet delivery here. Pipeline
      * overlap, row setup latency and RDRAM arbitration remain unmodeled. */
-    uint64_t ticks = (clocks * 3 + 3) / 4;
+    return clocks;
+}
+
+/* Standalone command cost; queued work carries its rounding in finish(). */
+static uint32_t rdp_timing_command(struct rdp_timing* t)
+{
+    uint64_t ticks = (rdp_timing_clocks(t) * 3 + 3) / 4;
     return ticks > UINT32_MAX ? UINT32_MAX : (uint32_t)ticks;
+}
+
+/* Submission-local milestone, never part of serialized timing state. */
+struct rdp_timing_sync {
+    int seen;
+    int64_t deadline;
+};
+
+static void rdp_timing_finish(struct rdp_timing* t, int64_t submitted,
+    struct rdp_timing_sync* sync)
+{
+    /* Once submission reaches the rounded deadline, the preceding work
+     * has drained. Otherwise retain the 3:4 clock conversion remainder
+     * across commands and fragmented DPC windows, rather than rounding
+     * every command up independently. FullSync observes the rounded time. */
+    if (t->deadline <= submitted) {
+        t->deadline = submitted;
+        t->clock_overhang = 0;
+    }
+    uint64_t quarters = rdp_timing_clocks(t) * 3 - t->clock_overhang;
+    uint64_t ticks = (quarters + 3) / 4;
+    if (ticks > (uint64_t)INT64_MAX || t->deadline > INT64_MAX - (int64_t)ticks) {
+        t->deadline = INT64_MAX;
+        t->clock_overhang = 0;
+    } else {
+        t->deadline += (int64_t)ticks;
+        t->clock_overhang = (uint32_t)(ticks * 4 - quarters);
+    }
+    if (sync && !sync->seen && ((t->words[0] >> 24) & 63) == 0x29) {
+        sync->seen = 1;
+        sync->deadline = t->deadline;
+    }
+    t->pos = 0;
 }
 
 static void rdp_timing_word(struct rdp_timing* t, uint32_t word, int64_t submitted)
@@ -198,10 +240,38 @@ static void rdp_timing_word(struct rdp_timing* t, uint32_t word, int64_t submitt
     }
     if (t->pos < 8) t->words[t->pos] = word;
     if (++t->pos == t->length) {
-        if (t->deadline < submitted) t->deadline = submitted;
-        uint32_t ticks = rdp_timing_command(t);
-        t->deadline = t->deadline > INT64_MAX - ticks ? INT64_MAX : t->deadline + ticks;
-        t->pos = 0;
+        rdp_timing_finish(t, submitted, NULL);
     }
+}
+
+/* The estimator needs the first eight triangle words, not the shade/texture/Z
+ * payload. Consume contiguous command windows by packet, retaining the same
+ * framing and partial-packet state as the scalar feeder. */
+static void rdp_timing_words_sync(struct rdp_timing* t, const uint32_t* words,
+    uint32_t count, int64_t submitted, struct rdp_timing_sync* sync)
+{
+    while (count) {
+        if (!t->pos) {
+            rdp_timing_word(t, *words++, submitted);
+            --count;
+        }
+        uint32_t n = t->length - t->pos;
+        if (n > count) n = count;
+        if (t->pos < 8) {
+            uint32_t keep = 8 - t->pos;
+            if (keep > n) keep = n;
+            memcpy(t->words + t->pos, words, keep * sizeof(*words));
+        }
+        t->pos += n;
+        words += n;
+        count -= n;
+        if (t->pos == t->length) rdp_timing_finish(t, submitted, sync);
+    }
+}
+
+static void rdp_timing_words(struct rdp_timing* t, const uint32_t* words,
+    uint32_t count, int64_t submitted)
+{
+    rdp_timing_words_sync(t, words, count, submitted, NULL);
 }
 #endif
