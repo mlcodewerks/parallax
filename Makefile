@@ -1,4 +1,4 @@
-DEBUG = 1
+DEBUG ?= 0
 .DEFAULT_GOAL := all
 # Keep the CPU interpreter optimized even when the rest of the tree is built
 # with DEBUG=1. Set INTERP_OPTIMIZE=0 for source-level interpreter debugging.
@@ -570,6 +570,14 @@ else
 endif
 
 OBJECTS     += $(SOURCES_CXX:.cpp=.o) $(SOURCES_C:.c=.o) $(SOURCES_ASM:.S=.o) $(SOURCES_NASM:.asm=.o)
+# Backend defines affect dispatch and private cache layouts. Rebuild between the
+# Ari64 emitter and interpreter-only configuration, or optimization settings.
+CPU_JIT_CONFIG := $(CORE_DIR)/.cpu-jit-config
+CPU_JIT_CONFIG_VALUE := $(WITH_DYNAREC):$(if $(ARI64_DIR),ari64-emitter,interpreter):debug=$(DEBUG):profile=$(ARI64_PROFILE):interp=$(INTERP_OPTIMIZE):branchless=$(INTERP_BRANCHLESS)
+ifneq ($(strip $(file <$(CPU_JIT_CONFIG))),$(CPU_JIT_CONFIG_VALUE))
+$(file >$(CPU_JIT_CONFIG),$(CPU_JIT_CONFIG_VALUE))
+endif
+$(OBJECTS): $(CPU_JIT_CONFIG)
 CXXFLAGS    += $(CPUOPTS) $(COREFLAGS) $(INCFLAGS) $(PLATCFLAGS) $(fpic) $(CPUFLAGS) $(GLFLAGS) $(DYNAFLAGS)
 CFLAGS      += $(CPUOPTS) $(COREFLAGS) $(INCFLAGS) $(PLATCFLAGS) $(fpic) $(CPUFLAGS) $(GLFLAGS) $(DYNAFLAGS)
 
@@ -594,7 +602,8 @@ endif
 
 -include $(OBJECTS:.o=.d)
 all: $(TARGET)
-$(CORE_DIR)/src/device/r4300/pure_interp.o: $(addprefix $(CORE_DIR)/src/device/r4300/,fpu_arithmetic.h fpu_compare.h fpu_native.h)
+$(CORE_DIR)/src/device/r4300/pure_interp.o: $(addprefix $(CORE_DIR)/src/device/r4300/,fpu_arithmetic.h fpu_compare.h fpu_native.h interp_fpu_move.h)
+$(CORE_DIR)/src/device/r4300/cached_interp.o $(CORE_DIR)/src/device/r4300/pure_interp.o: $(addprefix $(CORE_DIR)/src/device/r4300/,interp_fpu_move.h interp_thread_poll.h)
 $(CORE_DIR)/src/device/r4300/fpu_native.o: $(addprefix $(CORE_DIR)/src/device/r4300/,fpu_native.h fpu_neon.h cp1.h)
 $(TARGET): $(OBJECTS)
 
@@ -609,6 +618,14 @@ endif
 
 %.o: %.cpp
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -MMD -MP -c $< -o $@
+
+ifneq ($(ARI64_DIR),)
+$(ARI64_DIR)/ari64_x64.o: CFLAGS += -O3
+$(ARI64_DIR)/ari64_x64.o: $(wildcard $(ARI64_DIR)/x64/*.inc) $(ARI64_DIR)/x64/assem_x64.h
+ifeq ($(ARI64_PROFILE),1)
+$(CORE_DIR)/src/device/r4300/cached_interp.o: CFLAGS += -DARI64_PROFILE
+endif
+endif
 
 # Cache/RSP state layout and inline timing changes must rebuild their users.
 # Missing dependency files are expected on the first build.

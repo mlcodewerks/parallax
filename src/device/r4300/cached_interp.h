@@ -14,5 +14,14 @@ void cached_interp_destroy(struct r4300_core* r4300);
 void cached_interp_invalidate(struct r4300_core* r4300, uint32_t address, size_t size);
 void cached_interp_execute_one(struct r4300_core* r4300);
 void cached_interp_run(struct r4300_core* r4300);
+void cached_interp_cache_stats(struct r4300_core*, uint64_t stats[2]);
+#ifdef HAVE_ARI64_X64
+void cached_dynarec_execute_one(struct r4300_core* r4300);
+void cached_dynarec_run(struct r4300_core* r4300);
+void cached_dynarec_stats(struct r4300_core* r4300, uint64_t stats[4]);
+void cached_dynarec_optimization_stats(struct r4300_core* r4300, uint64_t stats[2]);
+uint64_t cached_dynarec_direct_links(struct r4300_core* r4300);
+void cached_dynarec_code_stats(struct r4300_core*, uint64_t stats[3]);
+#endif
 
 #endif /* M64P_DEVICE_R4300_CACHED_INTERP_H */

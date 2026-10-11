@@ -138,7 +138,7 @@ extern struct
 {
     CONTROL *control;
     BUTTONS buttons;
-} controller[2];
+} controller[4];
 // ...but it won't be at least the first time we're called, in that case set
 // these instead for input_plugin to read.
 int pad_pak_types[4];
@@ -525,40 +525,15 @@ void retro_deinit(void)
 
 void update_controllers()
 {
-    struct retro_variable pk1var = {CORE_NAME "-pak1"};
-    if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &pk1var) && pk1var.value)
-    {
-        int p1_pak = PLUGIN_NONE;
-        if (!strcmp(pk1var.value, "rumble"))
-            p1_pak = PLUGIN_RAW;
-        else if (!strcmp(pk1var.value, "memory"))
-            p1_pak = PLUGIN_MEMPAK;
-        else if (!strcmp(pk1var.value, "transfer"))
-            p1_pak = PLUGIN_TRANSFER_PAK;
-
-        // If controller struct is not initialised yet, set pad_pak_types instead
-        // which will be looked at when initialising the controllers.
-        if (controller[0].control)
-            controller[0].control->Plugin = p1_pak;
-        else
-            pad_pak_types[0] = p1_pak;
-    }
-
-    struct retro_variable pk2var = {CORE_NAME "-pak2"};
-    if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &pk2var) && pk2var.value)
-    {
-        int p2_pak = PLUGIN_NONE;
-        if (!strcmp(pk2var.value, "rumble"))
-            p2_pak = PLUGIN_RAW;
-        else if (!strcmp(pk2var.value, "memory"))
-            p2_pak = PLUGIN_MEMPAK;
-        else if (!strcmp(pk2var.value, "transfer"))
-            p2_pak = PLUGIN_TRANSFER_PAK;
-
-        if (controller[1].control)
-            controller[1].control->Plugin = p2_pak;
-        else
-            pad_pak_types[1] = p2_pak;
+    for (unsigned port = 0; port < 4; ++port) {
+        enum controller_pak_option selected = controller_read_pak_option(environ_cb, port);
+        int pak = selected == CONTROLLER_PAK_MEMORY ? PLUGIN_MEMPAK :
+            selected == CONTROLLER_PAK_RUMBLE ? PLUGIN_RAW :
+            selected == CONTROLLER_PAK_TRANSFER ? PLUGIN_TRANSFER_PAK : PLUGIN_NONE;
+        /* The plugin rebuilds its controller structures on content reload.
+         * Keep startup selection current even while an old structure exists. */
+        pad_pak_types[port] = pak;
+        if (controller[port].control) controller[port].control->Plugin = pak;
     }
 }
 
@@ -709,7 +684,10 @@ void update_variables(bool startup)
 #elif defined(M64P_HEADLESS_BENCHMARK)
         r4300_emumode = EMUMODE_INTERPRETER;
 #else
-        r4300_emumode = renderer_settings.cached_interpreter ? EMUMODE_INTERPRETER : EMUMODE_PURE_INTERPRETER;
+        r4300_emumode = renderer_settings.cpu_core == CPU_CORE_PURE ? EMUMODE_PURE_INTERPRETER : EMUMODE_INTERPRETER;
+#ifdef HAVE_ARI64_X64
+        if (renderer_settings.cpu_core == CPU_CORE_DYNAREC) r4300_emumode = EMUMODE_DYNAREC;
+#endif
 #endif
         retro_screen_aspect = 4.0 / 3.0;
         AspectRatio = 1; // Aspect::a43

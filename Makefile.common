@@ -4,6 +4,13 @@ RSPDIR_PARALLEL    =  $(CORE_DIR)/src/device/rcp/rsp/p_rsp
 
 DYNAREC_USED := 0
 
+# Ari64 is supported only on x64. Never select another CPU JIT backend.
+ifeq ($(WITH_DYNAREC),x86_64)
+    DYNAREC_USED := 1
+    COREFLAGS += -DHAVE_ARI64_X64
+    ARI64_DIR = $(CORE_DIR)/src/device/r4300/new_dynarec
+endif
+
 INCFLAGS += \
 	-I$(ROOT_DIR)/deps \
 	-I$(ROOT_DIR)/custom \
@@ -182,4 +189,10 @@ ifeq ($(HAVE_NEON),1)
 	SOURCES_ASM += $(LIBRETRO_COMM_DIR)/audio/conversion/float_to_s16_neon.S \
 						$(LIBRETRO_COMM_DIR)/audio/conversion/s16_to_float_neon.S \
 						$(LIBRETRO_COMM_DIR)/audio/resampler/drivers/sinc_resampler_neon.S
+endif
+
+ifeq ($(DYNAREC_USED),1)
+ifneq ($(ARI64_DIR),)
+SOURCES_C += $(ARI64_DIR)/ari64_x64.c
+endif
 endif

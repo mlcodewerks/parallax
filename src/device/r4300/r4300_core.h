@@ -83,6 +83,7 @@ struct rdram;
 struct jump_table;
 struct cached_interp_state;
 
+
 enum {
     EMUMODE_PURE_INTERPRETER = 0,
     EMUMODE_INTERPRETER      = 1,

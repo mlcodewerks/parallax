@@ -68,7 +68,10 @@ static osal_force_inline void interp_branch_finish_step(struct r4300_core* r,
 static osal_force_inline void interp_branch_finish(struct r4300_core* r,
     int taken, uint32_t target, int likely)
 {
-    interp_branch_finish_step(r, taken, target, likely, r->execute_one, 0);
+    /* With guest cache timing disabled, an unmapped kernel NOP slot has
+     * no effect beyond its issue clock and PC. Share the guarded shortcut
+     * used by cached equality branches with all precise branch handlers. */
+    interp_branch_finish_step(r, taken, target, likely, r->execute_one, 1);
 }
 
 static osal_force_inline void interp_idle_advance(struct r4300_core* r)

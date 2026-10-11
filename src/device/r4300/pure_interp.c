@@ -312,6 +312,7 @@ static M64P_FORCE_INLINE int interp_idle_delay_nop(struct r4300_core* r4300, uin
 }
 
 #include "interp_memory.h"
+#include "interp_thread_poll.h"
 
 /* Assists unaligned memory accessors with making masks to preserve or apply
  * bits in registers and memory.
@@ -1700,6 +1701,17 @@ DECLARE_INSTRUCTION(CTC1)
 
 #include "fpu_compare.h"
 
+/* Shared issue/operand validation in one native COP1 helper boundary. */
+int pure_interp_jit_fpu_prepare(struct r4300_core* r, uint32_t op, uint64_t inputs[3], uint64_t* commits)
+{
+    if (r4300_begin_instruction_cycles(r,op,r->interp_PC.addr,1,r->cache_timing) &&
+        ((op & 63) >= 48 ? fpu_compare_prepare(r,op,inputs) : fpu_prepare(r,op,inputs))) return 1;
+    r->regs[0] = 0;
+    if (commits) ++*commits;
+    if (r->cp0.cycle_count >= 0) gen_interrupt(r);
+    return 0;
+}
+
 r4300_interp_handler pure_interp_decode(uint32_t op, int idle)
 {
     if ((op >> 26) == 16) return COP0;
@@ -1968,6 +1980,12 @@ static void InterpretOpcode(struct r4300_core* r4300, bool continuous)
     uint32_t* sequential_op = NULL;
     uint32_t sequential_pc = 0;
     uint32_t sequential_left = 0;
+    const unsigned int cache_timing = r4300->cache_timing;
+    /* Disabled timing never creates issue dependencies. Clear them once
+     * for this continuous run, rather than storing the same zero history
+     * on every kernel instruction. Single-step and user-mode paths retain
+     * the full shared begin helper. Timing selection is restart-only. */
+    int pipeline_cleared = 0;
 
 next_opcode: ;
     const uint32_t pc = r4300->interp_PC.addr;
@@ -2024,7 +2042,26 @@ next_opcode: ;
     }
 
     const uint32_t op = *op_address;
-    if (!r4300_begin_instruction(r4300, op, pc)) goto instruction_done;
+#ifndef WTFN64_DISABLE_RAM_POLL
+    if (continuous && !cache_timing && (op >> 26) == 3 &&
+        r4300->regs[1] == -2 && r4300->regs[31] == (int64_t)(int32_t)(pc + 8)) {
+        /* Reject ordinary calls before entering the larger steady-state
+         * validator. The RAM helper bounds speculative lookahead and keeps
+         * custom handlers and mapped code on normal execution. */
+        const uint32_t* poll_code = interp_thread_poll_ram(r4300, pc, 5, 0);
+        if (poll_code && interp_thread_poll_shape(pc, poll_code) &&
+            interp_thread_poll_advance(r4300, pc)) goto next_opcode;
+    }
+#endif
+    uint32_t status = r4300->cp0.regs[CP0_STATUS_REG];
+    if (M64P_LIKELY(continuous && !cache_timing &&
+        (!(status & CP0_STATUS_MODE_MASK) || (status & (CP0_STATUS_EXL | CP0_STATUS_ERL))))) {
+        if (M64P_UNLIKELY(!pipeline_cleared)) {
+            r4300_pipeline_reset(r4300);
+            pipeline_cleared = 1;
+        }
+        cp0_step_cycles(&r4300->cp0, (op >> 26) == 17 ? 1 : r4300_base_cycles(op, 0));
+    } else if (!r4300_begin_instruction(r4300, op, pc)) goto instruction_done;
     if (M64P_UNLIKELY(op == 0))
     {
         r4300->interp_PC.addr = pc + 4;
@@ -2678,12 +2715,26 @@ void run_r4300(struct r4300_core* r4300)
         r4300->stop = 0;
         r4300->pc = &r4300->interp_PC;
         r4300->interp_PC.addr = r4300->cp0.last_addr = r4300->start_address;
-        if (r4300->emumode == EMUMODE_INTERPRETER && !cached_interp_init(r4300))
+        if (r4300->emumode != EMUMODE_PURE_INTERPRETER && !cached_interp_init(r4300))
             r4300->emumode = EMUMODE_PURE_INTERPRETER;
+#ifdef HAVE_ARI64_X64
+        if (r4300->emumode == EMUMODE_DYNAREC) DebugMessage(M64MSG_INFO, "CPU dynarec: ari64-x64");
+        else
+#else
+        if (r4300->emumode == EMUMODE_DYNAREC) r4300->emumode = EMUMODE_PURE_INTERPRETER;
+#endif
         DebugMessage(M64MSG_INFO, "CPU interpreter: %s", r4300->emumode == EMUMODE_INTERPRETER ? "cached" : "pure");
         r4300->startup = 0;
     }
 
+#ifdef HAVE_ARI64_X64
+    if (r4300->emumode == EMUMODE_DYNAREC)
+    {
+        r4300->execute_one = cached_dynarec_execute_one;
+        cached_dynarec_run(r4300);
+    }
+    else
+#endif
     if (r4300->emumode == EMUMODE_INTERPRETER && r4300->cached_interp != NULL)
     {
         r4300->execute_one = cached_interp_execute_one;

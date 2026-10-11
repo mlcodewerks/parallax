@@ -30,13 +30,58 @@
 
 #define PARALLEL_LINE_PAD 64
 
+#ifdef _WIN32
+/* Native condition variables park atomically with the critical-section
+ * release and wake workers without the rthreads compatibility event relay.
+ * This core already requires Windows 7 processor-topology APIs. */
+typedef CRITICAL_SECTION parallel_lock_t;
+typedef CONDITION_VARIABLE parallel_cond_t;
+static parallel_lock_t *parallel_lock_new(void)
+{
+    parallel_lock_t *lock = malloc(sizeof(*lock));
+    if (lock) InitializeCriticalSection(lock);
+    return lock;
+}
+static parallel_cond_t *parallel_cond_new(void)
+{
+    parallel_cond_t *condition = malloc(sizeof(*condition));
+    if (condition) InitializeConditionVariable(condition);
+    return condition;
+}
+static void parallel_lock_free(parallel_lock_t *lock)
+{
+    if (lock) { DeleteCriticalSection(lock); free(lock); }
+}
+static void parallel_cond_free(parallel_cond_t *condition) { free(condition); }
+static void parallel_lock_lock(parallel_lock_t *lock) { EnterCriticalSection(lock); }
+static void parallel_lock_unlock(parallel_lock_t *lock) { LeaveCriticalSection(lock); }
+static void parallel_cond_wait(parallel_cond_t *condition, parallel_lock_t *lock)
+{
+    SleepConditionVariableCS(condition, lock, INFINITE);
+}
+static void parallel_cond_signal(parallel_cond_t *condition) { WakeConditionVariable(condition); }
+static void parallel_cond_broadcast(parallel_cond_t *condition) { WakeAllConditionVariable(condition); }
+#else
+typedef slock_t parallel_lock_t;
+typedef scond_t parallel_cond_t;
+#define parallel_lock_new slock_new
+#define parallel_cond_new scond_new
+#define parallel_lock_free slock_free
+#define parallel_cond_free scond_free
+#define parallel_lock_lock slock_lock
+#define parallel_lock_unlock slock_unlock
+#define parallel_cond_wait scond_wait
+#define parallel_cond_signal scond_signal
+#define parallel_cond_broadcast scond_broadcast
+#endif
+
 struct parallel_pool
 {
     void (*task)(uint32_t);
-    slock_t *work_lock;
-    scond_t *work_cond;
-    slock_t *done_lock;
-    scond_t *done_cond;
+    parallel_lock_t *work_lock;
+    parallel_cond_t *work_cond;
+    parallel_lock_t *done_lock;
+    parallel_cond_t *done_cond;
     sthread_t *threads[PARALLEL_MAX_WORKERS];
     uint32_t worker_ids[PARALLEL_MAX_WORKERS];
     /* number of workers, worker 0 included; 0 while no pool is live */
@@ -62,17 +107,17 @@ static int parallel_await_generation(struct parallel_pool *p, int seen)
 {
     int gen;
 
-    slock_lock(p->work_lock);
+    parallel_lock_lock(p->work_lock);
     p->sleepers++;
     for (;;)
     {
         gen = retro_atomic_load_acquire_int(&p->generation);
         if (gen != seen)
             break;
-        scond_wait(p->work_cond, p->work_lock);
+        parallel_cond_wait(p->work_cond, p->work_lock);
     }
     p->sleepers--;
-    slock_unlock(p->work_lock);
+    parallel_lock_unlock(p->work_lock);
     return gen;
 }
 
@@ -96,9 +141,9 @@ static void parallel_worker(void *data)
          * caller's completion check and its condition-variable wait. */
         if (retro_atomic_fetch_sub_int(&p->remaining, 1) == 1)
         {
-            slock_lock(p->done_lock);
-            scond_signal(p->done_cond);
-            slock_unlock(p->done_lock);
+            parallel_lock_lock(p->done_lock);
+            parallel_cond_signal(p->done_cond);
+            parallel_lock_unlock(p->done_lock);
         }
     }
     performance_core_leave(&affinity);
@@ -109,10 +154,10 @@ static void parallel_wait_completion(struct parallel_pool *p)
     if (retro_atomic_load_acquire_int(&p->remaining) == 0)
         return;
 
-    slock_lock(p->done_lock);
+    parallel_lock_lock(p->done_lock);
     while (retro_atomic_load_acquire_int(&p->remaining) != 0)
-        scond_wait(p->done_cond, p->done_lock);
-    slock_unlock(p->done_lock);
+        parallel_cond_wait(p->done_cond, p->done_lock);
+    parallel_lock_unlock(p->done_lock);
 }
 
 /* Publish the next generation. A worker still on its way to park re-checks
@@ -123,15 +168,15 @@ static void parallel_bump_generation(struct parallel_pool *p)
     int gen;
     uint32_t sleepers;
 
-    slock_lock(p->work_lock);
+    parallel_lock_lock(p->work_lock);
     gen = retro_atomic_load_acquire_int(&p->generation);
     retro_atomic_store_release_int(&p->generation, gen + 1);
     sleepers = p->sleepers;
     /* The legacy Windows scond implementation requires the associated
      * lock to remain held while broadcasting to its waiter queue. */
     if (sleepers)
-        scond_broadcast(p->work_cond);
-    slock_unlock(p->work_lock);
+        parallel_cond_broadcast(p->work_cond);
+    parallel_lock_unlock(p->work_lock);
 }
 
 void parallel_alinit(uint32_t num)
@@ -164,10 +209,10 @@ void parallel_alinit(uint32_t num)
     if (num == 1)
         return;
 
-    p->work_lock = slock_new();
-    p->work_cond = scond_new();
-    p->done_lock = slock_new();
-    p->done_cond = scond_new();
+    p->work_lock = parallel_lock_new();
+    p->work_cond = parallel_cond_new();
+    p->done_lock = parallel_lock_new();
+    p->done_cond = parallel_cond_new();
     if (!p->work_lock || !p->work_cond || !p->done_lock || !p->done_cond)
     {
         parallel_close();
@@ -230,9 +275,9 @@ void parallel_close(void)
 
     if (p->num_workers > 1)
     {
-        slock_lock(p->work_lock);
+        parallel_lock_lock(p->work_lock);
         p->accept_work = 0;
-        slock_unlock(p->work_lock);
+        parallel_lock_unlock(p->work_lock);
         parallel_bump_generation(p);
 
         for (i = 1; i < p->num_workers; i++)
@@ -240,13 +285,13 @@ void parallel_close(void)
     }
 
     if (p->work_cond)
-        scond_free(p->work_cond);
+        parallel_cond_free(p->work_cond);
     if (p->work_lock)
-        slock_free(p->work_lock);
+        parallel_lock_free(p->work_lock);
     if (p->done_cond)
-        scond_free(p->done_cond);
+        parallel_cond_free(p->done_cond);
     if (p->done_lock)
-        slock_free(p->done_lock);
+        parallel_lock_free(p->done_lock);
 
     memset(p, 0, sizeof(*p));
 }

@@ -232,6 +232,27 @@ m64p_error open_rom(const unsigned char* romimage, unsigned int size)
 
 m64p_error close_rom(void)
 {
+    if (g_dev.r4300.cached_interp) {
+        uint64_t cache[2];
+        cached_interp_cache_stats(&g_dev.r4300, cache);
+        DebugMessage(M64MSG_INFO, "Cached CPU blocks: decoded=%" PRIu64 " restored=%" PRIu64,
+            cache[0], cache[1]);
+    }
+#ifdef HAVE_ARI64_X64
+    if (g_dev.r4300.emumode == EMUMODE_DYNAREC) {
+        uint64_t stats[4], optimized[2], code[3];
+        cached_dynarec_stats(&g_dev.r4300, stats);
+        cached_dynarec_optimization_stats(&g_dev.r4300, optimized);
+        DebugMessage(M64MSG_INFO, "Ari64 x64: blocks=%" PRIu64 " native=%" PRIu64
+            " entries=%" PRIu64 " commits=%" PRIu64,
+            stats[0], stats[1], stats[2], stats[3]);
+        DebugMessage(M64MSG_INFO, "Ari64 optimization: fast=%" PRIu64 " links=%" PRIu64 " direct=%" PRIu64,
+            optimized[0], optimized[1], cached_dynarec_direct_links(&g_dev.r4300));
+        cached_dynarec_code_stats(&g_dev.r4300, code);
+        DebugMessage(M64MSG_INFO, "Ari64 linkage: bytes=%" PRIu64 " relative_calls=%" PRIu64 " absolute_calls=%" PRIu64,
+            code[0], code[1], code[2]);
+    }
+#endif
     cached_interp_destroy(&g_dev.r4300);
 
     /* Clear Byte-swapped flag, since ROM is now deleted. */

@@ -145,6 +145,46 @@ static FPU_NOINLINE uint64_t fpu_sse_calc(unsigned int fmt, unsigned int fn,
     }
     return (uint64_t)result.dword;
 }
+
+#if (defined(__GNUC__) || defined(__clang__)) && defined(__x86_64__)
+/* Keep the MXCSR transaction and arithmetic in one side-effecting assembly
+ * block. This removes the out-of-line helper, volatile operand spills and
+ * result reload without letting the compiler speculate across FP controls. */
+static inline unsigned int fpu_sse_arithmetic(unsigned int fmt, unsigned int fn,
+    uint64_t abits, uint64_t bbits, unsigned int control, uint64_t* bits)
+{
+    unsigned int saved, raised;
+    uint64_t result;
+#define FPU_SSE_TRANSACTION(operation) \
+    __asm__ volatile ( \
+        "stmxcsr %[saved]\n\tldmxcsr %[control]\n\t" \
+        "movq %[left], %%xmm0\n\tmovq %[right], %%xmm1\n\t" \
+        operation "\n\tmovq %%xmm0, %[result]\n\t" \
+        "stmxcsr %[raised]\n\tldmxcsr %[saved]" \
+        : [saved] "=m" (saved), [raised] "=m" (raised), [result] "=r" (result) \
+        : [control] "m" (control), [left] "r" (abits), [right] "r" (bbits) \
+        : "xmm0", "xmm1", "memory")
+#define FPU_SSE_BINARY(name) do { \
+    if (fmt == 16) FPU_SSE_TRANSACTION(name "ss %%xmm1, %%xmm0"); \
+    else FPU_SSE_TRANSACTION(name "sd %%xmm1, %%xmm0"); \
+} while (0)
+    switch (fn) {
+    case 0: FPU_SSE_BINARY("add"); break;
+    case 1: FPU_SSE_BINARY("sub"); break;
+    case 2: FPU_SSE_BINARY("mul"); break;
+    case 3: FPU_SSE_BINARY("div"); break;
+    default:
+        if (fmt == 16) FPU_SSE_TRANSACTION("sqrtss %%xmm0, %%xmm0");
+        else FPU_SSE_TRANSACTION("sqrtsd %%xmm0, %%xmm0");
+        break;
+    }
+#undef FPU_SSE_BINARY
+#undef FPU_SSE_TRANSACTION
+    *bits = fmt == 16 ? (uint32_t)result : result;
+    return ((raised >> 5) & 1) | ((raised >> 3) & 2) |
+        ((raised >> 1) & 4) | ((raised << 1) & 8) | ((raised << 4) & 16);
+}
+#endif
 #endif
 
 unsigned int fpu_native_eval(unsigned int fmt, unsigned int fn,
@@ -160,6 +200,11 @@ unsigned int fpu_native_eval(unsigned int fmt, unsigned int fn,
 #endif
     ) {
         static const unsigned int modes[4] = {0, 3, 2, 1};
+#if (defined(__GNUC__) || defined(__clang__)) && defined(__x86_64__)
+        if (fn <= 4)
+            return fpu_sse_arithmetic(fmt, fn, abits, bbits,
+                0x1f80 | (modes[rm] << 13), bits);
+#endif
         /* Exact conversions neither depend on rounding nor raise exceptions.
          * Avoid touching the caller's FP environment for the common cases.
          * Exclude denormals/NaNs so DAZ and invalid exceptions remain handled

@@ -81,19 +81,10 @@ typedef struct rarch_sinc_resampler
    unsigned taps;
    unsigned ptr;
    uint32_t time;
-   uint32_t time_fraction;
    float subphase_mod;
    float kaiser_beta;
 } rarch_sinc_resampler_t;
 
-/* Retain the fractional phase step across every output sample and batch.
- * Truncating phases / ratio on each step accumulates audio/video drift. */
-static INLINE void resampler_sinc_advance(rarch_sinc_resampler_t *resamp, uint64_t step)
-{
-   uint64_t fraction = (uint64_t)resamp->time_fraction + (uint32_t)step;
-   resamp->time += (uint32_t)(step >> 32) + (uint32_t)(fraction >> 32);
-   resamp->time_fraction = (uint32_t)fraction;
-}
 #if (defined(__ARM_NEON__) || defined(HAVE_NEON))
 
 #ifdef HAVE_ARM_NEON_ASM_OPTIMIZATIONS
@@ -108,7 +99,7 @@ static void resampler_sinc_process_neon(void *re_, struct resampler_data *data)
 {
    rarch_sinc_resampler_t *resamp = (rarch_sinc_resampler_t*)re_;
    unsigned phases                = 1 << (resamp->phase_bits + resamp->subphase_bits);
-   uint64_t ratio                 = (uint64_t)(4294967296.0 * phases / data->ratio);
+   uint32_t ratio                 = phases / data->ratio;
    const float *input             = data->data_in;
    float *output                  = data->data_out;
    size_t frames                  = data->input_frames;
@@ -165,7 +156,7 @@ static void resampler_sinc_process_neon(void *re_, struct resampler_data *data)
 #endif
             output                 += 2;
             out_frames++;
-            resampler_sinc_advance(resamp, ratio);
+            resamp->time           += ratio;
          }
       }
    }
@@ -180,7 +171,7 @@ static void resampler_sinc_process_avx_kaiser(void *re_, struct resampler_data *
    rarch_sinc_resampler_t *resamp = (rarch_sinc_resampler_t*)re_;
    unsigned phases                = 1 << (resamp->phase_bits + resamp->subphase_bits);
 
-   uint64_t ratio                 = (uint64_t)(4294967296.0 * phases / data->ratio);
+   uint32_t ratio                 = phases / data->ratio;
    const float *input             = data->data_in;
    float *output                  = data->data_out;
    size_t frames                  = data->input_frames;
@@ -251,7 +242,7 @@ static void resampler_sinc_process_avx_kaiser(void *re_, struct resampler_data *
 
                output += 2;
                out_frames++;
-               resampler_sinc_advance(resamp, ratio);
+               resamp->time += ratio;
             }
          }
       }
@@ -265,7 +256,7 @@ static void resampler_sinc_process_avx(void *re_, struct resampler_data *data)
    rarch_sinc_resampler_t *resamp = (rarch_sinc_resampler_t*)re_;
    unsigned phases                = 1 << (resamp->phase_bits + resamp->subphase_bits);
 
-   uint64_t ratio                 = (uint64_t)(4294967296.0 * phases / data->ratio);
+   uint32_t ratio                 = phases / data->ratio;
    const float *input             = data->data_in;
    float *output                  = data->data_out;
    size_t frames                  = data->input_frames;
@@ -331,7 +322,7 @@ static void resampler_sinc_process_avx(void *re_, struct resampler_data *data)
 
                output += 2;
                out_frames++;
-               resampler_sinc_advance(resamp, ratio);
+               resamp->time += ratio;
             }
          }
       }
@@ -347,7 +338,7 @@ static void resampler_sinc_process_sse_kaiser(void *re_, struct resampler_data *
    rarch_sinc_resampler_t *resamp = (rarch_sinc_resampler_t*)re_;
    unsigned phases                = 1 << (resamp->phase_bits + resamp->subphase_bits);
 
-   uint64_t ratio                 = (uint64_t)(4294967296.0 * phases / data->ratio);
+   uint32_t ratio                 = phases / data->ratio;
    const float *input             = data->data_in;
    float *output                  = data->data_out;
    size_t frames                  = data->input_frames;
@@ -428,7 +419,7 @@ static void resampler_sinc_process_sse_kaiser(void *re_, struct resampler_data *
 
                output += 2;
                out_frames++;
-               resampler_sinc_advance(resamp, ratio);
+               resamp->time += ratio;
             }
          }
       }
@@ -442,7 +433,7 @@ static void resampler_sinc_process_sse(void *re_, struct resampler_data *data)
    rarch_sinc_resampler_t *resamp = (rarch_sinc_resampler_t*)re_;
    unsigned phases                = 1 << (resamp->phase_bits + resamp->subphase_bits);
 
-   uint64_t ratio                 = (uint64_t)(4294967296.0 * phases / data->ratio);
+   uint32_t ratio                 = phases / data->ratio;
    const float *input             = data->data_in;
    float *output                  = data->data_out;
    size_t frames                  = data->input_frames;
@@ -518,7 +509,7 @@ static void resampler_sinc_process_sse(void *re_, struct resampler_data *data)
 
                output += 2;
                out_frames++;
-               resampler_sinc_advance(resamp, ratio);
+               resamp->time += ratio;
             }
          }
       }
@@ -533,7 +524,7 @@ static void resampler_sinc_process_c_kaiser(void *re_, struct resampler_data *da
    rarch_sinc_resampler_t *resamp = (rarch_sinc_resampler_t*)re_;
    unsigned phases                = 1 << (resamp->phase_bits + resamp->subphase_bits);
 
-   uint64_t ratio                 = (uint64_t)(4294967296.0 * phases / data->ratio);
+   uint32_t ratio                 = phases / data->ratio;
    const float *input             = data->data_in;
    float *output                  = data->data_out;
    size_t frames                  = data->input_frames;
@@ -587,7 +578,7 @@ static void resampler_sinc_process_c_kaiser(void *re_, struct resampler_data *da
 
                output                  += 2;
                out_frames++;
-               resampler_sinc_advance(resamp, ratio);
+               resamp->time            += ratio;
             }
          }
 
@@ -602,7 +593,7 @@ static void resampler_sinc_process_c(void *re_, struct resampler_data *data)
    rarch_sinc_resampler_t *resamp = (rarch_sinc_resampler_t*)re_;
    unsigned phases                = 1 << (resamp->phase_bits + resamp->subphase_bits);
 
-   uint64_t ratio                 = (uint64_t)(4294967296.0 * phases / data->ratio);
+   uint32_t ratio                 = phases / data->ratio;
    const float *input             = data->data_in;
    float *output                  = data->data_out;
    size_t frames                  = data->input_frames;
@@ -653,7 +644,7 @@ static void resampler_sinc_process_c(void *re_, struct resampler_data *data)
 
                output                  += 2;
                out_frames++;
-               resampler_sinc_advance(resamp, ratio);
+               resamp->time            += ratio;
             }
          }
 

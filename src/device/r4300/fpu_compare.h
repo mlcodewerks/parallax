@@ -1,5 +1,5 @@
 /* Included by pure_interp.c. Ares/VR4300 compare predicates and legacy NaNs. */
-void pure_interp_fpu_compare(struct r4300_core* r4300, uint32_t op)
+static M64P_FORCE_INLINE int fpu_compare_prepare(struct r4300_core* r4300, uint32_t op, uint64_t inputs[3])
 {
     const unsigned int fmt = RS_OF(op);
     const unsigned int fs = (r4300->cp0.regs[CP0_STATUS_REG] & CP0_STATUS_FR)
@@ -7,8 +7,8 @@ void pure_interp_fpu_compare(struct r4300_core* r4300, uint32_t op)
     const unsigned int ft = FT_OF(op);
     const unsigned int predicate = op & 15;
     uint64_t lhs, rhs, exponent, fraction, signaling;
-    int unordered, invalid, result;
-    if (check_cop1_unusable(r4300)) return;
+    int unordered, invalid;
+    if (check_cop1_unusable(r4300)) return 0;
     r4300->cp1.fcr31 &= ~UINT32_C(0x3f000);
     lhs = (uint64_t)r4300->cp1.regs[fs].dword;
     rhs = (uint64_t)r4300->cp1.regs[ft].dword;
@@ -35,11 +35,34 @@ void pure_interp_fpu_compare(struct r4300_core* r4300, uint32_t op)
             r4300->cp0.regs[CP0_CAUSE_REG] =
                 (r4300->cp0.regs[CP0_CAUSE_REG] & ~UINT32_C(0x3000007c)) | CP0_CAUSE_EXCCODE_FPE;
             exception_general(r4300);
-            return; /* Preserve the old condition on an enabled exception. */
+            return 0; /* Preserve the old condition on an enabled exception. */
         }
         r4300->cp1.fcr31 |= UINT32_C(0x40);
     }
-    if (unordered) result = predicate & 1;
+    inputs[0] = lhs; inputs[1] = rhs; inputs[2] = unordered;
+    return 1;
+}
+int pure_interp_fpu_compare_prepare(struct r4300_core* r, uint32_t op, uint64_t inputs[3])
+{
+    return fpu_compare_prepare(r, op, inputs);
+}
+static M64P_FORCE_INLINE void fpu_compare_finish(struct r4300_core* r, int result)
+{
+    r->cp1.fcr31 = (r->cp1.fcr31 & ~FCR31_CMP_BIT) | (result ? FCR31_CMP_BIT : 0);
+    r->interp_PC.addr += 4;
+}
+void pure_interp_fpu_compare_finish(struct r4300_core* r, int result)
+{
+    fpu_compare_finish(r, result);
+}
+void pure_interp_fpu_compare(struct r4300_core* r4300, uint32_t op)
+{
+    uint64_t inputs[3];
+    if (!fpu_compare_prepare(r4300, op, inputs)) return;
+    uint64_t lhs = inputs[0], rhs = inputs[1];
+    unsigned int fmt = RS_OF(op), predicate = op & 15;
+    int result;
+    if (inputs[2]) result = predicate & 1;
     else {
         /* IEEE encodings are monotonic within each sign. Compare integer bits
          * so fast-math and host DAZ cannot collapse subnormal operands. */
@@ -49,8 +72,7 @@ void pure_interp_fpu_compare(struct r4300_core* r4300, uint32_t op)
             (lhs & sign) ? lhs > rhs : lhs < rhs);
         result = ((predicate & 2) && equal) || ((predicate & 4) && less);
     }
-    r4300->cp1.fcr31 = (r4300->cp1.fcr31 & ~FCR31_CMP_BIT) | (result ? FCR31_CMP_BIT : 0);
-    ADD_TO_PC(1);
+    fpu_compare_finish(r4300, result);
 }
 
 #define FPU_COMPARE_PAIR(name) \

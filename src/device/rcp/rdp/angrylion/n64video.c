@@ -154,14 +154,14 @@ static uint32_t al_cap_buf[1 << 20];   /* up to 1M command words */
 static uint32_t al_cap_words;
 static uint32_t al_cap_vireg[16];
 static long al_cap_frame, al_cap_target = -2, al_cap_locked = -1, al_cap_capvi = -1;
+static char *al_cap_path;
 long al_cap_vi;   /* bumped once per VI by update_screen */
 
 static void al_capture_cmd(const uint32_t *words, uint32_t n)
 {
     uint32_t k;
-    if (!getenv("AL_CAPTURE")) return;
+    if (!al_cap_path) return;
     if (n == 0 || n > 64 || !words) return;
-    if (al_cap_target == -2) al_cap_target = getenv("AL_CAPTURE_FRAME") ? atol(getenv("AL_CAPTURE_FRAME")) : 0;
     if (al_cap_locked >= 0) return;                 /* already have a frame */
     if (al_cap_vi < al_cap_target) return;          /* not yet */
     if (al_cap_words == 0)                           /* first command of it */
@@ -177,7 +177,7 @@ static void al_capture_cmd(const uint32_t *words, uint32_t n)
 void al_capture_vi(void);
 static void al_capture_flush_if_ready(void)
 {
-    const char *env = getenv("AL_CAPTURE");
+    const char *env = al_cap_path;
     if (!env || al_cap_locked >= 0 || al_cap_words == 0) return;
     if (al_cap_vi <= al_cap_capvi) return;          /* frame not finished */
     {
@@ -558,6 +558,24 @@ void n64video_init(struct n64video_config* _config)
 {
     if (_config)
         config = *_config;
+
+    /* Diagnostic capture settings are fixed for this content session. A
+     * getenv scan on every RDP command otherwise costs time even when capture
+     * is disabled. Own the path so frontend environment updates cannot leave
+     * it pointing into a replaced CRT environment allocation. */
+    free(al_cap_path);
+    al_cap_path = NULL;
+    const char *capture_path = getenv("AL_CAPTURE");
+    if (capture_path) {
+        size_t length = strlen(capture_path) + 1;
+        al_cap_path = malloc(length);
+        if (al_cap_path) memcpy(al_cap_path, capture_path, length);
+    }
+    const char *capture_frame = getenv("AL_CAPTURE_FRAME");
+    al_cap_target = capture_frame ? atol(capture_frame) : 0;
+    al_cap_words = 0;
+    al_cap_frame = al_cap_vi = 0;
+    al_cap_locked = al_cap_capvi = -1;
 
     // initialize static lookup tables and RDP state, once is enough
     static bool static_init;
@@ -1094,7 +1112,7 @@ void n64video_process_list(void)
                     rdp_cmd_id = CMD_ID_NO_OP;
                 }
             }
-            al_capture_cmd(cmd_buf, rdp_cmd_len);
+            if (al_cap_path) al_capture_cmd(cmd_buf, rdp_cmd_len);
 #ifdef HAVE_RDP_DUMP
             if (!rdp_dump_in_command_list)
             {
@@ -1278,6 +1296,8 @@ void n64video_close(void)
 #endif
 
     al_key_report();
+    free(al_cap_path);
+    al_cap_path = NULL;
     vi_close();
     parallel_close();
     rdram_close();

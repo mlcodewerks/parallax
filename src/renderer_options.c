@@ -8,12 +8,17 @@ struct renderer_settings renderer_settings;
 #else
 #define RENDERERS "angrylion"
 #endif
+#ifdef HAVE_ARI64_X64
+#define CPU_CORES "cached|pure|dynarec"
+#else
+#define CPU_CORES "cached|pure"
+#endif
 /* Legacy options are supported by every libretro frontend; first value is default.
  * Settings are latched at content load, keeping renderer resources and RDRAM intact. */
 static const struct retro_variable options[] = {
     {"wtfn64_renderer", "Renderer (restart required); " RENDERERS},
     {"wtfn64_rsp_hle", "RSP HLE (restart required); disabled|enabled"},
-    {"wtfn64_cached_interpreter", "Cached CPU interpreter (restart required); enabled|disabled"},
+    {"wtfn64_cpu_core", "CPU core (restart required); " CPU_CORES},
     {"wtfn64_lle_graphics", "Send display lists to LLE RSP (restart required); disabled|enabled"},
     {"wtfn64_lle_audio", "Send audio lists to LLE RSP (restart required); disabled|enabled"},
     {"wtfn64_per_cycle_timing", "Per-cycle timing (restart required); enabled|disabled"},
@@ -29,6 +34,10 @@ static const struct retro_variable options[] = {
     {"wtfn64_crop_overscan", "Crop overscan (restart required); disabled|enabled"},
     {"wtfn64_angrylion_deinterlace", "Angrylion deinterlacing (restart required); weave|bob"},
     {"wtfn64_native_lod", "Native texture LOD (restart required); enabled|disabled"},
+    {"mupen64plus-pak1", "Player 1 controller pak; memory|none|rumble|transfer"},
+    {"mupen64plus-pak2", "Player 2 controller pak; none|memory|rumble|transfer"},
+    {"mupen64plus-pak3", "Player 3 controller pak; none|memory|rumble|transfer"},
+    {"mupen64plus-pak4", "Player 4 controller pak; none|memory|rumble|transfer"},
 #ifdef HAVE_PARALLEL_RDP
     {"wtfn64_parallel_downscale", "paraLLEl-RDP downsampling steps (restart required); 0|1|2|3"},
     {"wtfn64_native_tex_rect", "paraLLEl-RDP native texture rectangles (restart required); enabled|disabled"},
@@ -44,8 +53,9 @@ void renderer_register_options(retro_environment_t environment)
     static struct retro_core_option_definition legacy_definitions[64];
     static char descriptions[64][160], values[64][256];
     static struct retro_core_option_v2_category categories[] = {
-        {"emulation", "Emulation", "RSP task routing and accuracy controls. Changes require restarting content."},
+        {"emulation", "Emulation", "CPU core, RSP task routing and accuracy controls. Changes require restarting content."},
         {"video", "Video", "Renderer selection and shared presentation options."},
+        {"input", "Controllers", "Controller accessories."},
         {"angrylion", "Angrylion", "Software RDP rendering and synchronization."},
 #ifdef HAVE_PARALLEL_RDP
         {"parallel", "paraLLEl-RDP", "Vulkan RDP rendering."},
@@ -72,22 +82,34 @@ void renderer_register_options(retro_environment_t environment)
             d->category_key = "video";
             if (strstr(d->key, "angrylion")) d->category_key = "angrylion";
             else if (strstr(d->key, "parallel") || strstr(d->key, "ss_") || strstr(d->key, "native_tex_rect")) d->category_key = "parallel";
-            else if (strstr(d->key, "rsp_") || strstr(d->key, "lle_") || strstr(d->key, "per_cycle_timing") || strstr(d->key, "cached_interpreter")) d->category_key = "emulation";
+            else if (strstr(d->key, "rsp_") || strstr(d->key, "lle_") || strstr(d->key, "per_cycle_timing") || !strcmp(d->key, "wtfn64_cpu_core")) d->category_key = "emulation";
             if (!strcmp(d->key, "wtfn64_per_cycle_timing"))
                 d->info = "Enable CPU cache emulation, RSP cycle timing and RDP instruction timing together. Disabling trades timing accuracy for performance. Restart content to apply.";
-            if (!strcmp(d->key, "wtfn64_cached_interpreter"))
-                d->info = "Cache decoded CPU instructions for faster execution. Disabled selects the pure interpreter. CPU cache emulation is controlled by Per-cycle timing. Restart content to apply.";
+            if (!strcmp(d->key, "wtfn64_cpu_core"))
+                d->info = "Select the CPU execution core. All choices use the same instruction behavior and Per-cycle timing setting. Restart content to apply.";
             if (!strcmp(d->key, "wtfn64_rsp_hle"))
                 d->info = "Use HLE for supported RSP microcodes. Unsupported RSP tasks use LLE. Graphics/audio LLE overrides apply to their respective tasks. Restart content to apply.";
             if (!strcmp(d->key, "wtfn64_lle_graphics"))
                 d->info = "Force display lists through the LLE RSP instead of the HLE microcode emitters. Restart content to apply.";
             if (!strcmp(d->key, "wtfn64_lle_audio"))
                 d->info = "Force audio lists through the LLE RSP instead of HLE audio processing. Restart content to apply.";
+            if (strstr(d->key, "-pak")) {
+                d->category_key = "input";
+                d->info = "Choose the accessory attached to this controller. A Memory Pak allows games to save progress.";
+            }
             p = values[i];
             do {
                 next = strchr(p, '|');
                 if (next) *next++ = 0;
                 d->values[j++].value = p;
+                if (!strcmp(d->key, "wtfn64_cpu_core"))
+                    d->values[j - 1].label = !strcmp(p, "cached") ? "Cached interpreter" :
+                        !strcmp(p, "pure") ? "Pure interpreter" :
+                        "Dynarec";
+                if (strstr(d->key, "-pak"))
+                    d->values[j - 1].label = !strcmp(p, "memory") ? "Memory Pak" :
+                        !strcmp(p, "rumble") ? "Rumble Pak" :
+                        !strcmp(p, "transfer") ? "Transfer Pak" : "None";
                 p = next;
             } while (p && j < RETRO_NUM_CORE_OPTION_VALUES_MAX - 1);
             d->default_value = d->values[0].value;
@@ -111,6 +133,19 @@ static const char *value(retro_environment_t environment, const char *key, const
     struct retro_variable var = {key, NULL};
     return environment(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value ? var.value : fallback;
 }
+enum controller_pak_option controller_read_pak_option(retro_environment_t env, unsigned port)
+{
+    static const char *keys[] = {"mupen64plus-pak1", "mupen64plus-pak2",
+        "mupen64plus-pak3", "mupen64plus-pak4"};
+    if (port >= 4) return CONTROLLER_PAK_NONE;
+    enum controller_pak_option fallback = port == 0 ? CONTROLLER_PAK_MEMORY : CONTROLLER_PAK_NONE;
+    const char *v = value(env, keys[port], port == 0 ? "memory" : "none");
+    if (!strcmp(v, "memory")) return CONTROLLER_PAK_MEMORY;
+    if (!strcmp(v, "rumble")) return CONTROLLER_PAK_RUMBLE;
+    if (!strcmp(v, "transfer")) return CONTROLLER_PAK_TRANSFER;
+    if (!strcmp(v, "none")) return CONTROLLER_PAK_NONE;
+    return fallback;
+}
 static bool toggle(retro_environment_t env, const char *key, bool fallback)
 {
     const char *v = value(env, key, fallback ? "enabled" : "disabled");
@@ -130,7 +165,11 @@ void renderer_read_options(retro_environment_t env)
     s->lle_graphics = toggle(env, "wtfn64_lle_graphics", false);
     s->lle_audio = toggle(env, "wtfn64_lle_audio", false);
     s->per_cycle_timing = toggle(env, "wtfn64_per_cycle_timing", true);
-    s->cached_interpreter = toggle(env, "wtfn64_cached_interpreter", true);
+    v = value(env, "wtfn64_cpu_core", "cached");
+    s->cpu_core = !strcmp(v, "pure") ? CPU_CORE_PURE : CPU_CORE_CACHED;
+#ifdef HAVE_ARI64_X64
+    if (!strcmp(v, "dynarec")) s->cpu_core = CPU_CORE_DYNAREC;
+#endif
 #ifdef HAVE_PARALLEL_RDP
     if (strcmp(value(env, "wtfn64_renderer", "angrylion"), "parallel-rdp") == 0)
         s->renderer = RENDERER_PARALLEL;
