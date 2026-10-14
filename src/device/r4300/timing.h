@@ -69,7 +69,9 @@ static osal_force_inline int r4300_begin_instruction_cycles(struct r4300_core* r
      * exceeding it. Adding both clocks serially regresses Racer's intro.
      * Removing the reservation altogether regresses DK64's vine sequence.
      * This remains an instruction-boundary estimate, not stage scheduling. */
-    unsigned int issue = cache_timing != 0;
+    // The ROM-facing compatibility clock is independent of cache/pipeline
+    // detail. Dropping it in untimed mode breaks DK64's post-intro handoff.
+    unsigned int issue = cache_timing || r4300->compat_issue_clock;
     uint32_t status = r4300->cp0.regs[CP0_STATUS_REG];
     if ((status & CP0_STATUS_MODE_MASK) && !(status & (CP0_STATUS_EXL | CP0_STATUS_ERL))) {
         r4300->interp_PC.addr = pc;
@@ -77,14 +79,14 @@ static osal_force_inline int r4300_begin_instruction_cycles(struct r4300_core* r
         if (check_instruction_mode(r4300, op)) return 0;
         if (cache_timing) {
             unsigned int stalls = r4300_pipeline_cycles(r4300, op);
-            cp0_step_cycles(&r4300->cp0, r4300_pipeline_issue_cycles(cache_timing, stalls) - issue);
+            cp0_step_cycles(&r4300->cp0, r4300_pipeline_issue_cycles(issue, stalls) - issue);
         }
         else r4300_pipeline_reset(r4300);
         cp0_step_cycles(&r4300->cp0, cycles - 1);
     } else {
         if (cache_timing) {
             unsigned int stalls = r4300_pipeline_cycles(r4300, op);
-            cycles += r4300_pipeline_issue_cycles(cache_timing, stalls) - issue;
+            cycles += r4300_pipeline_issue_cycles(issue, stalls) - issue;
         }
         else r4300_pipeline_reset(r4300);
         cp0_step_cycles(&r4300->cp0, cycles + issue);

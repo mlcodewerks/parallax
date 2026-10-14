@@ -97,7 +97,7 @@ static void emit_itlb_native(uint32_t pc)
  * two-entry instruction micro-TLB hit/replacement state for later fetches. */
 static void emit_fetch_native(const struct ari64_x64_config* config, unsigned index, unsigned start, unsigned base, int check_line)
 {
-    unsigned cycles = base + (config->cache_timing != 0);
+    unsigned cycles = base + (config->cache_timing || config->compat_issue_clock);
     emit_addimm(R13, cycles, R13);
     if (!config->cache_timing) return;
     uint32_t pc = config->virtual_pc + index * 4;

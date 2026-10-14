@@ -11,6 +11,7 @@ FORCE_GLES3 ?= 0
 LLE ?= 0
 HAVE_PARALLEL_RSP ?= 1
 HAVE_PARALLEL_RDP ?= 1
+HAVE_GLRDP ?= 1
 
 SYSTEM_MINIZIP ?= 0
 SYSTEM_LIBPNG ?= 0
@@ -573,7 +574,7 @@ OBJECTS     += $(SOURCES_CXX:.cpp=.o) $(SOURCES_C:.c=.o) $(SOURCES_ASM:.S=.o) $(
 # Backend defines affect dispatch and private cache layouts. Rebuild between the
 # Ari64 emitter and interpreter-only configuration, or optimization settings.
 CPU_JIT_CONFIG := $(CORE_DIR)/.cpu-jit-config
-CPU_JIT_CONFIG_VALUE := $(WITH_DYNAREC):$(if $(ARI64_DIR),ari64-emitter,interpreter):debug=$(DEBUG):profile=$(ARI64_PROFILE):interp=$(INTERP_OPTIMIZE):branchless=$(INTERP_BRANCHLESS)
+CPU_JIT_CONFIG_VALUE := glrdp=$(HAVE_GLRDP):headless=$(HEADLESS_BENCHMARK):headless-cpu=$(HEADLESS_BENCH_CPU):$(WITH_DYNAREC):$(if $(ARI64_DIR),ari64-emitter,interpreter):debug=$(DEBUG):profile=$(ARI64_PROFILE):interp=$(INTERP_OPTIMIZE):branchless=$(INTERP_BRANCHLESS)
 ifneq ($(strip $(file <$(CPU_JIT_CONFIG))),$(CPU_JIT_CONFIG_VALUE))
 $(file >$(CPU_JIT_CONFIG),$(CPU_JIT_CONFIG_VALUE))
 endif

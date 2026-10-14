@@ -1,10 +1,11 @@
 #pragma once
 #include <stdbool.h>
 #include <libretro.h>
+#include "device/rcp/rdp/glrdp/rdp_accuracy.h"
 #ifdef __cplusplus
 extern "C" {
 #endif
-enum renderer_type { RENDERER_ANGRYLION, RENDERER_PARALLEL };
+enum renderer_type { RENDERER_ANGRYLION, RENDERER_PARALLEL, RENDERER_GLRDP };
 enum cpu_core_type { CPU_CORE_CACHED, CPU_CORE_PURE, CPU_CORE_DYNAREC };
 enum controller_pak_option { CONTROLLER_PAK_NONE, CONTROLLER_PAK_MEMORY,
     CONTROLLER_PAK_RUMBLE, CONTROLLER_PAK_TRANSFER };
@@ -13,6 +14,8 @@ struct renderer_settings {
     bool per_cycle_timing;
     enum cpu_core_type cpu_core;
     enum renderer_type renderer;
+    bool glrdp_gles2;
+    struct GLRDPConfig glrdp;
     unsigned threads, upscale, downscale;
     bool performance_only, vi_filter, dedither, blur, overscan, bob;
     bool native_lod, native_tex_rect, ss_readbacks, ss_dither;

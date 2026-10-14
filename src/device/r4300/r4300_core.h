@@ -134,6 +134,8 @@ struct r4300_core
     uint32_t icache_tags[512];
     uint32_t dcache_tags[512];
     unsigned int cache_timing;
+    /* ROM compatibility issue clock remains active without detailed timing. */
+    unsigned int compat_issue_clock;
     /* Instruction-boundary approximation of the VR4300 pipeline hazards.
      * The interpreter commits architecturally one instruction at a time, so
      * only state which survives to the following issue boundary is kept here.

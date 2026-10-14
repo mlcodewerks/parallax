@@ -74,7 +74,7 @@ static const uint32_t* interp_thread_poll_getter(const struct r4300_core* r,
 
 static int interp_thread_poll_advance(struct r4300_core* r, uint32_t pc)
 {
-    const unsigned cycles = 36;
+    const unsigned cycles = 36 * (1 + (r->compat_issue_clock != 0));
     uint32_t status = r->cp0.regs[CP0_STATUS_REG];
     if (r->cache_timing || r->delay_slot || r->skip_jump || breakloop ||
         r->cp0.cycle_count >= -(int)(cycles / 2) || r->cp0.last_addr != pc ||

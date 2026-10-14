@@ -35,7 +35,7 @@ static osal_force_inline int interp_direct_nop_delay(struct r4300_core* r)
     if (*(uint32_t*)((uint8_t*)r->mem->base + (pc & UINT32_C(0x1ffffffc))) != 0)
         return 0;
     /* The delay-slot interrupt remains deferred until the branch resolves. */
-    cp0_step_cycles(&r->cp0, 1);
+    cp0_step_cycles(&r->cp0, 1 + (r->compat_issue_clock != 0));
     r->interp_PC.addr = pc + 4;
     r->regs[0] = 0;
     return 1;

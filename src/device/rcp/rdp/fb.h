@@ -58,6 +58,7 @@ void protect_framebuffers(struct fb* fb);
 void unprotect_framebuffers(struct fb* fb);
 
 void pre_framebuffer_read(struct fb* fb, uint32_t address);
+void pre_framebuffer_read_range(struct fb* fb, uint32_t address, uint32_t length);
 void post_framebuffer_write(struct fb* fb, uint32_t address, uint32_t length);
 
 #endif

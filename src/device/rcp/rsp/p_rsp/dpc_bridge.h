@@ -11,6 +11,11 @@ extern "C" {
 void parallelRSPSetDpcCallbacks(void* opaque,
     void (*read)(void*, uint32_t, uint32_t*),
     void (*write)(void*, uint32_t, uint32_t, uint32_t));
+/* RSP-initiated DMA uses direct RAM pointers. Synchronize reads before the
+ * copy, and notify complete written rows after every word is committed. */
+void parallelRSPSetDmaCallbacks(void* opaque,
+    void (*read)(void*, uint32_t, uint32_t),
+    void (*write)(void*, uint32_t, uint32_t));
 unsigned int parallelRSPExecutedCycles(void);
 enum { PARALLEL_RSP_STATE_WORDS = 369 };
 void parallelRSPSaveState(uint32_t* words);

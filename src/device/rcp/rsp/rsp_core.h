@@ -146,6 +146,8 @@ void read_rsp_regs2(void* opaque, uint32_t address, uint32_t* value);
 void write_rsp_regs2(void* opaque, uint32_t address, uint32_t value, uint32_t mask);
 
 void do_SP_Task(struct rsp_core* sp);
+void rsp_dma_read_memory(void* opaque, uint32_t address, uint32_t length);
+void rsp_dma_write_memory(void* opaque, uint32_t address, uint32_t length);
 
 void rsp_interrupt_event(void* opaque);
 void rsp_end_of_dma_event(void* opaque);

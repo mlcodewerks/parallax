@@ -14,6 +14,8 @@
 
 int g_gs_vi_counter;
 unsigned int IgnoreTLBExceptions;
+struct vi_controller;
+void vi_schedule_vertical_interrupt(struct vi_controller* vi) { (void)vi; abort(); }
 struct pif;
 struct device;
 void main_check_inputs(void) { }

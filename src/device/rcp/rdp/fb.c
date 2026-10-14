@@ -63,20 +63,36 @@ void pre_framebuffer_read(struct fb* fb, uint32_t address)
     }
 }
 
+void pre_framebuffer_read_range(struct fb* fb, uint32_t address, uint32_t length)
+{
+    if (!length || !fb->infos[0].addr) return;
+    const uint64_t limit = (uint64_t)FB_DIRTY_PAGES_COUNT << 12;
+    const uint64_t read_end = (uint64_t)address + length;
+    for (size_t i = 0; i < FB_INFOS_COUNT; ++i) {
+        if (!fb->infos[i].addr) continue;
+        const uint64_t begin = fb->infos[i].addr;
+        const uint64_t end = begin + fb_buffer_size(&fb->infos[i]);
+        uint64_t at = address > begin ? address : begin;
+        uint64_t last = read_end < end ? read_end : end;
+        if (last > limit) last = limit;
+        // A transfer can begin before an image or cross several dirty pages.
+        // Synchronize each intersecting page before copying any DMA words.
+        while (at < last) {
+            pre_framebuffer_read(fb, (uint32_t)at);
+            at = (at & ~UINT64_C(4095)) + 4096;
+        }
+    }
+}
+
 void post_framebuffer_write(struct fb* fb, uint32_t address, uint32_t length)
 {
     if (!fb->infos[0].addr) {
         return;
     }
 
-    size_t i, j;
-    unsigned char size;
-    if (length % 4 == 0)
-        size = 4;
-    else if (length % 2 == 0)
-        size = 2;
-    else
-        size = 1;
+    size_t i;
+    if (!length) return;
+    const uint64_t write_end = (uint64_t)address + length;
 
     for (i = 0; i < FB_INFOS_COUNT; ++i) {
 
@@ -85,14 +101,16 @@ void post_framebuffer_write(struct fb* fb, uint32_t address, uint32_t length)
             continue;
         }
 
-        /* if address in within a fb notify GFX plugin */
-        uint32_t begin = fb->infos[i].addr;
-        uint32_t end   = fb->infos[i].addr + fb_buffer_size(&fb->infos[i]) - 1;
-
-        for (j = 0; j < length; j += size) {
-            if ((address + j >= begin) && (address + j <= end)) {
-                gfx.fBWrite(address + j, size);
-            }
+        const uint64_t begin = fb->infos[i].addr;
+        const uint64_t end = begin + fb_buffer_size(&fb->infos[i]);
+        if ((uint64_t)address < end && write_end > begin) {
+            /* DMA has already committed the entire range. A renderer may
+             * flush pending GPU depth inside this callback, so splitting it
+             * into word notifications would overwrite later same-value DMA
+             * bytes before their notifications arrive. Notify the complete
+             * write once, also when it crosses an image boundary. */
+            gfx.fBWrite(address, length);
+            return;
         }
     }
 }
@@ -127,48 +145,51 @@ void write_rdram_fb(void* opaque, uint32_t address, uint32_t value, uint32_t mas
     struct fb* fb = (struct fb*)opaque;
     write_rdram_dram(fb->rdram, address, value, mask);
 
+    /* Plugin notifications use N64 addresses, like PI/RSP DMA callbacks.
+     * The host byte swap is already handled by write_rdram_dram; applying
+     * S8/S16 here marks a different byte as CPU-written in GPU framebuffers. */
     uint32_t addr = address & ~0x3;
     size_t size = 4;
 
     switch(mask)
     {
     case 0x000000ff:
-        addr += (3 ^ S8);
+        addr += 3;
         size = 1;
         break;
 
     case 0x0000ff00:
-        addr += (2 ^ S8);
+        addr += 2;
         size = 1;
         break;
 
     case 0x00ff0000:
-        addr += (1 ^ S8);
+        addr += 1;
         size = 1;
         break;
 
     case 0xff000000:
-        addr += (0 ^ S8);
+        addr += 0;
         size = 1;
         break;
 
     case 0x0000ffff:
-        addr += (2 ^ S16);
+        addr += 2;
         size = 2;
         break;
 
     case 0xffff0000:
-        addr += (0 ^ S16);
+        addr += 0;
         size = 2;
         break;
 
     case 0xffffff00:
-        addr += (0 ^ Sh16);
+        addr += 0;
         size = 3;
         break;
 
     case 0x00ffffff:
-        addr += (1 ^ Sh16);
+        addr += 1;
         size = 3;
         break;
 

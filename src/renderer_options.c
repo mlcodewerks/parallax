@@ -3,10 +3,22 @@
 #include <string.h>
 
 struct renderer_settings renderer_settings;
-#ifdef HAVE_PARALLEL_RDP
-#define RENDERERS "angrylion|parallel-rdp"
+#ifdef GLRDP_DEFAULT_GLES2
+#define GLRDP_CONTEXT_DEFAULT "gles2"
+#define GLRDP_CONTEXT_VALUES "gles2|gl33"
 #else
-#define RENDERERS "angrylion"
+#define GLRDP_CONTEXT_DEFAULT "gl33"
+#define GLRDP_CONTEXT_VALUES "gl33|gles2"
+#endif
+#ifdef HAVE_PARALLEL_RDP
+#define RENDERERS_BASE "angrylion|parallel-rdp"
+#else
+#define RENDERERS_BASE "angrylion"
+#endif
+#ifdef HAVE_GLRDP
+#define RENDERERS RENDERERS_BASE "|glrdp"
+#else
+#define RENDERERS RENDERERS_BASE
 #endif
 #ifdef HAVE_ARI64_X64
 #define CPU_CORES "cached|pure|dynarec"
@@ -17,6 +29,17 @@ struct renderer_settings renderer_settings;
  * Settings are latched at content load, keeping renderer resources and RDRAM intact. */
 static const struct retro_variable options[] = {
     {"wtfn64_renderer", "Renderer (restart required); " RENDERERS},
+#ifdef HAVE_GLRDP
+    {"wtfn64_glrdp_context", "GLRDP context (restart required); " GLRDP_CONTEXT_VALUES},
+    {"wtfn64_glrdp_upscale", "GLRDP internal upscaling (restart required); 1|2|4|8"},
+    {"wtfn64_glrdp_coverage", "GLRDP coverage emulation (restart required); off|reduced|full"},
+    {"wtfn64_glrdp_vi_aa", "GLRDP VI antialiasing (restart required); off|reduced|full"},
+    {"wtfn64_glrdp_vi_restore", "GLRDP VI dedithering (restart required); disabled|enabled"},
+    {"wtfn64_glrdp_vi_divot", "GLRDP VI divot filter (restart required); disabled|enabled"},
+    {"wtfn64_glrdp_vi_resample", "GLRDP VI resampling (restart required); enabled|disabled"},
+    {"wtfn64_glrdp_vi_gamma", "GLRDP VI gamma correction (restart required); enabled|disabled"},
+    {"wtfn64_glrdp_vi_gamma_dither", "GLRDP VI gamma dithering (restart required); enabled|disabled"},
+#endif
     {"wtfn64_rsp_hle", "RSP HLE (restart required); disabled|enabled"},
     {"wtfn64_cpu_core", "CPU core (restart required); " CPU_CORES},
     {"wtfn64_lle_graphics", "Send display lists to LLE RSP (restart required); disabled|enabled"},
@@ -56,6 +79,9 @@ void renderer_register_options(retro_environment_t environment)
         {"emulation", "Emulation", "CPU core, RSP task routing and accuracy controls. Changes require restarting content."},
         {"video", "Video", "Renderer selection and shared presentation options."},
         {"input", "Controllers", "Controller accessories."},
+#ifdef HAVE_GLRDP
+        {"glrdp", "GLRDP", "Native GPU RDP rendering with OpenGL 3.3 or OpenGL ES 2.0."},
+#endif
         {"angrylion", "Angrylion", "Software RDP rendering and synchronization."},
 #ifdef HAVE_PARALLEL_RDP
         {"parallel", "paraLLEl-RDP", "Vulkan RDP rendering."},
@@ -81,8 +107,25 @@ void renderer_register_options(retro_environment_t environment)
             d->info = "Changes take effect when content is restarted.";
             d->category_key = "video";
             if (strstr(d->key, "angrylion")) d->category_key = "angrylion";
+            else if (strstr(d->key, "glrdp")) d->category_key = "glrdp";
             else if (strstr(d->key, "parallel") || strstr(d->key, "ss_") || strstr(d->key, "native_tex_rect")) d->category_key = "parallel";
             else if (strstr(d->key, "rsp_") || strstr(d->key, "lle_") || strstr(d->key, "per_cycle_timing") || !strcmp(d->key, "wtfn64_cpu_core")) d->category_key = "emulation";
+            if (!strcmp(d->key, "wtfn64_glrdp_context"))
+                d->info = "Select OpenGL 3.3 or OpenGL ES 2.0 for native GPU RDP rendering. Restart content to apply.";
+            if (!strcmp(d->key, "wtfn64_glrdp_coverage"))
+                d->info = "Off treats surviving pixels as fully covered while retaining shared-edge ownership, narrow triangles, alpha and depth tests. Reduced estimates coverage from four native samples. Full counts all eight native samples. Independent of VI filters. Restart content to apply.";
+            if (!strcmp(d->key, "wtfn64_glrdp_vi_aa"))
+                d->info = "Controls the game's requested VI edge reconstruction independently of RDP coverage. Off skips reconstruction; Reduced uses four neighbours; Full uses all six. Does not change resampling or other VI filters. Restart content to apply.";
+            if (!strcmp(d->key, "wtfn64_glrdp_vi_restore"))
+                d->info = "Allow the game's eight-neighbour VI dither restoration filter. Disable to reduce scanout cost and retain the framebuffer's dither pattern. Independent of VI antialiasing. Restart content to apply.";
+            if (!strcmp(d->key, "wtfn64_glrdp_vi_divot"))
+                d->info = "Allow the game's horizontal three-pixel median filter at partially covered edges. Independent of other VI filters. Restart content to apply.";
+            if (!strcmp(d->key, "wtfn64_glrdp_vi_resample"))
+                d->info = "Allow the game's native VI bilinear resampling. Disabled uses point sampling without disabling edge reconstruction, dedithering or divot filtering. Restart content to apply.";
+            if (!strcmp(d->key, "wtfn64_glrdp_vi_gamma"))
+                d->info = "Allow gamma correction when requested by the game. Independent of gamma dithering. Restart content to apply.";
+            if (!strcmp(d->key, "wtfn64_glrdp_vi_gamma_dither"))
+                d->info = "Allow gamma dithering when requested by the game. Independent of gamma correction. Restart content to apply.";
             if (!strcmp(d->key, "wtfn64_per_cycle_timing"))
                 d->info = "Enable CPU cache emulation, RSP cycle timing and RDP instruction timing together. Disabling trades timing accuracy for performance. Restart content to apply.";
             if (!strcmp(d->key, "wtfn64_cpu_core"))
@@ -112,6 +155,16 @@ void renderer_register_options(retro_environment_t environment)
                         !strcmp(p, "transfer") ? "Transfer Pak" : "None";
                 p = next;
             } while (p && j < RETRO_NUM_CORE_OPTION_VALUES_MAX - 1);
+            if (!strcmp(d->key, "wtfn64_glrdp_coverage")) {
+                d->values[0].label = "Off (full coverage per surviving pixel)";
+                d->values[1].label = "Reduced (4 samples)";
+                d->values[2].label = "Full (8 samples)";
+            }
+            if (!strcmp(d->key, "wtfn64_glrdp_vi_aa")) {
+                d->values[0].label = "Off";
+                d->values[1].label = "Reduced (4 neighbours)";
+                d->values[2].label = "Full (6 neighbours)";
+            }
             d->default_value = d->values[0].value;
             legacy_definitions[i].key = d->key;
             legacy_definitions[i].desc = d->desc;
@@ -174,6 +227,23 @@ void renderer_read_options(retro_environment_t env)
     if (strcmp(value(env, "wtfn64_renderer", "angrylion"), "parallel-rdp") == 0)
         s->renderer = RENDERER_PARALLEL;
 #endif
+#ifdef HAVE_GLRDP
+    if (!strcmp(value(env, "wtfn64_renderer", "angrylion"), "glrdp"))
+        s->renderer = RENDERER_GLRDP;
+    s->glrdp_gles2 = !strcmp(value(env, "wtfn64_glrdp_context", GLRDP_CONTEXT_DEFAULT), "gles2");
+    s->glrdp = glrdp_default_config();
+    v = value(env, "wtfn64_glrdp_coverage", "off");
+    s->glrdp.coverage = !strcmp(v, "off") ? GLRDP_COVERAGE_OFF :
+        !strcmp(v, "reduced") ? GLRDP_COVERAGE_REDUCED : GLRDP_COVERAGE_FULL;
+    v = value(env, "wtfn64_glrdp_vi_aa", "off");
+    s->glrdp.vi_aa = !strcmp(v, "off") ? GLRDP_VI_AA_OFF :
+        !strcmp(v, "reduced") ? GLRDP_VI_AA_REDUCED : GLRDP_VI_AA_FULL;
+    s->glrdp.vi_restore = toggle(env, "wtfn64_glrdp_vi_restore", false);
+    s->glrdp.vi_divot = toggle(env, "wtfn64_glrdp_vi_divot", false);
+    s->glrdp.vi_resample = toggle(env, "wtfn64_glrdp_vi_resample", true);
+    s->glrdp.vi_gamma = toggle(env, "wtfn64_glrdp_vi_gamma", true);
+    s->glrdp.vi_gamma_dither = toggle(env, "wtfn64_glrdp_vi_gamma_dither", true);
+#endif
     v = value(env, "wtfn64_angrylion_threads", "6");
     s->threads = strcmp(v, "auto") == 0 ? 0 : (unsigned)atoi(v);
     if (strcmp(v, "auto") != 0 && (s->threads < 2 || s->threads > 10 || s->threads % 2))
@@ -181,6 +251,8 @@ void renderer_read_options(retro_environment_t env)
     s->performance_only = toggle(env, "wtfn64_performance_cores", true);
     s->upscale = s->renderer == RENDERER_ANGRYLION ?
         scale(env, "wtfn64_angrylion_upscale", 4) : scale(env, "wtfn64_parallel_upscale", 8);
+    if (s->renderer == RENDERER_GLRDP)
+        s->upscale = scale(env, "wtfn64_glrdp_upscale", 8);
     s->vi_filter = toggle(env, "wtfn64_vi_filter", true);
     s->dedither = toggle(env, "wtfn64_vi_dedither", true);
     s->blur = toggle(env, "wtfn64_vi_blur", true);

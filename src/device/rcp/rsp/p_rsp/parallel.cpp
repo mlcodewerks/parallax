@@ -10,6 +10,9 @@
 #include "rsp_1.1.h"
 #ifdef __LIBRETRO__
 #include "renderer_options.h"
+extern "C" {
+#include "api/callbacks.h"
+}
 #endif
 
 #define RSP_PARALLEL_VERSION 0x0101
@@ -206,6 +209,8 @@ extern "C"
 		RSP::cpu.set_rdram(reinterpret_cast<uint32_t *>(Rsp_Info.RDRAM));
 #if defined(__LIBRETRO__) && !defined(DEBUG_JIT)
         RSP::cpu.set_cycle_timing(renderer_settings.per_cycle_timing);
+        DebugMessage(M64MSG_INFO,"RSP backend: JIT LLE; per-cycle timing %s",
+                     renderer_settings.per_cycle_timing ? "on" : "off");
 #endif
 	}
 }

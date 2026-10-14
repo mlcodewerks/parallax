@@ -11,7 +11,7 @@
 Personal N64 emulator code playset for anything with:
 
 * **x86 CPUs w/SSE4.2 level hardware**.
-* **Vulkan 1.1 + OGL 4.6**.
+* **Vulkan 1.1/GL3.3**.
 * **Win7 and above/modern Linux**
 * **Modern GCC/G++ with C++17 and up support**
 

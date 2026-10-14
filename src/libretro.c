@@ -29,6 +29,9 @@
 #include "mupen64plus-next_common.h"
 #include "device/rcp/rdp/angrylion/n64video.h"
 #include "renderer_options.h"
+#ifdef HAVE_GLRDP
+#include "device/rcp/rdp/glrdp/libretro_glrdp.h"
+#endif
 #include "device/rcp/rsp/optional_rsp.h"
 #include "device/rcp/rdp/performance_cores.h"
 #ifdef HAVE_PARALLEL_RDP
@@ -471,6 +474,27 @@ static bool request_vulkan_context(void)
 }
 #endif
 
+#ifdef HAVE_GLRDP
+static struct retro_hw_render_callback gl_hw;
+static void gl_context_reset(void)
+{
+    glrdp_context_reset(&gl_hw, renderer_settings.glrdp_gles2);
+}
+static void gl_context_destroy(void) { glrdp_context_destroy(); }
+static bool request_gl_context(void)
+{
+    memset(&gl_hw, 0, sizeof(gl_hw));
+    gl_hw.context_type = renderer_settings.glrdp_gles2 ? RETRO_HW_CONTEXT_OPENGLES2 : RETRO_HW_CONTEXT_OPENGL_CORE;
+    gl_hw.version_major = renderer_settings.glrdp_gles2 ? 2 : 3;
+    gl_hw.version_minor = renderer_settings.glrdp_gles2 ? 0 : 3;
+    gl_hw.context_reset = gl_context_reset;
+    gl_hw.context_destroy = gl_context_destroy;
+    gl_hw.bottom_left_origin = true;
+    gl_hw.cache_context = false;
+    return environ_cb(RETRO_ENVIRONMENT_SET_HW_RENDER, &gl_hw);
+}
+#endif
+
 void retro_init(void)
 {
     char *sys_pathname;
@@ -555,10 +579,10 @@ bool retro_load_game(const struct retro_game_info *game)
     char *gamePath;
     char *newPath;
     renderer_read_options(environ_cb);
-    current_rdp_type = renderer_settings.renderer == RENDERER_ANGRYLION ? RDP_PLUGIN_ANGRYLION : RDP_PLUGIN_PARALLEL;
+    current_rdp_type = renderer_settings.renderer == RENDERER_ANGRYLION ? RDP_PLUGIN_ANGRYLION : renderer_settings.renderer == RENDERER_GLRDP ? RDP_PLUGIN_GLRDP : RDP_PLUGIN_PARALLEL;
     if (log_cb)
         log_cb(RETRO_LOG_INFO, "Renderer: %s, upscale %ux, performance cores %s.\n",
-                renderer_settings.renderer == RENDERER_ANGRYLION ? "Angrylion" : "paraLLEl-RDP",
+                renderer_settings.renderer == RENDERER_ANGRYLION ? "Angrylion" : renderer_settings.renderer == RENDERER_GLRDP ? "GLRDP" : "paraLLEl-RDP",
                 renderer_settings.upscale, renderer_settings.performance_only ? "only" : "unrestricted");
     performance_cores_init();
     performance_cores_set_enabled(renderer_settings.performance_only);
@@ -566,6 +590,13 @@ bool retro_load_game(const struct retro_game_info *game)
     if (renderer_settings.renderer == RENDERER_PARALLEL && !request_vulkan_context())
     {
         if (log_cb) log_cb(RETRO_LOG_ERROR, "paraLLEl-RDP requires a Vulkan frontend; content load rejected.\n");
+        return false;
+    }
+#endif
+#ifdef HAVE_GLRDP
+    if (renderer_settings.renderer == RENDERER_GLRDP && !request_gl_context())
+    {
+        if (log_cb) log_cb(RETRO_LOG_ERROR, "GLRDP requires the selected GL3.3 / GLES2 frontend context; content load rejected.\n");
         return false;
     }
 #endif
@@ -713,7 +744,13 @@ void retro_run(void)
     struct performance_affinity emulation_affinity;
     performance_emulation_enter(&emulation_affinity);
     sync_begin();
+#ifdef HAVE_GLRDP
+    if (renderer_settings.renderer == RENDERER_GLRDP) glrdp_begin_frame();
+#endif
     EmuThreadFunction();
+#ifdef HAVE_GLRDP
+    if (renderer_settings.renderer == RENDERER_GLRDP) glrdp_end_frame();
+#endif
     ai_flush_samples(&g_dev.ai);
     audio_end_frame_libretro(1.0 / vi_expected_refresh_rate_from_tv_standard(ROM_PARAMS.systemtype));
     sync_end();
@@ -724,6 +761,11 @@ void retro_run(void)
         video_cb(libretro_swap_buffer ? RETRO_HW_FRAME_BUFFER_VALID : NULL,
                 vk_frame_width() ? vk_frame_width() : 640,
                 vk_frame_height() ? vk_frame_height() : 480, 0);
+    else
+#endif
+#ifdef HAVE_GLRDP
+    if (renderer_settings.renderer == RENDERER_GLRDP)
+        video_cb(libretro_swap_buffer ? RETRO_HW_FRAME_BUFFER_VALID : NULL, 640, 480, 0);
     else
 #endif
     {
@@ -905,6 +947,9 @@ void angrylionProcessRDPList(void)
 #ifdef HAVE_PARALLEL_RDP
     if (renderer_settings.renderer == RENDERER_PARALLEL) { vk_process_commands(); return; }
 #endif
+#ifdef HAVE_GLRDP
+    if (renderer_settings.renderer == RENDERER_GLRDP) { glrdp_process_commands(); return; }
+#endif
     n64video_process_list();
 }
 
@@ -914,6 +959,12 @@ void angrylionRomClosed(void)
     renderer_open = false;
 #ifdef HAVE_PARALLEL_RDP
     if (renderer_settings.renderer == RENDERER_PARALLEL) { vk_destroy(); return; }
+#endif
+#ifdef HAVE_GLRDP
+    if (renderer_settings.renderer == RENDERER_GLRDP) {
+        glrdp_close();
+        return;
+    }
 #endif
     n64video_close();
 }
@@ -927,6 +978,13 @@ int angrylionRomOpen(void)
         if (vk_init()) return 1;
         if (log_cb) log_cb(RETRO_LOG_ERROR, "paraLLEl-RDP: Vulkan renderer initialization failed.\n");
         return 0;
+    }
+#endif
+#ifdef HAVE_GLRDP
+    if (renderer_settings.renderer == RENDERER_GLRDP) {
+        if (!glrdp_open()) return 0;
+        renderer_open = true;
+        return 1;
     }
 #endif
     struct n64video_config config;
@@ -964,6 +1022,9 @@ void angrylionUpdateScreen(void)
 #ifdef HAVE_PARALLEL_RDP
     if (renderer_settings.renderer == RENDERER_PARALLEL) { vk_rasterize(); return; }
 #endif
+#ifdef HAVE_GLRDP
+    if (renderer_settings.renderer == RENDERER_GLRDP) { glrdp_present(); return; }
+#endif
     n64video_update_screen();
 }
 
@@ -976,11 +1037,24 @@ void angrylionViStatusChanged(void) {}
 
 void angrylionViWidthChanged(void) {}
 
-void angrylionFBWrite(unsigned int addr, unsigned int size) {}
+void angrylionFBWrite(unsigned int addr, unsigned int size) {
+#ifdef HAVE_GLRDP
+    if (renderer_settings.renderer == RENDERER_GLRDP) glrdp_fb_write(addr, size);
+#endif
+}
 
-void angrylionFBRead(unsigned int addr) {}
+void angrylionFBRead(unsigned int addr) {
+#ifdef HAVE_GLRDP
+    if (renderer_settings.renderer == RENDERER_GLRDP) glrdp_fb_read(addr);
+#endif
+}
 
-void angrylionFBGetFrameBufferInfo(void *pinfo) {}
+void angrylionFBGetFrameBufferInfo(void *pinfo) {
+    memset(pinfo, 0, 6 * sizeof(FrameBufferInfo));
+#ifdef HAVE_GLRDP
+    if (renderer_settings.renderer == RENDERER_GLRDP) glrdp_fb_info(pinfo);
+#endif
+}
 
 m64p_error angrylionPluginGetVersion(m64p_plugin_type *PluginType, int *PluginVersion, int *APIVersion, const char **PluginNamePtr, int *Capabilities)
 {

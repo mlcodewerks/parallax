@@ -1435,10 +1435,10 @@ static CI_FORCE_INLINE void ci_execute_block(struct r4300_core* r4300, unsigned 
                 const uint8_t kind = block->instructions[i].meta >> CI_META_FAST_SHIFT;
                 unsigned int access_cycles = 0, pipeline_cycles = 0;
                 if (!cache_timing && kind == CI_FAST_LUI_PAIR &&
-                    deadline + ((elapsed + 2 + phase) >> 1) < 0) {
+                    deadline + ((elapsed + 2 * (1 + (r4300->compat_issue_clock != 0)) + phase) >> 1) < 0) {
                     r4300->regs[(fast_instruction >> 16) & 31] =
                         interp_lui_pair_value(fast_instruction, block->instructions[i + 1].op);
-                    elapsed += 2;
+                    elapsed += 2 * (1 + (r4300->compat_issue_clock != 0));
                     local_pc += 8;
                     i += 2;
                     if (i == block->count) break;
@@ -1449,7 +1449,7 @@ static CI_FORCE_INLINE void ci_execute_block(struct r4300_core* r4300, unsigned 
                     pipeline_cycles = ci_integer_pipeline_cycles(r4300, fast_instruction);
                 /* Interlocks overlap the reserved compatibility issue clock. */
                 elapsed += block->instructions[i].cycles + access_cycles +
-                    r4300_pipeline_issue_cycles(cache_timing, pipeline_cycles);
+                    r4300_pipeline_issue_cycles(cache_timing || r4300->compat_issue_clock, pipeline_cycles);
                 if (cache_timing) elapsed += r4300_fetch_cycles(r4300, local_pc);
                 if (kind != CI_FAST_NONE && !ci_execute_hot_fast_op(r4300, kind, fast_instruction))
                     ci_execute_fast_op(r4300, kind, fast_instruction);
@@ -1711,6 +1711,7 @@ static void ci_execute_jit(struct r4300_core* r, int one)
         struct ari64_x64_config config = {block->virtual_pc, block->physical_page, r->cache_timing, one ? NULL : ci_jit_link,
             block->delay_op, !one && block->has_delay, block->idle_end, &state->jit_commits, &state->jit_fast_commits,
             ci_jit_fpu_prepare, ci_jit_fpu_finish, one ? NULL : &block->native_chain_entry};
+        config.compat_issue_clock = r->compat_issue_clock;
         config.links = one ? NULL : block->native_links;
         config.previous_block = &state->previous_block; config.epoch = &state->epoch;
         config.entries = &state->jit_entries; config.linked_entries = &state->jit_links; config.direct_links = &state->jit_direct_links;

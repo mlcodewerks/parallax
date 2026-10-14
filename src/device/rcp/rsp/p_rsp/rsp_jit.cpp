@@ -474,12 +474,23 @@ Func CPU::get_jit_block(uint32_t pc)
 	return block;
 }
 
+#if defined(_WIN32) && defined(__x86_64__) && (defined(__GNUC__) || defined(__clang__))
+__attribute__((noinline))
+#endif
 int CPU::enter(uint32_t pc)
 {
 	// Top level enter.
 	state.pc = pc;
 	static_assert(offsetof(CPU, state) == 0, "CPU state must lie on first byte.");
 	int ret = thunks.enter_frame(this);
+#if defined(_WIN32) && defined(__x86_64__) && (defined(__GNUC__) || defined(__clang__))
+	// Lightning's double-register saves preserve only the low 64 bits of
+	// XMM6..15. Win64 callers own all 128 bits. Let the host compiler save
+	// those registers around this entry, including their upper halves.
+	// Keep this after the call so it cannot become a tail call.
+	__asm__ volatile("" ::: "xmm6", "xmm7", "xmm8", "xmm9", "xmm10",
+	                 "xmm11", "xmm12", "xmm13", "xmm14", "xmm15");
+#endif
 	return ret;
 }
 
@@ -899,6 +910,10 @@ void CPU::jit_instruction(jit_state_t *_jit, uint32_t pc, uint32_t instr,
 	{
 		// VU instruction. COP2, and high bit of opcode is set.
 		uint32_t op = instr & 63;
+		// VNOP has no vector/accumulator effects. Timing was already decoded
+		// above; avoid a helper call and caller-save spills in either mode.
+		if (op == 0x37)
+			return;
 		uint32_t vd = (instr >> 6) & 31;
 		uint32_t vs = (instr >> 11) & 31;
 		uint32_t vt = (instr >> 16) & 31;
@@ -1863,12 +1878,12 @@ Func CPU::jit_region(uint64_t hash, unsigned pc_word, unsigned instruction_count
 		timing_cost[i] = timing.issue(op0, pair ? &op1 : nullptr);
 		if (pair) timing_cost[++i] = 0;
 	}
-	// Arithmetic and COP2 helpers cannot observe the clock or exit the JIT.
+	// Arithmetic, COP2 and DMEM helpers cannot observe the clock or exit the JIT.
 	// Coalesce their counter updates, retaining exact costs at every externally
 	// visible boundary. The first instruction may resolve a latent delay slot;
 	// entries, branches and their delay slots must never carry a deferred cost.
-	// Without detailed timing, scalar/vector DMEM helpers also share updates:
-	// they cannot inspect clocks or return to the scheduler. COP0 still flushes.
+	// DMEM is local memory even with detailed timing. Its decoded pipeline cost
+	// can share updates with arithmetic; COP0/DMA and scheduler exits still flush.
 #ifndef TRACE
 	unsigned pending_cycles = 0;
 	bool previous_branch = false;
@@ -1878,7 +1893,7 @@ Func CPU::jit_region(uint64_t hash, unsigned pc_word, unsigned instruction_count
 		pending_cycles += timing_cost[i];
 		bool flush = i == 0 || i + 1 == instruction_count || block_entry[i + 1] ||
 		             previous_branch || op.branch() || op.mayHalt() || op.endBlock() ||
-		             (cycle_timing && op.usesDmem()) || (instr >> 26) == 0x10;
+		             (instr >> 26) == 0x10;
 		timing_cost[i] = flush ? pending_cycles : 0;
 		if (flush) pending_cycles = 0;
 		previous_branch = op.branch();

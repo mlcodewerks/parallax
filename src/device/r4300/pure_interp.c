@@ -2060,7 +2060,8 @@ next_opcode: ;
             r4300_pipeline_reset(r4300);
             pipeline_cleared = 1;
         }
-        cp0_step_cycles(&r4300->cp0, (op >> 26) == 17 ? 1 : r4300_base_cycles(op, 0));
+        cp0_step_cycles(&r4300->cp0, ((op >> 26) == 17 ? 1 : r4300_base_cycles(op, 0)) +
+                        (r4300->compat_issue_clock != 0));
     } else if (!r4300_begin_instruction(r4300, op, pc)) goto instruction_done;
     if (M64P_UNLIKELY(op == 0))
     {
@@ -2365,10 +2366,10 @@ next_opcode: ;
     M64P_MAJOR_CASE(15) /* Major opcode 15: LUI */
         if (continuous && sequential_op && !r4300->cache_timing &&
             !r4300->delay_slot &&
-            r4300->cp0.cycle_count + ((1 + r4300->cp0.count_phase) >> 1) < 0 &&
+            r4300->cp0.cycle_count + ((1 + (r4300->compat_issue_clock != 0) + r4300->cp0.count_phase) >> 1) < 0 &&
             interp_lui_pair(op, *sequential_op)) {
             r4300->regs[(op >> 16) & 31] = interp_lui_pair_value(op, *sequential_op);
-            cp0_step_cycles(&r4300->cp0, 1);
+            cp0_step_cycles(&r4300->cp0, 1 + (r4300->compat_issue_clock != 0));
             r4300->interp_PC.addr = pc + 8;
             if (--sequential_left) { sequential_op++; sequential_pc = pc + 8; }
             else sequential_op = NULL;

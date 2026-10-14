@@ -1,19 +1,67 @@
 #define _GNU_SOURCE
+#include <stdio.h>
 
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#include <direct.h>
+#define RTLD_NOW 0
+#define RTLD_LOCAL 0
+#define mkdir(path, mode) _mkdir(path)
+static void* dlopen(const char* path, int flags) { (void)flags; return (void*)LoadLibraryA(path); }
+static void* dlsym(void* core, const char* name) { return (void*)GetProcAddress((HMODULE)core, name); }
+static void dlclose(void* core) { FreeLibrary((HMODULE)core); }
+static const char* dlerror(void)
+{
+    static char message[64];
+    snprintf(message, sizeof(message), "Windows loader error %lu", (unsigned long)GetLastError());
+    return message;
+}
+#else
 #include <dlfcn.h>
+#endif
 #include <stdarg.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/stat.h>
+#include <time.h>
 
 #include "libretro.h"
+#include "gl_context.h"
+#include <string.h>
+#include "input_script.h"
 
 static const char *g_directory = ".";
 static uint64_t g_vi_count;
+
+static double benchmark_seconds(void)
+{
+#ifdef _WIN32
+    static LARGE_INTEGER frequency;
+    LARGE_INTEGER counter;
+    if (!frequency.QuadPart) QueryPerformanceFrequency(&frequency);
+    QueryPerformanceCounter(&counter);
+    return (double)counter.QuadPart / (double)frequency.QuadPart;
+#else
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    return now.tv_sec + now.tv_nsec * 1e-9;
+#endif
+}
+static uint64_t g_video_hash;
+static const char *g_capture;
+static unsigned g_capture_interval = 300;
+static uint64_t g_capture_force_at;
+static uint64_t g_gameplay_start;
+static unsigned g_video_width, g_video_height;
+static uint8_t *g_video_rgb;
+static size_t g_video_capacity;
 static uint64_t g_audio_frames;
 static uint64_t g_audio_hash = UINT64_C(1469598103934665603);
+static uint64_t g_audio_interval_frames;
+static uint64_t g_audio_interval_hash = UINT64_C(1469598103934665603);
 
 static uint64_t fnv1a_update(uint64_t hash, const void *data, size_t size)
 {
@@ -68,19 +116,27 @@ static bool environment_callback(unsigned command, void *data)
         case RETRO_ENVIRONMENT_SET_GEOMETRY:
             return true;
 
+#ifdef _WIN32
+        case RETRO_ENVIRONMENT_SET_HW_RENDER:
+            return bench_request_gl((struct retro_hw_render_callback *)data);
+#endif
         case RETRO_ENVIRONMENT_GET_HW_RENDER_INTERFACE:
             *(const void **)data = NULL;
             return false;
 
         case RETRO_ENVIRONMENT_GET_VARIABLE:
-            ((struct retro_variable *)data)->value = NULL;
-            return false;
+        {
+            struct retro_variable* variable = (struct retro_variable*)data;
+            variable->value = getenv(variable->key);
+            return variable->value != NULL;
+        }
 
         case RETRO_ENVIRONMENT_GET_VARIABLE_UPDATE:
             *(bool *)data = false;
             return true;
 
         case RETRO_ENVIRONMENT_GET_INPUT_BITMASKS:
+            return true;
         case RETRO_ENVIRONMENT_GET_RUMBLE_INTERFACE:
         case RETRO_ENVIRONMENT_GET_PERF_INTERFACE:
             return false;
@@ -96,17 +152,66 @@ static bool environment_callback(unsigned command, void *data)
 
 static void video_callback(const void *data, unsigned width, unsigned height, size_t pitch)
 {
-    (void)data;
-    (void)width;
-    (void)height;
-    (void)pitch;
+    size_t count;
+    unsigned x, y;
     ++g_vi_count;
+    if (!g_capture) return;
+    /* A NULL callback repeats the displayed image; some cores report zero
+     * dimensions on that callback. Keep the preceding display dimensions. */
+    if (!data && (!width || !height)) {width=g_video_width;height=g_video_height;}
+    if (!width || !height) return;
+    if (width > 2048 || height > 2048) { fprintf(stderr, "capture dimensions exceed limit\n"); exit(4); }
+    count = (size_t)width * height * 3;
+    if (count > g_video_capacity) {
+        g_video_rgb = (uint8_t *)realloc(g_video_rgb, count);
+        if (!g_video_rgb) exit(4);
+        g_video_capacity = count;
+    }
+    if (data && data != RETRO_HW_FRAME_BUFFER_VALID) {
+        for (y = 0; y < height; ++y) {
+            const uint8_t *row = (const uint8_t *)data + y * pitch;
+            for (x = 0; x < width; ++x) {
+                uint8_t *out = g_video_rgb + ((size_t)y * width + x) * 3;
+                out[0] = row[x*4+2]; out[1] = row[x*4+1]; out[2] = row[x*4];
+            }
+        }
+        g_video_width = width; g_video_height = height;
+    }
+    if (data == RETRO_HW_FRAME_BUFFER_VALID) {g_video_width=width;g_video_height=height;}
+    if (g_vi_count != g_capture_force_at &&
+        (g_vi_count < g_gameplay_start || (g_vi_count-g_gameplay_start) % g_capture_interval)) return;
+#ifdef _WIN32
+    if (bench_gl_active) {
+        uint8_t *rgba = (uint8_t *)malloc((size_t)width * height * 4);
+        if (!rgba) exit(4);
+        bench_bind_fb(GL_FRAMEBUFFER, bench_fbo);
+        bench_pack(GL_PACK_ALIGNMENT, 1);
+        bench_read(0,0,width,height,GL_RGBA,GL_UNSIGNED_BYTE,rgba);
+        for (y=0; y<height; ++y) for (x=0; x<width; ++x)
+            memcpy(g_video_rgb + ((size_t)y*width+x)*3, rgba + ((size_t)(height-1-y)*width+x)*4, 3);
+        free(rgba);
+        g_video_width=width; g_video_height=height;
+    }
+#endif
+    if (g_video_width && g_video_height) {
+        char path[1024]; FILE *file;
+        snprintf(path,sizeof(path),"%s-%06llu.ppm",g_capture,(unsigned long long)g_vi_count);
+        file=fopen(path,"wb");
+        if (!file) { fprintf(stderr,"capture open failed: %s\n",path); exit(4); }
+        count=(size_t)g_video_width*g_video_height*3;
+        fprintf(file,"P6\n%u %u\n255\n",g_video_width,g_video_height);
+        if (fwrite(g_video_rgb,1,count,file)!=count) exit(4);
+        fclose(file);
+        g_video_hash=fnv1a(g_video_rgb,count);
+    }
 }
 
 static size_t audio_batch_callback(const int16_t *data, size_t frames)
 {
     g_audio_frames += frames;
     g_audio_hash = fnv1a_update(g_audio_hash, data, frames * 2 * sizeof(*data));
+    g_audio_interval_frames += frames;
+    g_audio_interval_hash = fnv1a_update(g_audio_interval_hash, data, frames * 2 * sizeof(*data));
     return frames;
 }
 
@@ -116,6 +221,8 @@ static void audio_callback(int16_t left, int16_t right)
 
     ++g_audio_frames;
     g_audio_hash = fnv1a_update(g_audio_hash, samples, sizeof(samples));
+    ++g_audio_interval_frames;
+    g_audio_interval_hash = fnv1a_update(g_audio_interval_hash, samples, sizeof(samples));
 }
 
 static void input_poll_callback(void)
@@ -124,11 +231,51 @@ static void input_poll_callback(void)
 
 static int16_t input_state_callback(unsigned port, unsigned device, unsigned index, unsigned id)
 {
-    (void)port;
-    (void)device;
-    (void)index;
-    (void)id;
+    if(port>=4)return 0;
+    if(device==RETRO_DEVICE_JOYPAD) {
+        if(id==RETRO_DEVICE_ID_JOYPAD_MASK)return (int16_t)bench_input[port].buttons;
+        if(id<16)return (bench_input[port].buttons>>id)&1;
+    }
+    if(device==RETRO_DEVICE_ANALOG&&index==RETRO_DEVICE_INDEX_ANALOG_LEFT)
+        return id==RETRO_DEVICE_ID_ANALOG_X?bench_input[port].x:
+            (id==RETRO_DEVICE_ID_ANALOG_Y?bench_input[port].y:0);
     return 0;
+}
+
+/* Interactive exploration records the exact same intervals later replayed by
+ * every renderer. Waiting happens between retro_run calls, never inside a VI. */
+static bool control_step(FILE *control,FILE *record,const char *path,uint64_t *end)
+{
+    char line[256],status_path[4096];
+    snprintf(status_path,sizeof(status_path),"%s.status",path);
+    FILE *status=fopen(status_path,"w");
+    if(!status) {perror("control status");exit(4);}
+    fprintf(status,"%llu\n",(unsigned long long)g_vi_count);fclose(status);
+    for(;;) {
+        long position=ftell(control);clearerr(control);
+        if(fgets(line,sizeof(line),control)) {
+            if(!strchr(line,'\n')) {fseek(control,position,SEEK_SET);}
+            else if(!strncmp(line,"stop",4))return false;
+            else {
+                unsigned count,buttons,port;int x,y;char extra;
+                if(sscanf(line,"%u,%u,%d,%d,%u %c",&count,&buttons,&x,&y,&port,&extra)!=5||
+                    !count||count>1000000||buttons>65535||port>3||x<-32767||x>32767||y<-32767||y>32767) {
+                    fprintf(stderr,"invalid control step: %s",line);exit(4);
+                }
+                memset(bench_input,0,sizeof(bench_input));
+                bench_input[port]=(struct bench_input_event){g_vi_count,g_vi_count+count,(uint16_t)buttons,(int16_t)x,(int16_t)y,port};
+                *end=g_vi_count+count;g_capture_force_at=*end;
+                fprintf(record,"%llu,%llu,%u,%d,%d,%u\n",(unsigned long long)g_vi_count,
+                    (unsigned long long)*end,buttons,x,y,port);fflush(record);
+                return true;
+            }
+        }
+#ifdef _WIN32
+        Sleep(10);
+#else
+        usleep(10000);
+#endif
+    }
 }
 
 #define LOAD_SYMBOL(symbol)                                                                  \
@@ -157,6 +304,9 @@ int main(int argc, char **argv)
     void *ram = NULL;
     uint64_t last_logged_vi = UINT64_MAX;
     char save_dir[512];
+    const char *control_path=getenv("M64P_BENCH_CONTROL");
+    FILE *control=NULL,*input_record=NULL;
+    uint64_t control_end=0;
 
     void (*retro_set_environment)(retro_environment_t) = NULL;
     void (*retro_set_video_refresh)(retro_video_refresh_t) = NULL;
@@ -179,9 +329,22 @@ int main(int argc, char **argv)
         return 2;
     }
 
+    g_capture = getenv("M64P_BENCH_CAPTURE");
+    if (getenv("M64P_BENCH_CAPTURE_INTERVAL")) g_capture_interval = (unsigned)strtoul(getenv("M64P_BENCH_CAPTURE_INTERVAL"),NULL,10);
+    if (!g_capture_interval) return 2;
+    if(getenv("M64P_BENCH_INPUT")&&control_path) {fprintf(stderr,"input replay and interactive control are mutually exclusive\n");return 2;}
+    if(getenv("M64P_BENCH_INPUT")&&!bench_input_load(getenv("M64P_BENCH_INPUT")))return 2;
+    if(control_path) {
+        char path[4096];control=fopen(control_path,"r");
+        snprintf(path,sizeof(path),"%s.input.csv",control_path);input_record=fopen(path,"w");
+        if(!control||!input_record) {perror("control file");return 2;}
+        fprintf(input_record,"start_vi,end_vi,buttons,analog_x,analog_y,port\n");fflush(input_record);
+    }
     core_path = argv[1];
     rom_path = argv[2];
     target_vi = strtoull(argv[3], NULL, 0);
+    g_capture_force_at=target_vi;
+    if(getenv("M64P_BENCH_GAMEPLAY_START"))g_gameplay_start=strtoull(getenv("M64P_BENCH_GAMEPLAY_START"),NULL,0);
     interval = strtoull(argv[4], NULL, 0);
 
     if (interval == 0)
@@ -281,41 +444,74 @@ int main(int argc, char **argv)
         }
     }
 
+    bench_gl_reset();
+    if (!bench_gl_check()) return 4;
     ram_size = retro_get_memory_size(RETRO_MEMORY_SYSTEM_RAM);
     fprintf(stderr, "loaded ram=%zu target=%llu interval=%llu\n", ram_size,
             (unsigned long long)target_vi, (unsigned long long)interval);
 
     puts("vi,ram_fnv64,audio_frames,audio_fnv64,pc,cp0_count,cycle_count,next_interrupt,"
-         "last_addr,delay_slot,q_type,q_count,cause,status,emumode,unsafe");
+         "last_addr,delay_slot,q_type,q_count,cause,status,emumode,unsafe,video_fnv64,"
+         "audio_interval_frames,audio_interval_fnv64");
 
+    FILE *frame_times = NULL;
+    const char *frame_times_path = getenv("M64P_BENCH_FRAME_TIMES");
+    if (frame_times_path) {
+        frame_times = fopen(frame_times_path, "w");
+        if (!frame_times) { fprintf(stderr, "frame timing open failed\n"); return 4; }
+        fputs("start_vi,end_vi,retro_run_ms\n", frame_times);
+    }
     while (g_vi_count < target_vi)
     {
+        if(control) {
+            if(g_vi_count>=control_end&&!control_step(control,input_record,control_path,&control_end))break;
+        }else bench_input_at(g_vi_count);
+        const uint64_t start_vi = g_vi_count;
+        const double frame_start = frame_times ? benchmark_seconds() : 0.0;
         retro_run();
+        if (frame_times)
+            fprintf(frame_times, "%llu,%llu,%.6f\n", (unsigned long long)start_vi,
+                    (unsigned long long)g_vi_count, (benchmark_seconds()-frame_start)*1000.0);
+        if (!bench_gl_check()) return 4;
 
         if (!ram)
             ram = retro_get_memory_data(RETRO_MEMORY_SYSTEM_RAM);
 
         if (g_vi_count && g_vi_count != last_logged_vi &&
-            ((g_vi_count % interval) == 0 || g_vi_count == target_vi))
+            ((g_vi_count < g_gameplay_start ? g_vi_count % interval : (g_vi_count-g_gameplay_start) % interval) == 0 || g_vi_count == target_vi))
         {
             const uint64_t ram_hash = getenv("NO_RAM_HASH") ? 0 : (ram ? fnv1a(ram, ram_size) : 0);
             uint32_t timing[12] = {0};
 
+            if (ram && g_capture && getenv("M64P_BENCH_RAM_DUMP") && g_vi_count % g_capture_interval == 0) {
+                char path[4096];
+                snprintf(path,sizeof(path),"%s-%06llu.ram",g_capture,(unsigned long long)g_vi_count);
+                FILE *dump=fopen(path,"wb");
+                if (!dump || fwrite(ram,1,ram_size,dump)!=ram_size) { fprintf(stderr,"RAM dump failed\n"); return 4; }
+                fclose(dump);
+            }
             retro_debug_timing(timing);
-            printf("%llu,%016llx,%llu,%016llx,%08x,%u,%d,%u,%08x,%u,%u,%u,%08x,%08x,%u,%u\n",
+            printf("%llu,%016llx,%llu,%016llx,%08x,%u,%d,%u,%08x,%u,%u,%u,%08x,%08x,%u,%u,%016llx,%llu,%016llx\n",
                    (unsigned long long)g_vi_count, (unsigned long long)ram_hash,
                    (unsigned long long)g_audio_frames, (unsigned long long)g_audio_hash,
                    timing[0], timing[1], (int32_t)timing[2], timing[3], timing[4], timing[5],
-                   timing[6], timing[7], timing[8], timing[9], timing[10], timing[11]);
+                   timing[6], timing[7], timing[8], timing[9], timing[10], timing[11], (unsigned long long)g_video_hash, (unsigned long long)g_audio_interval_frames, (unsigned long long)g_audio_interval_hash);
+            g_audio_interval_frames=0;g_audio_interval_hash=UINT64_C(1469598103934665603);
             fflush(stdout);
             last_logged_vi = g_vi_count;
         }
     }
 
+    if (frame_times) fclose(frame_times);
     fprintf(stderr, "done vis=%llu audio=%llu\n", (unsigned long long)g_vi_count,
             (unsigned long long)g_audio_frames);
 
     retro_unload_game();
+    bench_gl_close();
+    free(g_video_rgb);
+    if(control)fclose(control);
+    if(input_record)fclose(input_record);
+    free(bench_events);
     retro_deinit();
     free(rom_data);
     dlclose(core);

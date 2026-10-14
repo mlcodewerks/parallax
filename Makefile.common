@@ -73,6 +73,7 @@ SOURCES_C = \
 	$(CORE_DIR)/src/device/rcp/rdp/rdp_core.c \
 	$(CORE_DIR)/src/device/rcp/ri_controller.c \
 	$(CORE_DIR)/src/device/rcp/rsp/rsp_core.c \
+	$(CORE_DIR)/src/device/rcp/rsp/rsp_dma_memory.c \
 	$(CORE_DIR)/src/device/rcp/si_controller.c \
 	$(CORE_DIR)/src/device/rcp/rdp/vi_controller.c \
 	$(CORE_DIR)/src/device/rdram.c \
@@ -115,6 +116,17 @@ LDFLAGS += $(PARALLEL_RDP_LDFLAGS)
 $(PARALLEL_RDP_IMPLEMENTATION)/parallel-rdp/rdp_device.o: $(PARALLEL_RDP_IMPLEMENTATION)/parallel-rdp/worker_thread.hpp $(CORE_DIR)/src/device/rcp/rdp/performance_cores.h
 $(PARALLEL_RDP_IMPLEMENTATION)/parallel-rdp/command_ring.o: $(CORE_DIR)/src/device/rcp/rdp/performance_cores.h
 $(CORE_DIR)/src/device/rcp/rdp/parallel_imp.o: $(CORE_DIR)/src/renderer_options.h $(CORE_DIR)/src/device/rcp/rdp/performance_cores.h
+endif
+
+ifeq ($(HAVE_GLRDP),1)
+GLRDP_DIR = $(CORE_DIR)/src/device/rcp/rdp/glrdp
+SOURCES_CXX += $(addprefix $(GLRDP_DIR)/,libretro_glrdp.cpp gl_loader.cpp gl_state_guard.cpp framebuffer_manager.cpp gpu_depth.cpp rdp_parser.cpp rdp_tmem.cpp rdp_renderer.cpp gles2_renderer.cpp)
+COREFLAGS += -DHAVE_GLRDP
+ifneq (,$(filter 1,$(GLES) $(GLES3) $(FORCE_GLES) $(FORCE_GLES3)))
+COREFLAGS += -DGLRDP_DEFAULT_GLES2
+endif
+# Only GLRDP needs C++20; other renderers retain C++17.
+$(addprefix $(GLRDP_DIR)/,libretro_glrdp.o gl_loader.o gl_state_guard.o framebuffer_manager.o gpu_depth.o rdp_parser.o rdp_tmem.o rdp_renderer.o gles2_renderer.o): CXXFLAGS += -std=c++20 -O3 -fno-fast-math
 endif
 
 # MD5 lib

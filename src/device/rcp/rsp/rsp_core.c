@@ -64,10 +64,7 @@ static void do_sp_dma(struct rsp_core* sp, const struct sp_dma* dma, int64_t sta
                 dramaddr++;
             }
 
-            invalidate_r4300_cached_code(sp->mi->r4300,
-                (dramaddr - length) & 0x7fffff, length);
-            if (dramaddr <= 0x800000)
-                post_framebuffer_write(&sp->dp->fb, dramaddr - length, length);
+            rsp_dma_write_memory(sp, dramaddr - length, length);
             if (j + 1 < count) dramaddr+=skip;
         }
 
@@ -78,8 +75,7 @@ static void do_sp_dma(struct rsp_core* sp, const struct sp_dma* dma, int64_t sta
     else
     {
         for(j=0; j<count; j++) {
-            if (dramaddr < 0x800000)
-                pre_framebuffer_read(&sp->dp->fb, dramaddr);
+            rsp_dma_read_memory(sp, dramaddr, length);
 
             for(i=0; i<length; i++) {
                 spmem[(memaddr^S8) & 0xfff] = dram[(dramaddr^S8) & 0x7fffff];

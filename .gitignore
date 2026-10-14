@@ -12,3 +12,10 @@ asm_defines_gas.h
 .vscode/ipch/*
 .vscode/c_cpp_properties.json
 linker.list
+
+# Native GLRDP build and validation artifacts
+.cpu-jit-config
+benchmarks/.optimization-baseline/
+benchmarks/*.exe
+benchmarks/*.log
+benchmarks/__pycache__/

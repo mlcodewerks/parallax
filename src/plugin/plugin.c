@@ -355,6 +355,7 @@ static m64p_error plugin_start_rsp(void)
 #endif
 #ifdef HAVE_PARALLEL_RSP
     parallelRSPSetDpcCallbacks(&g_dev.dp, read_rsp_dpc_regs, write_rsp_dpc_regs);
+    parallelRSPSetDmaCallbacks(&g_dev.sp, rsp_dma_read_memory, rsp_dma_write_memory);
 #endif
 
     return M64ERR_SUCCESS;

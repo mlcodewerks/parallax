@@ -76,6 +76,7 @@ void poweron_r4300(struct r4300_core* r4300)
     memset(r4300->dcache_tags, 0, sizeof(r4300->dcache_tags));
     memset(r4300->dcache_words, 0, sizeof(r4300->dcache_words));
     r4300->cache_timing = 1;
+    r4300->compat_issue_clock = 1;
 #ifdef __LIBRETRO__
     r4300->cache_timing = renderer_settings.per_cycle_timing;
 #endif

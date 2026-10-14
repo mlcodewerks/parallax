@@ -5,7 +5,8 @@
 #include "device/rdram.h"
 
 /* Two-block RAM flag waits: LUI/ADDIU/LBU/ANDI/BEQ/NOP, followed by
- * LUI/LW/BEQ/NOP. Only unchanged, fully cached iterations can be elided.
+ * LUI/LW/BEQ/NOP. Only unchanged iterations can be elided; detailed timing
+ * additionally requires every instruction/data access to hit its cache.
  * The plan is decoded interpreter data; it is rebuilt after invalidation. */
 struct interp_ram_poll {
     uint32_t pc, target, byte_address, word_address, mask;
@@ -63,6 +64,10 @@ static int interp_ram_poll_read(const struct r4300_core* r, uint32_t address, ui
     const struct mem_handler* h = &r->mem->handlers[physical >> 16];
     if (h->read32 != read_rdram_dram || !h->opaque ||
         physical >= ((const struct rdram*)h->opaque)->dram_size) return 0;
+    if (!r->cache_timing) {
+        *word = ((const struct rdram*)h->opaque)->dram[physical >> 2];
+        return 1;
+    }
     unsigned index = (address >> 4) & 511;
     if ((r->dcache_tags[index] & ~2u) != ((physical & UINT32_C(0x1ffff000)) | 1)) return 0;
     *word = r->dcache_words[index][(physical >> 2) & 3];
@@ -73,15 +78,15 @@ static int interp_ram_poll_advance(struct r4300_core* r, const struct interp_ram
 {
     uint32_t byte, word;
     uint32_t status = r->cp0.regs[CP0_STATUS_REG];
-    if (!r->cache_timing || (r->cp0.regs[CP0_CONFIG_REG] & 7) == 2 ||
+    if ((r->cache_timing && (r->cp0.regs[CP0_CONFIG_REG] & 7) == 2) ||
         r->delay_slot || r->skip_jump || r->cp0.cycle_count >= -11 ||
         ((status & CP0_STATUS_MODE_MASK) && !(status & (CP0_STATUS_EXL | CP0_STATUS_ERL))) ||
         r->pipeline_load_mask || r->pipeline_cached_store ||
         r->pipeline_fpu_result_mask || r->pipeline_fpu_cc ||
         r->regs[p->base_reg] != p->base_value || r->regs[p->mask_reg] || r->regs[p->word_reg] ||
         (p->word_address & 3) ||
-        !interp_ram_poll_fetch_hits(r, p->pc, 6) ||
-        !interp_ram_poll_fetch_hits(r, p->target, 4) ||
+        (r->cache_timing && (!interp_ram_poll_fetch_hits(r, p->pc, 6) ||
+                            !interp_ram_poll_fetch_hits(r, p->target, 4))) ||
         !interp_ram_poll_read(r, p->byte_address, &byte) ||
         !interp_ram_poll_read(r, p->word_address, &word))
         return 0;
@@ -92,8 +97,11 @@ static int interp_ram_poll_advance(struct r4300_core* r, const struct interp_ram
      * two D-cache hits. Each possible LDI is one clock and overlaps the
      * reservation. Both NOP slots leave pipeline history empty. Elide
      * whole iterations strictly before the next event, then execute the
-     * final iteration normally for the exact PC, delay slot and phase. */
-    const unsigned cycles = 20 + 2 * R4300_DCACHE_HIT_CYCLES;
+     * final iteration normally for the exact PC, delay slot and phase.
+     * Without detailed timing the ROM-facing compatibility envelope still
+     * reserves the issue clocks, while reads bypass stale D-cache contents. */
+    const unsigned cycles = r->cache_timing ? 20 + 2 * R4300_DCACHE_HIT_CYCLES :
+        10 * (1 + (r->compat_issue_clock != 0));
     uint64_t iterations = (uint64_t)(-(r->cp0.cycle_count + 1)) / (cycles / 2);
     if (iterations > UINT32_MAX / cycles) iterations = UINT32_MAX / cycles;
     if (!iterations) return 0;

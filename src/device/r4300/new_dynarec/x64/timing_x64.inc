@@ -8,6 +8,7 @@ static void emit_region_guard(const struct ari64_x64_config* config, unsigned st
     emit_mem(0x80, 0, 7, R11, -1, 0, 0); output_byte(0); memory_guard(failure, 5);
     emit_mem(0x81, 0, 7, R12, -1, 0, offsetof(struct r4300_core, skip_jump)); output_w32(0); memory_guard(failure, 5);
     emit_mem(0x81, 0, 7, R12, -1, 0, offsetof(struct r4300_core, cache_timing)); output_w32(config->cache_timing); memory_guard(failure, 5);
+    emit_mem(0x81, 0, 7, R12, -1, 0, offsetof(struct r4300_core, compat_issue_clock)); output_w32(config->compat_issue_clock); memory_guard(failure, 5);
     emit_mem(0x8b, 0, RAX, R12, -1, 0, offsetof(struct r4300_core, cp0.regs[CP0_STATUS_REG]));
     emit_mov(RAX, RDX); emit_imm_op(4, RDX, CP0_STATUS_EXL | CP0_STATUS_ERL, 0);
     emit_reg_op(0x85, RDX, RDX, 0); unsigned char* kernel = emit_jump(5);
@@ -32,7 +33,8 @@ static void emit_region_guard(const struct ari64_x64_config* config, unsigned st
      * precise side exit and recheck the remaining region before resuming.
      * Only the first fetch can refill the instruction micro-TLB; restored
      * simultaneous LDI/DCB history can exceed the issue reservation by one. */
-    unsigned cached_bound = base, uncached_bound = base;
+    unsigned compatibility = !config->cache_timing && config->compat_issue_clock ? count : 0;
+    unsigned cached_bound = base + compatibility, uncached_bound = base + compatibility;
     if (config->cache_timing && count) {
         uint32_t pc = config->virtual_pc + start * 4;
         unsigned lines = ((pc + (count - 1) * 4) >> 5) - (pc >> 5) + 1;

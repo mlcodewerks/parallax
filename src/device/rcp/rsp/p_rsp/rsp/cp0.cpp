@@ -20,6 +20,25 @@ extern "C"
 	static void* dpc_opaque;
 	static void (*dpc_read)(void*, uint32_t, uint32_t*);
 	static void (*dpc_write)(void*, uint32_t, uint32_t, uint32_t);
+	static void* dma_opaque;
+	static void (*dma_read)(void*, uint32_t, uint32_t);
+	static void (*dma_write)(void*, uint32_t, uint32_t);
+
+	void parallelRSPSetDmaCallbacks(void* opaque,
+	    void (*read)(void*, uint32_t, uint32_t),
+	    void (*write)(void*, uint32_t, uint32_t))
+	{
+		dma_opaque = opaque; dma_read = read; dma_write = write;
+	}
+
+	static void notify_dma(void (*callback)(void*, uint32_t, uint32_t), uint32_t address, uint32_t size)
+	{
+		if (!callback) return;
+		address &= 0x7fffff;
+		const uint32_t first = size < 0x800000 - address ? size : 0x800000 - address;
+		callback(dma_opaque, address, first);
+		if (first < size) callback(dma_opaque, 0, size - first);
+	}
 
 	void parallelRSPSetDpcCallbacks(void* opaque,
 	    void (*read)(void*, uint32_t, uint32_t*),
@@ -54,13 +73,11 @@ extern "C"
 			*RSP::rsp.SP_STATUS_REG |= SP_STATUS_HALT;
 			return MODE_CHECK_FLAGS;
 		}
-		// Hardware-counted slices must let CPU-owned DMA advance through
-		// the CPU event queue. Bound its flag reads like status/DPC polls.
-		// UINT32_MAX is the integration's untimed, fixed-delay mode; retain
-		// its existing polling cadence when detailed timing is disabled.
+		// CPU-owned DMA completes through the CPU event queue in both modes.
+		// A busy/full wait must yield even in the untimed UINT32_MAX slice;
+		// otherwise the CPU cannot advance the event that clears the flag.
 		if (rd == CP0_REGISTER_SP_STATUS || rd >= CP0_REGISTER_CMD_START ||
-		    (rsp->cycle_limit != UINT32_MAX &&
-		     (rd == CP0_REGISTER_DMA_FULL || rd == CP0_REGISTER_DMA_BUSY)))
+		    (res && (rd == CP0_REGISTER_DMA_FULL || rd == CP0_REGISTER_DMA_BUSY)))
 		{
 			RSP::MFC0_count[rt] += 1;
 			if (RSP::MFC0_count[rt] >= RSP::SP_STATUS_TIMEOUT)
@@ -175,6 +192,7 @@ extern "C"
 
 		do
 		{
+			notify_dma(dma_read, source, length);
 			unsigned j = 0;
 			do
 			{
@@ -248,6 +266,7 @@ extern "C"
 				j += 4;
 			} while (j < length);
 
+			notify_dma(dma_write, dest, length);
 			source = (source & 0x1000) | ((source + length) & 0xFFF);
 			dest += length + (i < count ? skip : 0);
 		} while (++i <= count);

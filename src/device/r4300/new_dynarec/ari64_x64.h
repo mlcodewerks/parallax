@@ -46,6 +46,7 @@ struct ari64_x64_config {
     uint64_t* linked_entries;
     uint64_t* direct_links;
     unsigned profile;
+    unsigned compat_issue_clock;
 };
 struct ari64_x64* ari64_x64_create(void);
 void ari64_x64_destroy(struct ari64_x64*);
