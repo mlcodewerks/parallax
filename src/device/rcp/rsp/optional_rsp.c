@@ -25,6 +25,10 @@ extern unsigned int parallelRSPDoRspCycles(unsigned int);
 extern void parallelRSPResetExecutedCycles(void);
 extern uint16_t parallelRSPGetVCO(void);
 extern void parallelRSPSetVCO(uint16_t);
+extern uint32_t parallelRSPGetT6(void);
+extern void parallelRSPSetT6(uint32_t);
+extern void parallelRSPGetF5Context(uint32_t values[7]);
+extern void parallelRSPSetF5Context(const uint32_t values[7],uint32_t mask);
 static struct hle_t hle;
 static RSP_INFO info;
 static unsigned int forwarded_cycles;
@@ -32,6 +36,10 @@ static unsigned int start_status;
 static int forwarded;
 static unsigned long long graphics_tasks, audio_tasks, other_tasks, boot_tasks, lle_tasks;
 static int timing_probe_active, timing_probe_failed;
+static uint32_t timing_probe_t6;
+static uint32_t timing_probe_f5[7];
+void optional_rsp_timing_f5(uint32_t *values){memcpy(values,timing_probe_f5,sizeof(timing_probe_f5));}
+uint32_t optional_rsp_timing_t6(void){return timing_probe_t6;}
 
 #include "hle/hle_timing_capture.h"
 
@@ -143,8 +151,16 @@ unsigned int optional_rsp_execute(unsigned int cycles)
     start_status = *info.SP_STATUS_REG;
     parallelRSPResetExecutedCycles();
     hle.rsp_vco=parallelRSPGetVCO();hle.rsp_vco_written=0;
+    hle.rsp_t6=parallelRSPGetT6();hle.rsp_t6_written=0;naboo_set_phase(hle.rsp_t6);
+    parallelRSPGetF5Context(hle.rsp_f5);hle.rsp_f5_written=0;naboo_set_context(hle.rsp_f5);
     hle_execute(&hle);
     if(!forwarded && hle.rsp_vco_written)parallelRSPSetVCO(hle.rsp_vco);
+    if(!forwarded){
+        if(kind==HLE_TASK_GRAPHICS)hle.rsp_t6_written=naboo_get_phase(&hle.rsp_t6);
+        if(hle.rsp_t6_written)parallelRSPSetT6(hle.rsp_t6);
+        if(kind==HLE_TASK_GRAPHICS)hle.rsp_f5_written=naboo_get_context(hle.rsp_f5);
+        if(hle.rsp_f5_written)parallelRSPSetF5Context(hle.rsp_f5,hle.rsp_f5_written);
+    }
     if (forwarded) lle_tasks++;
     else if (kind == HLE_TASK_GRAPHICS) graphics_tasks++;
     else if (kind == HLE_TASK_AUDIO) audio_tasks++;
@@ -298,11 +314,17 @@ unsigned int optional_rsp_timing_replay(const char *path, char *family,
     probe.hle_gfx = 1;
     probe.hle_aud = 0;
     probe.rsp_vco=hle_capture_vco(f);
+    probe.rsp_t6=hle_capture_t6(f);naboo_set_phase(probe.rsp_t6);
+    hle_capture_f5(f,probe.rsp_f5);naboo_set_context(probe.rsp_f5);
     probe_ram = memory; probe_dmem = memory + 0x800000;
     rdp_emit_set_backend(&probe_backend);
     rdp_emit_hle_reset(); rdp_emit_stream_load(NULL); hle_stream_state_load(NULL);
     timing_probe_active = 1; timing_probe_failed = 0;
     hle_execute(&probe);
+    timing_probe_t6=probe.rsp_t6;
+    memcpy(timing_probe_f5,probe.rsp_f5,sizeof(timing_probe_f5));
+    if(hle_get_task_kind(&probe)==HLE_TASK_GRAPHICS)naboo_get_phase(&timing_probe_t6);
+    if(hle_get_task_kind(&probe)==HLE_TASK_GRAPHICS)naboo_get_context(timing_probe_f5);
     work = hle_timing_get();
     if (!timing_probe_failed) {
         snprintf(family, 64, "%s", work.family);

@@ -14,6 +14,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <stdio.h>
+#include <string.h>
 #include "rdp_emit_rsp.h"
 
 /* 11-bit divide result look-up table (VRCP family), from cxd4. */
@@ -195,38 +196,12 @@ int32_t rsp_rcp32(int32_t in32)
     return rsp_div_core(in32);
 }
 
-/* Double-precision reciprocal (VRCPH/VRCPL pair) with cxd4's negative
- * handling: full two's-complement negate (only the exact -32768<<16
- * corner pins to -0x10000). Used by the Naboo projection divide. */
+/* VRCPH/VRCPL uses the same sign normalization as VRCP: negate small
+ * negative inputs and complement inputs below -32768 before table lookup.
+ * The high/low input assembly does not select a different reciprocal ROM. */
 int32_t rsp_rcp32_dp(int32_t in32)
 {
-    int32_t data = in32;
-    int32_t addr;
-    int shift;
-    int32_t out;
-
-    if (data < 0)
-        data = (int32_t)(0u - (uint32_t)data);
-
-    shift = 0;
-    {
-        uint32_t ua = (uint32_t)data;
-        if (data != 0)
-        {
-            for (shift = 0; (ua & 0x80000000u) == 0u; ua <<= 1, shift++)
-                ;
-        }
-        addr = (int32_t)((ua >> 22) & 0x1ffu);
-    }
-    shift ^= 31;
-    out = (int32_t)((0x40000000u | ((uint32_t)div_rom[addr] << 14)) >> shift);
-    if (in32 == 0)
-        out = 0x7fffffff;
-    else if ((uint32_t)in32 == 0x80000000u || in32 == (int32_t)0xffff8000 * 65536)
-        out = (int32_t)0xffff0000u;
-    else if (in32 < 0)
-        out = (int32_t)~(uint32_t)out;
-    return out;
+    return rsp_div_core(in32);
 }
 
 int32_t rsp_rcp16(int32_t in16)
@@ -2358,6 +2333,10 @@ void rsp_tri_set_d64_sort(int on)
     s_d64_lut_sort = on;
 }
 
+/* Consumed immediately by the later Factor 5 walker; durable state lives in
+ * the shared native register snapshot rather than this arithmetic scratch. */
+static uint32_t s_factor5_context[5];
+void rsp_tri_factor5_context(uint32_t values[5]){memcpy(values,s_factor5_context,sizeof(s_factor5_context));}
 int rsp_tri_write(int32_t *ew,
                   const RspTriVtx *v1c, const RspTriVtx *v2c,
                   const RspTriVtx *v3c,
@@ -3240,6 +3219,21 @@ int rsp_tri_write(int32_t *ew,
     pre_z_dAdX  = dAdX[7];
     pre_z_dAdE  = dAdE[7];
     pre_z_dAdY  = dAdY[7];
+    if(s_tri_attr_rs==2){
+        Rsp32 y[8],edge[8];
+        memcpy(y,dAdY,sizeof(y));memcpy(edge,dAdE,sizeof(edge));
+        if(z_buffered)for(k=0;k<8;k++){
+            acc=p_udn(y[k].f,32)+p_udh(y[k].i,32);
+            y[k].f=acc_clamp_low(acc);y[k].i=acc_clamp_mid(acc);
+            acc=p_udn(edge[k].f,32)+p_udh(edge[k].i,32);
+            edge[k].i=acc_clamp_mid(acc);
+        }
+        s_factor5_context[0]=U16(y[0].f)|(U16(y[1].f)<<16);
+        for(k=0;k<2;k++){
+            s_factor5_context[1+k]=U16(y[4+k*2].i)|(U16(y[5+k*2].i)<<16);
+            s_factor5_context[3+k]=U16(edge[4+k*2].i)|(U16(edge[5+k*2].i)<<16);
+        }
+    }
 
     if (textured && s_tri_attr_rs == 2)
     {

@@ -50,6 +50,43 @@ typedef struct NbWrite {
 } NbWrite;
 static NbWrite *s_writes;
 static int s_record_writes;
+/* The particle phase index is scalar t6 in the native program. Keep its
+ * transient view outside the walker snapshot; the RSP scalar snapshot owns
+ * persistence, including transitions through audio tasks. */
+static unsigned int nb_phase,nb_phase_saved;
+static int nb_phase_written,nb_phase_written_saved;
+static unsigned int nb_size_fraction,nb_size_fraction_saved;
+static int nb_size_fraction_written,nb_size_fraction_written_saved;
+static unsigned int nb_retained[6],nb_retained_saved[6];
+static unsigned int nb_retained_written,nb_retained_written_saved;
+static int nb_dmem_s16(unsigned int off);
+void naboo_set_size_fraction(unsigned int fraction){nb_size_fraction=fraction;nb_size_fraction_written=0;}
+int naboo_get_size_fraction(unsigned int *fraction){*fraction=nb_size_fraction;return nb_size_fraction_written;}
+static void nb_size_fraction_set(unsigned int fraction){nb_size_fraction=fraction;nb_size_fraction_written=1;}
+void naboo_set_context(const unsigned int context[7])
+{
+    naboo_set_size_fraction(context[0]);memcpy(nb_retained,context+1,sizeof(nb_retained));nb_retained_written=0;
+}
+unsigned int naboo_get_context(unsigned int context[7])
+{
+    context[0]=nb_size_fraction;memcpy(context+1,nb_retained,sizeof(nb_retained));
+    return (nb_retained_written<<1)|(nb_size_fraction_written?1u:0u);
+}
+static void nb_retain(unsigned int reg,const short lanes[4])
+{
+    unsigned int i;
+    for(i=0;i<2;i++)nb_retained[reg*2+i]=(unsigned short)lanes[i*2]|((unsigned int)(unsigned short)lanes[i*2+1]<<16);
+    nb_retained_written|=3u<<(reg*2);
+}
+static void nb_retain_dmem(unsigned int reg,unsigned int address)
+{
+    short lanes[4];unsigned int i;
+    for(i=0;i<4;i++)lanes[i]=(short)nb_dmem_s16(address+i*2);
+    nb_retain(reg,lanes);
+}
+void naboo_set_phase(unsigned int phase){nb_phase=phase;nb_phase_written=0;}
+int naboo_get_phase(unsigned int *phase){*phase=nb_phase;return nb_phase_written;}
+static void nb_phase_set(unsigned int phase){nb_phase=phase;nb_phase_written=1;}
 void naboo_set_clock(unsigned int clock) { s_clock = clock; }
 void naboo_end_writes(int commit)
 {
@@ -61,8 +98,16 @@ void naboo_end_writes(int commit)
         s_writes = write->next; free(write);
     }
     s_record_writes = 0;
+    if(!commit){nb_phase=nb_phase_saved;nb_phase_written=nb_phase_written_saved;}
+    if(!commit){nb_size_fraction=nb_size_fraction_saved;nb_size_fraction_written=nb_size_fraction_written_saved;}
+    if(!commit){memcpy(nb_retained,nb_retained_saved,sizeof(nb_retained));nb_retained_written=nb_retained_written_saved;}
 }
-void naboo_begin_writes(void) { naboo_end_writes(1); s_record_writes = 1; }
+void naboo_begin_writes(void) {
+    naboo_end_writes(1);s_record_writes=1;
+    nb_phase_saved=nb_phase;nb_phase_written_saved=nb_phase_written;
+    nb_size_fraction_saved=nb_size_fraction;nb_size_fraction_written_saved=nb_size_fraction_written;
+    memcpy(nb_retained_saved,nb_retained,sizeof(nb_retained));nb_retained_written_saved=nb_retained_written;
+}
 
 void naboo_set_rdram(unsigned char *rdram) { s_rdram = rdram; }
 void naboo_set_rdram_size(unsigned int size) { s_rdram_size = size; }
@@ -483,6 +528,7 @@ static void nb_xfrm_range(unsigned int count, unsigned int src,
     int mi[4][4], mf[4][4];
     int i, j;
     unsigned int v;
+    unsigned int prefetch=src+(translate?((count+1u)&~1u)*8u:8u);
 
     /* translation from the state struct +0x18 (r18 = DMEM 0x110,
      * pinned by the op 0x80 init handler): DMEM 0x128, the MoveWord
@@ -512,6 +558,10 @@ static void nb_xfrm_range(unsigned int count, unsigned int src,
             /* fraction rows are unsigned (vmudn operand) */
             mf[i][j] = (int)(nb_dmem_s16(matrix + 32u + (unsigned int)(i * 8 + j * 2)) & 0xffff);
         }
+
+    nb_size_fraction_set((unsigned short)mf[0][0]|((unsigned int)(unsigned short)mf[0][1]<<16));
+    nb_retain_dmem(1,matrix+24u);
+    nb_retain_dmem(2,matrix+40u);
 
     for (v = 0; v < count; v++, src += 8u, dst += 0x28u) {
         int in[3], p[3];
@@ -572,6 +622,9 @@ static void nb_xfrm_range(unsigned int count, unsigned int src,
         for (byte = 0; byte < 40u; byte++) nb.dmem[((dst + byte)&0xfffu)^3u] = saved[byte];
         nb_dmem_w8(dst + 0x13u, alpha);
     }
+    /* The projection pipeline prefetches the next pair before testing the
+     * remaining count. An eight-byte-aligned LQV leaves the upper half. */
+    if(!(prefetch&15u))nb_retain_dmem(0,prefetch+8u);
     hle_timing_add(HLE_WORK_VERTEX, count);
 }
 static void nb_xfrm(unsigned int count)
@@ -598,11 +651,36 @@ static void nb_ovl18(unsigned int w0, unsigned int w1)
 {
     unsigned int mask = (w1 & 0xffff0000u) | (w0 & 0xffffu);
     unsigned int slot;
-    /* With fog enabled, the unused second lane comes from the native
-     * v2 register retained by preceding tasks/overlays. */
-    if (nb.geom & 0x10000u) { nb.active = 2u; return; }
+    nb_size_fraction_set((unsigned short)nb_dmem_s16(0xe60u)|
+        ((unsigned int)(unsigned short)nb_dmem_s16(0xe62u)<<16));
+    nb_retain_dmem(1,0xe58u);nb_retain_dmem(2,0xe68u);
     for (slot = 0; slot < 32u; slot++)
-        if (mask & (1u << slot)) nb_xfrm_range(1u, 0x170u + slot * 8u, 0x600u + slot * 40u, 0xe40u, 0, 0);
+        if (mask & (1u << slot)) {
+            unsigned int dst=0x600u+slot*40u,j;
+            short input[4];unsigned char saved[40],alpha;
+            for(j=0;j<4;j++)input[j]=(short)(nb_retained[j/2]>>((j&1)*16u));
+            nb_xfrm_range(1u,0x170u+slot*8u,dst,0xe40u,0,0);
+            if(!(nb.geom&0x10000u))continue;
+            /* A one-record masked transform still projects the retained
+             * second input lane and stores its fog byte in the next record.
+             * Its other outputs are discarded by the native count branch. */
+            dst+=40u;
+            for(j=0;j<40;j++)saved[j]=nb.dmem[((dst+j)&0xfffu)^3u];
+            for(j=0;j<4;j++){
+                unsigned int k;int64_t acc=0;
+                for(k=0;k<3;k++){
+                    acc+=(int64_t)(unsigned short)nb_dmem_s16(0xe60u+k*8u+j*2u)*input[k];
+                    acc+=(int64_t)nb_dmem_s16(0xe40u+k*8u+j*2u)*input[k]*65536;
+                }
+                acc+=(unsigned short)nb_dmem_s16(0xe78u+j*2u);
+                nb_dmem_w16(dst+8u+j*2u,(unsigned int)nb_acc_low(acc));
+                acc+=(int64_t)nb_dmem_s16(0xe58u+j*2u)*65536;
+                nb_dmem_w16(dst+j*2u,(unsigned int)nb_acc_mid(acc));
+            }
+            nb_project(dst);alpha=nb.dmem[((dst+0x13u)&0xfffu)^3u];
+            for(j=0;j<40;j++)nb.dmem[((dst+j)&0xfffu)^3u]=saved[j];
+            nb_dmem_w8(dst+0x13u,alpha);
+        }
 }
 
 /* Overlay 0x0f (entry 0xcf0, its own IMEM page): the descriptor/setup
@@ -672,6 +750,7 @@ static unsigned int nb_ovl0f(unsigned int w1)
         if(!indiana)nb_dmem_w32(0x100u, 0u);
         nb_dmem_w16(0xdbcu, (unsigned int)nb_pl_s16(pl, 2u) & 0xffffu);
         r14 = (int)(signed char)pl[indiana?4:1];
+        nb_phase_set((unsigned int)r14);
         r15 = (int)(signed char)pl[indiana?5:4];
         nb_dmem_w32(a2 + 0x28u, (unsigned int)r14 << 24);
         nb_dmem_w32(a2 + 0x20u, ((unsigned int)r14 << 24) | 0xffffu);
@@ -948,34 +1027,10 @@ static void nb_vcopy(short *d, const short *s)
  * `j 0x840` is that same resident transform, so it is not repeated
  * here.
  *
- * Note the inner block at 0x0e1c-0x0ec0 is SINGLE-PASS: r11 starts at
- * r22, nothing in the body writes it, and the delay slot adds -32648,
- * so the `bgez` always falls through.
+ * The inner fetch/splice runs twice, using the delay-slot update of r11
+ * to select the second keyframe pair.
  */
-/* The texture multiply reads an unspecified unsigned fraction, then uses
- * its clamped intermediate middle lane as an unsigned VMADN operand. That
- * alias can introduce a discontinuity. On each side of the middle-lane
- * boundary the result is monotone, so check both boundary values as well
- * as the endpoints. VMUDL reaches every integer in [0, low-1]. */
-static int nb_sprite_fraction_independent(short integer, short low, short high)
-{
-    int64_t base=(int64_t)integer*(unsigned short)low;
-    int64_t limit=(unsigned short)low ? (unsigned short)low-1 : 0;
-    int64_t boundary=((base>>16)+1)*65536-base;
-    int64_t inputs[4]={0,limit,boundary-1,boundary};
-    int expected=0,first=1,k;
-    for(k=0;k<4;k++) if(inputs[k]>=0 && inputs[k]<=limit) {
-        int64_t a=base+inputs[k];
-        short middle=nb_acc_mid(a);
-        int result=nb_acc_mid(a+(int64_t)(unsigned short)middle*high+
-                               (int64_t)integer*high*65536);
-        if(!first && result!=expected) return 0;
-        expected=result;first=0;
-    }
-    return 1;
-}
-/* The single billboard is accepted only when its texture slopes are
- * independent of all possible incoming v12 fraction lanes. */
+/* A single billboard consumes the saved low two size-fraction lanes. */
 static int nb_sprite15_packet(unsigned int w0, unsigned int fraction,
                               unsigned int words[10], unsigned int *size)
 {
@@ -987,7 +1042,7 @@ static int nb_sprite15_packet(unsigned int w0, unsigned int fraction,
     for (lane = 0; lane < 8u; lane++) {
         v[30][lane] = (short)nb_dmem_s16(0x30u + lane * 2u);
         v[31][lane] = (short)nb_dmem_s16(0x40u + lane * 2u);
-        v[12][lane] = (short)fraction;
+        v[12][lane] = (short)(fraction>>(lane==1u?16u:0u));
     }
     v[2][0] = (short)nb_dmem_s16(record + 0x20u);
     v[3][0] = (short)nb_dmem_s16(record + 0x22u); v[3][2] = 128;
@@ -1021,8 +1076,6 @@ static int nb_sprite15_packet(unsigned int w0, unsigned int fraction,
         v[4][lane]=(short)(raw<0?raw:0);
         left[lane]=raw<0?0:raw;right[lane]=end<0?0:end;
     }
-    if (right[0]<=left[0] || right[1]<=left[1]) { *size=0;return 1; }
-    if (v[8][0]<=0 || v[8][1]<=0) return 0;
     if (swap) { short t=v[8][0];v[8][0]=v[8][1];v[8][1]=t; }
     for (lane=0;lane<2u;lane++) {
         unsigned int reciprocal=(unsigned int)rsp_rcp32_dp(v[8][lane]);
@@ -1031,8 +1084,6 @@ static int nb_sprite15_packet(unsigned int w0, unsigned int fraction,
     nb_vmudl(&acc,v[9],v[3],10,0,v[9]);
     nb_vmudm(&acc,v[8],v[3],10,1,v[8]);
     nb_vmudn(&acc,v[9],v[30],8,1,v[9]);
-    for(lane=0;lane<2u;lane++)
-        if(!nb_sprite_fraction_independent(v[11][lane],v[9][lane],v[8][lane])) return 0;
     nb_vmudl(&acc,v[12],v[9],0,0,v[12]);
     nb_vmudm(&acc,v[11],v[9],0,1,v[12]);
     nb_vmudn(&acc,v[12],v[8],0,1,v[12]);
@@ -1047,6 +1098,8 @@ static int nb_sprite15_packet(unsigned int w0, unsigned int fraction,
     if (swap) { short t=v[4][0];v[4][0]=v[4][1];v[4][1]=t; }
     nb_vmudn(&acc,v[12],v[4],0,0,v[12]);
     nb_vmudh(&acc,v[11],v[4],0,1,v[11]);
+    nb_size_fraction_set((unsigned short)v[12][0]|((unsigned int)(unsigned short)v[12][1]<<16));
+    if (right[0]<=left[0] || right[1]<=left[1]) { *size=0;return 1; }
     for (lane=0;lane<2u;lane++) origin[lane]+=v[11][lane]*8-16;
     words[0]=0x2e000000u;
     words[1]=(unsigned int)(unsigned short)((int32_t)nb_dmem_r32(record+0x1cu)>>11)<<16;
@@ -1066,10 +1119,9 @@ static int nb_sprite15_packet(unsigned int w0, unsigned int fraction,
 }
 static int nb_ovl15(RdpFifo *fifo,unsigned int w0)
 {
-    unsigned int record=0x600u+((w0>>5)&0x7f8u),low[10],high[10],nl,nh,words[10],count,k;
+    unsigned int record=0x600u+((w0>>5)&0x7f8u),low[10],nl,words[10],count,k;
     if (nb_dmem_s16(record+0x24u)&0x4343u) return 1;
-    if (!nb_sprite15_packet(w0,0,low,&nl) || !nb_sprite15_packet(w0,0xffffu,high,&nh) ||
-        nl!=nh || memcmp(low,high,nl*sizeof(low[0]))) return 0;
+    if (!nb_sprite15_packet(w0,nb_size_fraction,low,&nl)) return 0;
     if(!nl)return 1;
     /* Coordinate and texture setup precede the splice; depth, fog enable,
      * fog alpha and tile selection are read after the child list returns. */
@@ -1202,6 +1254,10 @@ static int nb_ovl24(RdpFifo *fifo,unsigned int w0)
             if(axis==3u) mask&=~(1u<<slot);
         }
         nb_xfrm(32u);
+        {
+            unsigned int value=nb_read_u32(nb.dl+16u);
+            nb_size_fraction_set((value>>16)|((value&0xffffu)<<16));
+        }
         /* The transform reloads vector 9 from integer matrix row one.
          * Each billboard then retains its final fraction for the next
          * record; these inputs are known state, not arbitrary endpoints. */
@@ -1215,6 +1271,7 @@ static int nb_ovl24(RdpFifo *fifo,unsigned int w0)
         }
         }
     }
+    nb_phase_set(address);
     return 1;
 }
 
@@ -1243,6 +1300,7 @@ static void nb_ovl09_morph(unsigned int r8, unsigned int r9,
     r13 = (unsigned int)nb_dmem_s16((r19 & 0xfffu) + 0x22u) & 0xffffu;
     r14 = (unsigned int)nb_dmem_s16((r19 & 0xfffu) + 0x24u) & 0xffffu;
     r15 = (unsigned int)nb_dmem_s16((r19 & 0xfffu) + 0x26u) & 0xffffu;
+    if(!colored)nb_phase_set((unsigned int)(int)(short)r14);
 
     /* grid: lqv at +0x20 .. +0x90, luv at +0xa0/+0xa8 */
     for (l = 0; l < 8; l++) {
@@ -1528,6 +1586,8 @@ static void nb_ovl09_morph(unsigned int r8, unsigned int r9,
             break;              /* guard: malformed count */
     }
     (void)vz;
+    nb_size_fraction_set((unsigned short)vg[12][0]|((unsigned int)(unsigned short)vg[12][1]<<16));
+    nb_retain(0,vg[2]+4);nb_retain(1,vg[11]+4);nb_retain(2,vg[13]+4);
 }
 
 /* Overlay 0x27: update 32 indexed particle positions and lifetime state.
@@ -1544,9 +1604,8 @@ static unsigned int nb_ovl27(unsigned int w0, unsigned int w1)
     nb_load(0xc10u, state, 8u);
     mask = nb_dmem_r32(0xc10u);
     if (!mask) return 8u;
-    /* A phase-index lookup with lifetime updates disabled reads the old
-     * scalar t6. That register is not part of the HLE task context. */
-    if ((flags & 0x2000u) && (flags & 0x480u)) { nb.active = 2u; return 0; }
+    nb_size_fraction_set((unsigned short)(nb_dmem_s16(0xc00u)+nb_dmem_s16(0xc08u))|
+        ((unsigned int)(unsigned short)(nb_dmem_s16(0xc02u)+nb_dmem_s16(0xc0au))<<16));
     for (lane = 0; lane < 4u; lane++) {
         unsigned int word = nb_read_u32(nb.dl + 16u + (lane / 2u) * 4u);
         velocity[lane] = (short)(word >> ((1u - (lane & 1u)) * 16u));
@@ -1554,7 +1613,7 @@ static unsigned int nb_ovl27(unsigned int w0, unsigned int w1)
     nb_load(0x170u, positions, 256u);
     for (slot = 0; slot < 32u; slot++) {
         unsigned int pos = 0x170u + slot * 8u, life = 0xb00u + slot * 8u;
-        unsigned int phase = 0, retry = 0;
+        unsigned int phase = nb_phase, retry = 0;
         short original[4];
         int64_t acc[4];
         if (!(mask & (1u << slot))) continue;
@@ -1566,6 +1625,7 @@ static unsigned int nb_ovl27(unsigned int w0, unsigned int w1)
                     (int64_t)nb_dmem_s16(life + 2u) * step;
                 value = (((unsigned int)value & 0xffffu) * 16u >> 16) + (int64_t)nb_acc_mid(value) * 16;
                 phase = (unsigned int)(int)(short)nb_acc_low(value);
+                nb_phase_set(phase);
                 nb_dmem_w16(life, phase);
             }
             if ((int32_t)phase < 4096) break;
@@ -1580,8 +1640,8 @@ static unsigned int nb_ovl27(unsigned int w0, unsigned int w1)
             if (++retry == 64u) { nb.active = 2u; return 0; }
         }
         if (removed & (1u << slot)) continue;
-        phase >>= 4;
         if (!(flags & 0x2000u)) {
+            phase >>= 4;nb_phase_set(phase);
             if (flags & 0x40u) nb_dmem_w8(pos + 6u, phase & 0xfcu);
             if (flags & 0x20u) nb_dmem_w8(pos + 7u, phase & 0xfcu);
         }
@@ -1838,12 +1898,13 @@ static int nb_mulf_addh(int a, int b, int addend)
  * +0x14 the attenuation halfwords.  Contributions accumulate into
  * the color array at 0xd40 scaled by the global bytes at 0x158; the
  * alpha lane always carries the scaled vertex alpha. */
-static unsigned int nb_light_attenuation(unsigned int index, unsigned int record, unsigned int flags)
+static unsigned int nb_light_attenuation(unsigned int index, unsigned int record, unsigned int flags,int save_fraction)
 {
     unsigned int k;
     unsigned int lo[4];
     int hi[4];
     int64_t acc;
+    unsigned int fraction=0;
     for (k = 0; k < 4u; k++)
     {
         unsigned int alternate = ((flags >> k) & 1u) ? 8u : 0u;
@@ -1851,10 +1912,12 @@ static unsigned int nb_light_attenuation(unsigned int index, unsigned int record
         int light = nb_dmem_s16(record + alternate + k * 2u);
         int difference = nb_clamp_s16((int64_t)position - light);
         int32_t distance = difference * 256;
+        if(k<2u)fraction|=(unsigned int)(unsigned short)distance<<(k*16u);
         acc = ((int64_t)distance * distance) >> 16;
         lo[k] = (unsigned int)acc & 0xffffu;
         hi[k] = nb_acc_mid(acc);
     }
+    if(save_fraction)nb_size_fraction_set(fraction);
     /* VADDC/VADD half and quarter folds. Preserve the
      * separate carry into each saturated signed add. */
     for (k = 0; k < 4u; k += 2u)
@@ -1931,6 +1994,7 @@ static void nb_ovl1b(unsigned int w1)
             unsigned int selw0 = nb_dmem_r32(0x5b0u);
             unsigned int selw1 = nb_dmem_r32(0x5b4u);
             unsigned int have_sel = selw0 | selw1;
+            if(have_sel)nb_phase_set(0xfff00f00u);
             unsigned int sbits = selw0, scount = 16u;
             for (vi = 0; vi < nv; vi += 2u) {
                 int16_t dir[8], nrm[8];
@@ -2014,7 +2078,7 @@ static void nb_ovl1b(unsigned int w1)
         {
             for (vi = 0; vi < nv; vi++) {
                 unsigned int idx = nb.dmem[((0x380u + vi * 4u + 3u) & 0xfffu) ^ 3u];
-                unsigned int attn = nb_light_attenuation(idx, lrec, 0u);
+                unsigned int attn = nb_light_attenuation(idx, lrec, 0u,!(vi&1u));
                 for (k = 0; k < 4u; k++) {
                     unsigned int off = vi * 4u + k;
                     int c = (int)nb.dmem[(0x480u + off) ^ 3u] << 7;
@@ -2027,6 +2091,10 @@ static void nb_ovl1b(unsigned int w1)
                         (unsigned char)(((unsigned)(int16_t)r >> 7) & 0xffu);
                 }
             }
+        }
+        {
+            const short ones[4]={-1,-1,-1,-1};
+            nb_retain(0,ones);nb_retain_dmem(1,lrec);
         }
     }
 done:
@@ -2054,6 +2122,7 @@ static void nb_ovl21(unsigned int w1)
         unsigned int type = nb.dmem[((record + 0x13u) & 0xfffu) ^ 3u];
         unsigned int select = nb_dmem_r32(0x5b0u), select2 = nb_dmem_r32(0x5b4u);
         unsigned int selected = select | select2, remaining = 16u;
+        if(type)nb_phase_set(select2);
         for (vi = 0; vi < pairs; vi++)
         {
             unsigned int flags = 0;
@@ -2070,7 +2139,7 @@ static void nb_ovl21(unsigned int w1)
                 for (p = 0; p < 2u; p++)
                 {
                     unsigned int index = nb.dmem[((0x380u + vi * 2u + p) & 0xfffu) ^ 3u];
-                    factor[p] = nb_light_attenuation(index, record, flags >> (p * 4u));
+                    factor[p] = nb_light_attenuation(index, record, flags >> (p * 4u),p==0u);
                 }
             }
             for (k = 0; k < 8u; k++)
@@ -2089,6 +2158,11 @@ static void nb_ovl21(unsigned int w1)
                 if (channel == 3u) result |= scaled;
                 nb_dmem_w8(0xd40u + offset, ((unsigned int)(int16_t)result >> 7) & 0xffu);
             }
+        }
+        if(type){
+            const short ones[4]={-1,-1,-1,-1};
+            nb_retain(0,ones);
+            if(selected)nb_retain_dmem(1,record);
         }
     }
     nb_dmem_w32(0x5b0u, 0);
@@ -2115,6 +2189,7 @@ static void nb_ovl2a(unsigned int cmd, unsigned int out_st[4])
     for(row=0;row<8u;row++) for(lane=0;lane<4u;lane++)
         v[row+1u][lane]=(short)nb_dmem_s16(0xe40u+row*8u+lane*2u);
     for(lane=0;lane<4u;lane++) v[12][lane]=(short)nb_dmem_s16(0xf0u+lane*2u);
+    nb_size_fraction_set((unsigned short)v[12][0]|((unsigned int)(unsigned short)v[12][1]<<16));
     for(lane=0;lane<2u;lane++) v[21][lane]=(short)nb_dmem_s16(0xecu+lane*2u);
     for(lane=0;lane<8u;lane++) v[30][lane]=(short)nb_dmem_s16(0x30u+lane*2u);
     v[22][0]=0xab;
@@ -2173,8 +2248,9 @@ static unsigned int nb_clip_wt(const int32_t in4[4], const int32_t out4[4],
                                const int16_t P[4])
 {
     int64_t n48 = 0, d48 = 0;
-    int32_t n32, d32, coarse, norm, refined, wr;
-    int64_t acc, err, t32;
+    int32_t n32, d32;
+    NbFixed denominator,numerator,coarse,scaled,refined,product,error;
+    int64_t acc;
     unsigned int cu16, w;
     int k;
 
@@ -2186,23 +2262,39 @@ static unsigned int nb_clip_wt(const int32_t in4[4], const int32_t out4[4],
     n32 = (int32_t)n48;
     d32 = (int32_t)d48;
 
-    coarse = (int32_t)((uint32_t)rsp_rcp32_dp(d32) << 1);
-    if (d32 < 0)
-        coarse = -coarse;               /* magnitude */
-    cu16 = (((unsigned)coarse >> 16) & 0xffffu) == 0u
-         ? ((unsigned)coarse & 0xffffu) : 0xffffu;
-
-    norm = (int32_t)(((int64_t)d32 * coarse) >> 16);
-    refined = (int32_t)((uint32_t)rsp_rcp32_dp(norm) << 1);
-    wr = (int32_t)(((int64_t)norm * refined) >> 16);
-    err = ((int64_t)2 << 16) - wr;
-    refined = (int32_t)(((int64_t)refined * err) >> 16);
-
-    /* w_out = 1 + ((N x refined >> 16) x coarse) >> 16, fit exact
-     * across the probe corpus */
-    t32 = ((int64_t)n32 * refined) >> 16;
-    acc = 1 + ((t32 * (int64_t)cu16) >> 16);
-    w = (unsigned int)(acc & 0xffffu);
+    denominator.hi=(short)((uint32_t)d32>>16);denominator.lo=(uint16_t)d32;
+    numerator.hi=(short)((uint32_t)n32>>16);numerator.lo=(uint16_t)n32;
+    {
+        uint32_t bits=(uint32_t)rsp_rcp32_dp(d32);
+        acc=(int64_t)(uint16_t)bits*2;
+        coarse.lo=(unsigned int)nb_acc_low(acc);
+        acc+=(int64_t)(short)(bits>>16)*131072;
+        coarse.hi=nb_acc_mid(acc);
+    }
+    if(d32<0){
+        acc=-(int64_t)coarse.lo;
+        coarse.lo=(unsigned int)nb_acc_low(acc);
+        acc-=(int64_t)coarse.hi*65536;
+        coarse.hi=nb_acc_mid(acc);
+    }
+    cu16=coarse.hi==0?coarse.lo:0xffffu;
+    /* The denominator is scaled by the clamped UNSIGNED fraction, not
+     * the full reciprocal pair. The subsequent divide refines that
+     * scaled denominator before recombining the numerator and scale. */
+    scaled=nb_fixed_scale(denominator,cu16);
+    {
+        uint32_t bits=(uint32_t)rsp_rcp32_dp((int32_t)((uint32_t)(uint16_t)scaled.hi<<16|scaled.lo));
+        acc=(int64_t)(uint16_t)bits*2+(int64_t)(short)(bits>>16)*131072;
+        refined.lo=(unsigned int)nb_acc_low(acc);refined.hi=nb_acc_mid(acc);
+    }
+    product=nb_fixed_mul(refined,scaled);
+    error.lo=(0u-product.lo)&0xffffu;
+    error.hi=nb_clamp_s16(2-product.hi-(product.lo!=0));
+    refined=nb_fixed_mul(refined,error);
+    product=nb_fixed_mul(numerator,refined);
+    /* The selected lane starts with (v30[3] * v30[5]) >> 16 == 1. */
+    acc=1+((int64_t)product.lo*cu16>>16)+(int64_t)product.hi*cu16;
+    w=nb_acc_mid(acc)==0?(unsigned int)nb_acc_low(acc):0xffffu;
     if (w == 0u)
         w = 1u;
     return w;
@@ -2230,6 +2322,8 @@ static int nb_clip(RdpFifo *fifo, unsigned int ra, unsigned int rb,
     nb_dmem_w16(0x588u, ra);            /* fan-centre handle */
 
     lists[0][0] = ra; lists[0][1] = rb; lists[0][2] = rc;
+    nb_dmem_w16(0x560u,ra);nb_dmem_w16(0x562u,rb);
+    nb_dmem_w16(0x564u,rc);nb_dmem_w16(0x566u,0u);
     n_in = 3u; cur = 0u;
 
     /* six planes: the microcode's bgtz tests before the delay-slot
@@ -2284,6 +2378,16 @@ static int nb_clip(RdpFifo *fifo, unsigned int ra, unsigned int rb,
                 /* colors (bytes +0x10..13, u8 << 7 lanes) and the
                  * S/T halfwords (+0x14/+0x16) lerp with the same
                  * weight pair (text 0xf40-0xf60) */
+                {
+                    short outside[4];
+                    nb_size_fraction_set(((unsigned int)nb.dmem[((vin+0x10u)&0xfffu)^3u]<<7)|
+                        ((unsigned int)nb.dmem[((vin+0x11u)&0xfffu)^3u]<<23));
+                    outside[0]=(short)nb_dmem_s16(vout+0x14u);
+                    outside[1]=(short)nb_dmem_s16(vout+0x16u);
+                    outside[2]=(short)(nb.dmem[((vout+0x16u)&0xfffu)^3u]<<7);
+                    outside[3]=(short)(nb.dmem[((vout+0x17u)&0xfffu)^3u]<<7);
+                    nb_retain(1,outside);
+                }
                 for (k = 0; k < 4u; k++) {
                     int a8 = (int)nb.dmem[((vin + 0x10u + k) & 0xfffu) ^ 3u] << 7;
                     int b8 = (int)nb.dmem[((vout + 0x10u + k) & 0xfffu) ^ 3u] << 7;
@@ -2304,6 +2408,7 @@ static int nb_clip(RdpFifo *fifo, unsigned int ra, unsigned int rb,
                                 (unsigned int)r & 0xffffu);
                 }
                 nb_dmem_w16(stage + 0x24u, nb_project(stage));
+                if(!(rc&15u))nb_retain_dmem(0,rc+8u);
                 lists[cur ^ 1u][n_out++] = stage;
                 stage += 0x28u;
                 if (stage > 0x560u)
@@ -2325,6 +2430,11 @@ static int nb_clip(RdpFifo *fifo, unsigned int ra, unsigned int rb,
                             (unsigned)nb_dmem_s16(lists[cur ^ 1u][q] + 0x24u) & 0xffffu);
                 fprintf(stderr, "\n");
             }
+        }
+        {
+            unsigned int base=cur?0x560u:0x574u;
+            for(i=0;i<n_out;i++)nb_dmem_w16(base+i*2u,lists[cur^1u][i]);
+            nb_dmem_w16(base+n_out*2u,0u);
         }
         cur ^= 1u;
         n_in = n_out;
@@ -2380,9 +2490,11 @@ static int nb_clip_fan(RdpFifo *fifo)
             int32_t by = (int16_t)nb_dmem_s16(vb + 0x1au);
             int32_t cx = (int16_t)nb_dmem_s16(vc + 0x18u);
             int32_t cy = (int16_t)nb_dmem_s16(vc + 0x1au);
-            int64_t cross = (int64_t)(cx - ax) * (by - ay)
-                          - (int64_t)(bx - ax) * (cy - ay);
-            if (cross < 0 && (nb.geom & 0x2000u)) {
+            nb_size_fraction_set((unsigned short)nb_clamp_s16(ax-bx)|
+                ((unsigned int)(unsigned short)nb_clamp_s16(ay-by)<<16));
+            int64_t cross = (int64_t)nb_clamp_s16(cx-ax)*nb_clamp_s16(by-ay)
+                          - (int64_t)nb_clamp_s16(bx-ax)*nb_clamp_s16(cy-ay);
+            if (!cross || (cross < 0 && (nb.geom & 0x2000u))) {
                 nb.clip_idx++;
                 continue;
             }
@@ -2394,19 +2506,7 @@ static int nb_clip_fan(RdpFifo *fifo)
          * cull made the walker swallow arms the microcode leaves
          * standing, which is what pulled a later fan into a list the
          * microcode never entered. */
-        {
-            unsigned int splice = nb_dmem_r32(0x58cu) & 0x00fffff8u;
-            if (splice != 0u) {
-                if (nb.sp >= NB_DL_STACK)
-                    return -1;
-                nb_dmem_w32(0x58cu, 0u);
-                nb.stack[nb.sp * 2u] = nb.chunk;
-                nb.stack[nb.sp * 2u + 1u] = nb.off;
-                nb.sp++;
-                nb_dl_enter(splice);
-                return 1;
-            }
-        }
+        if ((nb_dmem_s16(0x152u)&0xfffu)!=0xcc8u && nb_call_splice(fifo)<0)return -1;
         if (nb_emit_tri(fifo, va, vb, vc) < 0)
             return -1;
         nb.clip_idx++;
@@ -2436,6 +2536,8 @@ static int nb_tri_gate(unsigned int ra, unsigned int rb, unsigned int rc)
     ax = (int16_t)nb_dmem_s16(ra + 0x18u); ay = (int16_t)nb_dmem_s16(ra + 0x1au);
     bx = (int16_t)nb_dmem_s16(rb + 0x18u); by = (int16_t)nb_dmem_s16(rb + 0x1au);
     cx = (int16_t)nb_dmem_s16(rc + 0x18u); cy = (int16_t)nb_dmem_s16(rc + 0x1au);
+    nb_size_fraction_set((unsigned short)nb_clamp_s16(ax-bx)|
+        ((unsigned int)(unsigned short)nb_clamp_s16(ay-by)<<16));
     d1x = bx - ax; d1y = by - ay;
     d2x = cx - ax; d2y = cy - ay;
     if (d1x > 32767)  d1x = 32767;
@@ -2491,12 +2593,25 @@ static int nb_emit_tri(RdpFifo *fifo, unsigned int ra, unsigned int rb,
                        tilebyte & 7, (tilebyte >> 3) & 7,
                        0x1000, 0x20, (int32_t)0xfff8, 0x1cc);
     if (nw > 0) {
+        unsigned int context[5],p;
+        rsp_tri_factor5_context(context);
+        nb_size_fraction_set(context[0]);
+        for(p=0;p<2;p++){
+            unsigned int old=nb_retained[4+p];
+            unsigned int scale=(unsigned short)nb_dmem_s16(0x36u);
+            nb_retained[p]=(unsigned short)((unsigned short)old*scale)|
+                ((unsigned int)(unsigned short)((old>>16)*scale)<<16);
+            nb_retained[2+p]=context[1+p];
+            nb_retained[4+p]=context[3+p];
+        }
+        nb_retained_written=63u;
         /* The resident writer ORs the complete tile byte into the winding
          * byte, and all low geometry bits into the opcode. Preserve even
          * their reserved bits, rather than truncating them in the shared
          * writer's tile/level arguments. */
         ew[0] |= (int32_t)(((unsigned int)tilebyte & 0xc0u)<<16);
         ew[0] |= (int32_t)((nb.geom & 0x30u)<<24);
+        nb_phase_set(((unsigned int)ew[0]>>16)&0xffu);
         {
             int k;
             /* The per-triangle callback drains the previous DMEM packet.
@@ -2709,8 +2824,8 @@ static unsigned int nb_pertri_st(unsigned int w0, unsigned int w1)
 /* Overlay 12 resolves triangle indices through the morph record table, then
  * selects its RGBA bank and classifies alpha. The three source words must be
  * latched before stores: the record handles can alias each other or the bank.
- * Return 2 for Indiana's additional alpha pass, 1 for its preliminary pass,
- * and 0 for one ordinary draw. */
+ * Return 3 for Indiana's transparent-bank skip, 2 for its additional alpha
+ * pass, 1 for its preliminary pass, and 0 for one ordinary draw. */
 static unsigned int nb_morph_attributes(unsigned int half, unsigned int records[3])
 {
     unsigned int indices[3], colors[3], k, alpha;
@@ -2729,6 +2844,7 @@ static unsigned int nb_morph_attributes(unsigned int half, unsigned int records[
             nb_dmem_w16(0xdb8u, 0x78u);
             nb_dmem_w16(0xdbau, half ? 0x1ac4u : 0x1abcu);
             if ((colors[0] | colors[1] | colors[2]) & 255u) return 2;
+            return 3;
         }
         return 0;
     }
@@ -2834,6 +2950,7 @@ static int nb_morph_quad(RdpFifo *fifo)
             if(nb_morph_draw(fifo,records)<0)return -1;
             kind=nb_morph_attributes(half,records);
         }
+        if(kind==3u)continue;
         if(kind==2u){
             int32_t words[6];unsigned int k;
             if(nb_call_splice(fifo)<0)return -1;

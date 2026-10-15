@@ -40,6 +40,25 @@ extern "C"
     {
         rsp_set_flags(RSP::cpu.get_state().cp2.flags[RSP::RSP_VCO].e,value);
     }
+    uint32_t parallelRSPGetT6(void){return RSP::cpu.get_state().sr[14];}
+    void parallelRSPSetT6(uint32_t value){RSP::cpu.get_state().sr[14]=value;}
+    void parallelRSPGetF5Context(uint32_t values[7])
+    {
+        auto& v=RSP::cpu.get_state().cp2.regs;
+        values[0]=v[12].e[0]|(uint32_t(v[12].e[1])<<16);
+        const unsigned regs[3]={2,11,13};
+        for(unsigned r=0;r<3;r++)for(unsigned p=0;p<2;p++)
+            values[1+r*2+p]=v[regs[r]].e[4+p*2]|(uint32_t(v[regs[r]].e[5+p*2])<<16);
+    }
+    void parallelRSPSetF5Context(const uint32_t values[7],uint32_t mask)
+    {
+        auto& v=RSP::cpu.get_state().cp2.regs;
+        const unsigned regs[7]={12,2,2,11,11,13,13},lanes[7]={0,4,6,4,6,4,6};
+        for(unsigned p=0;p<7;p++)if(mask&(1u<<p)){
+            v[regs[p]].e[lanes[p]]=uint16_t(values[p]);
+            v[regs[p]].e[lanes[p]+1]=uint16_t(values[p]>>16);
+        }
+    }
     void parallelRSPSaveState(uint32_t* words)
     {
         auto& s = RSP::cpu.get_state();

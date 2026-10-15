@@ -314,6 +314,7 @@ void musyx_v1_task(struct hle_t* hle)
               4);
 
     hle->rsp_vco=0;hle->rsp_vco_written=1;
+    hle->rsp_t6=0xffff8000u;hle->rsp_t6_written=1;
     rsp_break(hle, SP_STATUS_TASKDONE);
 }
 
@@ -404,6 +405,16 @@ static void auxiliary_stage_v2(struct hle_t* hle, musyx_t *musyx,
         }
         hle_timing_add(HLE_WORK_FILTER, filtering ? 3u * SUBFRAME_SIZE / 8u : 0u);
         hle_timing_add(HLE_WORK_MIX, 4u * SUBFRAME_SIZE / 8u);
+        {
+            unsigned p;
+            hle->rsp_f5[0]=(uint16_t)((int32_t)filtered[0][184]*gains[0]>>16)|
+                ((uint32_t)(uint16_t)((int32_t)filtered[0][185]*gains[0]>>16)<<16);
+            for(p=0;p<2;p++){
+                hle->rsp_f5[5+p]=(uint16_t)((int32_t)filtered[1][188+p*2]*gains[1]>>16)|
+                    ((uint32_t)(uint16_t)((int32_t)filtered[1][189+p*2]*gains[1]>>16)<<16);
+            }
+            hle->rsp_f5_written|=97u;
+        }
         for (sample = 0; sample < SUBFRAME_SIZE; sample++)
         {
             int16_t *destinations[3] = {musyx->left, musyx->right, musyx->cc0};
@@ -430,6 +441,10 @@ static void auxiliary_stage_v2(struct hle_t* hle, musyx_t *musyx,
             saved[slot * 8 + channel * 2] = last[channel][0];
             saved[slot * 8 + channel * 2 + 1] = last[channel][1];
         }
+        for(sample=0;sample<2;sample++)
+            hle->rsp_f5[3+sample]=(uint16_t)musyx->e50[188+sample*2]|
+                ((uint32_t)(uint16_t)musyx->e50[189+sample*2]<<16);
+        hle->rsp_f5_written|=24u;
     }
     dram_store_u8(hle, saved, state, sizeof(saved));
     store_u8(hle->dmem, 0xce0, saved, sizeof(saved));
@@ -477,6 +492,7 @@ void musyx_v2_task(struct hle_t* hle)
         /* initialize internal subframes using updated base volumes */
         update_base_vol(hle, musyx.base_vol, voice_mask, last_sample_ptr, mask_15, ptr_24);
         init_subframes_v2(&musyx);
+        hle->rsp_t6=0x4a0u;hle->rsp_t6_written=1;
         {
             unsigned sample;
             for(sample=0;sample<SUBFRAME_SIZE;sample++)
@@ -486,6 +502,7 @@ void musyx_v2_task(struct hle_t* hle)
 
         if (ptr_10) {
             auxiliary_stage_v2(hle, &musyx, ptr_10 & ~7u, mask_14, ptr_24);
+            if(mask_14&15u)hle->rsp_t6=0x620u;
         }
 
         /* active voices get mixed into L,R,cc0,e50 subframes (optional) */
@@ -509,6 +526,7 @@ void musyx_v2_task(struct hle_t* hle)
         if (mask_16) {
             interleave_stage_v2(hle, &musyx, mask_16, ptr_18, ptr_1c, ptr_20);
             musyx.auxiliary_carry=0;
+            hle->rsp_t6=0xae0u;
         }
         hle->rsp_vco=musyx.auxiliary_carry;
         hle->rsp_vco_written=1;
@@ -930,6 +948,33 @@ static void mix_voice_samples(struct hle_t* hle, musyx_t *musyx,
 
     dram_load_u32(hle, (uint32_t *)v4_env,      voice_ptr + VOICE_ENV_BEGIN, 4);
     dram_load_u32(hle, (uint32_t *)v4_env_step, voice_ptr + VOICE_ENV_STEP,  4);
+    {
+        uint16_t left[2],right[4];
+        unsigned lane,iteration;
+        for(lane=0;lane<6;lane++){
+            unsigned channel=lane<2?0:1;
+            unsigned element=lane<2?lane:lane-2+4;
+            uint32_t step=(uint32_t)v4_env_step[channel],begin=(uint32_t)v4_env[channel],advance=step*8u;
+            uint32_t low=(uint16_t)step*element,carry;
+            int high=clamp_s16((int32_t)(low>>16)+(int16_t)(step>>16)*(int)element);
+            low=(uint16_t)low+(uint16_t)begin;
+            high=clamp_s16(high+(int16_t)(begin>>16)+(int)(low>>16));low&=0xffffu;
+            for(iteration=0;iteration<24;iteration++){
+                carry=low+(uint16_t)advance;low=carry&0xffffu;
+                high=clamp_s16(high+(int16_t)(advance>>16)+(int)(carry>>16));
+            }
+            if(lane<2)left[lane]=(uint16_t)high;
+            else right[lane-2]=(uint16_t)high;
+        }
+        hle->rsp_f5[0]=left[0]|((uint32_t)left[1]<<16);
+        hle->rsp_f5[3]=0;hle->rsp_f5[4]=1u<<16;
+        for(lane=0;lane<2;lane++){
+            hle->rsp_f5[1+lane]=(uint16_t)(pitch_q16+(196u+lane*2u)*pitch_step)|
+                ((uint32_t)(uint16_t)(pitch_q16+(197u+lane*2u)*pitch_step)<<16);
+            hle->rsp_f5[5+lane]=right[lane*2]|((uint32_t)right[lane*2+1]<<16);
+        }
+        hle->rsp_f5_written|=127u;
+    }
 
     {
         unsigned j;
@@ -1120,6 +1165,20 @@ static void mix_voice_samples(struct hle_t* hle, musyx_t *musyx,
     }
 
     /* save last resampled sample */
+    if(musyx->version2){
+        int cursor=(int)(sample-samples);
+        uint32_t phase=pitch_accu;
+        unsigned lane;
+        /* The eight-lane loop stages the next batch's source addresses
+         * even on its final pass; t6 receives lane five of that batch. */
+        for(lane=0;lane<6;lane++){
+            int distance;
+            cursor+=(int)(phase>>16);phase=(phase&0xffffu)+pitch_step;
+            distance=cursor-(int)(sample_end-samples);
+            if(distance>=0)cursor=(int)(sample_restart-samples)+distance;
+        }
+        hle->rsp_t6=(0x7a0u+(unsigned int)cursor*2u)&0xffffu;hle->rsp_t6_written=1;
+    }
     dram_store_u16(hle, (uint16_t *)v4, last_sample_ptr, 4);
 
     HleVerboseMessage(hle->user_defined,
@@ -1159,6 +1218,7 @@ static void sfx_stage(struct hle_t* hle, mix_sfx_with_main_subframes_t mix_sfx_w
 
     /* load sfx  parameters */
     cbuffer_ptr    = *dram_u32(hle, sfx_ptr + SFX_CBUFFER_PTR);
+    if(musyx->version2){hle->rsp_t6=cbuffer_ptr;hle->rsp_t6_written=1;}
     cbuffer_length = *dram_u32(hle, sfx_ptr + SFX_CBUFFER_LENGTH);
 
     tap_count      = *dram_u16(hle, sfx_ptr + SFX_TAP_COUNT);
@@ -1225,7 +1285,29 @@ static void sfx_stage(struct hle_t* hle, mix_sfx_with_main_subframes_t mix_sfx_w
     /* apply FIR4 filter and writeback filtered result */
     memcpy(buffer, musyx->subframe_740_last4, 4 * sizeof(int16_t));
     memcpy(musyx->subframe_740_last4, subframe + SUBFRAME_SIZE - 4, 4 * sizeof(int16_t));
+    hle->rsp_f5[3]=0;hle->rsp_f5[4]=1u<<16;
+    hle->rsp_f5_written|=24u;
     mix_fir4(musyx->e50, buffer + 1, fir4_hgain, fir4_hcoeffs);
+    /* The gained return follows the FIR in the native schedule. Its last
+     * right-channel vector replaces V12, while v1 leaves the FIR's folded
+     * third gather in V13. */
+    hle->rsp_f5[0]=(uint16_t)musyx->right[184]|((uint32_t)(uint16_t)musyx->right[185]<<16);
+    for(i=0;i<2;i++){
+        if(musyx->version2){
+            hle->rsp_f5[1+i]=(uint16_t)((int32_t)subframe[188+i*2]*sfx_gains[1]>>16)|
+                ((uint32_t)(uint16_t)((int32_t)subframe[189+i*2]*sfx_gains[1]>>16)<<16);
+            hle->rsp_f5[5+i]=(uint16_t)musyx->cc0[188+i*2]|
+                ((uint32_t)(uint16_t)musyx->cc0[189+i*2]<<16);
+        }else{
+            int tap=i*2,first=clamp_s16(((int32_t)fir4_hcoeffs[tap]*fir4_hgain+0x4000)>>15);
+            int second=clamp_s16(((int32_t)fir4_hcoeffs[tap+1]*fir4_hgain+0x4000)>>15);
+            int a=clamp_s16(((int32_t)subframe[187+tap]*first+0x4000)>>15);
+            int b=clamp_s16(((int32_t)subframe[188+tap]*second+0x4000)>>15);
+            uint32_t sum=(uint16_t)clamp_s16(a+b);
+            hle->rsp_f5[5+i]=sum|((uint32_t)(uint16_t)clamp_s16(b+b)<<16);
+        }
+    }
+    hle->rsp_f5_written|=103u;
     dram_store_u16(hle, (uint16_t *)musyx->e50, (cbuffer_ptr + pos * 2)&~7u, SUBFRAME_SIZE);
 }
 
@@ -1355,6 +1437,9 @@ static void interleave_stage_v1(struct hle_t* hle, musyx_t *musyx, uint32_t outp
 
         *(dst++) = (l << 16) | r;
     }
+    for(i=0;i<2;i++)hle->rsp_f5[1+i]=(uint16_t)clamp_s16(musyx->right[188+i*2]+base_right)|
+        ((uint32_t)(uint16_t)clamp_s16(musyx->right[189+i*2]+base_right)<<16);
+    hle->rsp_f5_written|=6u;
 }
 
 static void interleave_stage_v2(struct hle_t* hle, musyx_t *musyx,
@@ -1408,4 +1493,7 @@ static void interleave_stage_v2(struct hle_t* hle, musyx_t *musyx,
 
     /* writeback subframe @ptr_1c */
     dram_store_u16(hle, (uint16_t*)subframe, ptr_1c, SUBFRAME_SIZE);
+    for(i=0;i<2;i++)hle->rsp_f5[1+i]=(uint16_t)musyx->right[188+i*2]|
+        ((uint32_t)(uint16_t)musyx->right[189+i*2]<<16);
+    hle->rsp_f5_written|=6u;
 }

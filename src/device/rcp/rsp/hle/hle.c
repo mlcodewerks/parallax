@@ -122,6 +122,8 @@ void hle_init(struct hle_t* hle,
     memset(hle->nead_v31, 0, sizeof(hle->nead_v31));
     hle->rsp_vco=0;hle->rsp_vco_written=0;
     hle->musyx_ucode_data=0;
+    hle->rsp_t6=0;hle->rsp_t6_written=0;
+    memset(hle->rsp_f5,0,sizeof(hle->rsp_f5));hle->rsp_f5_written=0;
 
     /* a streaming graphics task cannot span a plugin re-init (ROM
      * restart, savestate load): drop any suspended walk */

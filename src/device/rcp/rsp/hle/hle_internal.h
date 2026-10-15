@@ -92,6 +92,13 @@ struct hle_t
     uint16_t rsp_vco;
     int rsp_vco_written;
     uint32_t musyx_ucode_data;
+    uint32_t rsp_t6;
+    int rsp_t6_written;
+    /* Factor 5's billboard/fog consumers retain V12[0:1] and the upper
+     * halves of V2/V11/V13. Pair masks publish only derived writes.
+     * Refreshed from the native register snapshot at every HLE entry. */
+    uint32_t rsp_f5[7];
+    uint32_t rsp_f5_written;
 };
 
 /* some mips interface interrupt flags */
