@@ -1,3 +1,4 @@
+#include "../../rsp/hle/hle_timing.h"
 /* rdp_emit_f3dex2.c -- F3DEX2 display-list dispatcher for the angrylion HLE
  * path. Reads F3DEX2 commands from RDRAM, routes geometry to the C89
  * frontend (rdp_emit_frontend), and appends the resulting RDP triangle
@@ -366,6 +367,7 @@ void rdp_fifo_append(RdpFifo *f, const int32_t *words, int count)
 {
     int i;
     unsigned int off;
+    if (count > 0) hle_timing_add(HLE_WORK_RDP, (unsigned int)(count + 1) / 2u);
     if (f->used + (unsigned int)count * 4u > f->cap)
     {
         /* Heavy frames (camera swings over a full scene) can exceed the
@@ -461,6 +463,8 @@ void f3dex2_run_dl(GSPState *gsp, RdpFifo *fifo, unsigned int addr,
         w1 = rd_u32_be(r, pc + 4);
         pc += 8;
         cmd = (int)((w0 >> 24) & 0xff);
+        hle_timing_graphics_family("gfx_f3dex2");
+        hle_timing_add(HLE_WORK_COMMAND, 1);
 
 
 

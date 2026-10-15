@@ -31,6 +31,17 @@ struct hle_t;
 typedef void (*acmd_callback_t)(struct hle_t* hle, uint32_t w1, uint32_t w2);
 
 void alist_process(struct hle_t* hle, const acmd_callback_t abi[], unsigned int abi_size);
+void alist_nead_report(struct hle_t* hle, uint32_t w1, uint32_t w2, uint16_t slab);
+void alist_naudio_reenter(struct hle_t* hle);
+void alist_naudio_refill(struct hle_t* hle);
+void alist_naudio_walk(struct hle_t* hle, const acmd_callback_t abi[], int banjo);
+void alist_nead_walk(struct hle_t* hle, const acmd_callback_t abi[], unsigned abi_size, uint16_t stage, uint16_t capacity);
+void alist_nead_multiply(struct hle_t* hle, uint32_t w1, uint32_t w2);
+void alist_nead_indexed(struct hle_t* hle, uint32_t w1, uint32_t w2);
+void alist_nead_segment(struct hle_t* hle, uint32_t w2);
+uint32_t alist_nead_segment_address(struct hle_t* hle, uint32_t w2);
+void alist_dmem_dma(struct hle_t* hle, uint32_t dmem, uint32_t address, uint32_t encoded, int write);
+void alist_nead_s8(struct hle_t* hle, uint32_t w1, uint32_t w2, uint16_t scratch, uint16_t loop_offset, int pipelined);
 uint32_t alist_get_address(struct hle_t* hle, uint32_t so, const uint32_t *segments, size_t n);
 void alist_set_address(struct hle_t* hle, uint32_t so, uint32_t *segments, size_t n);
 void alist_clear(struct hle_t* hle, uint16_t dmem, uint16_t count);

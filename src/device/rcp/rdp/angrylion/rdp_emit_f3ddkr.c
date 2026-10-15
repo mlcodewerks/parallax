@@ -1,3 +1,4 @@
+#include "../../rsp/hle/hle_timing.h"
 /* rdp_emit_f3ddkr.c -- F3DDKR (Diddy Kong Racing custom microcode) display-
  * list dispatcher for the angrylion HLE path. See rdp_emit_f3ddkr.h for the
  * GBI overview. ISO C89 / MSVC-compatible.
@@ -306,6 +307,8 @@ static void f3ddkr_run_dl_impl(GSPState *gsp, RdpFifo *fifo, unsigned int addr,
         w0 = rd32(r, pc);
         w1 = rd32(r, pc + 4);
         cmd = (int)((w0 >> 24) & 0xff);
+        hle_timing_graphics_family("gfx_f3ddkr");
+        hle_timing_add(HLE_WORK_COMMAND, 1);
         pc += 8;
         count++;
 

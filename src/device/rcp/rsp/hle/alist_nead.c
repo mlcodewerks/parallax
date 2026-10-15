@@ -23,6 +23,7 @@
 
 #include <boolean.h>
 #include <stdint.h>
+#include <string.h>
 
 #include "alist.h"
 #include "common.h"
@@ -30,6 +31,7 @@
 #include "hle_internal.h"
 #include "memory.h"
 #include "ucodes.h"
+#include "hle_timing.h"
 
 /* remove windows define to 0x06 */
 #ifdef DUPLICATE
@@ -53,7 +55,7 @@
  * +0xdf8 (vaddc), +0xaac / +0x24c (const reloads), +0x5b0 (resample
  * reload from data+0x70), and carry-signature probes for every
  * predecessor. */
-static uint16_t nead_v31[8];
+#define nead_v31 (hle->nead_v31)
 
 /* DMEM address of the state-staging slab ($23 in the microcode);
  * differs per build: 0xf90 (sf/sfj/wrjb), 0xfa0 (mk), 0xfb0
@@ -84,6 +86,12 @@ static uint16_t nead_book = 0x330;
 /* DMEM address at which the handler keeps SETBUFF's operands, or zero
  * where that staging has not been established */
 static uint16_t nead_setbuff_store = 0;
+static uint16_t nead_loop_offset = 8;
+
+static uint32_t nead_address(struct hle_t* hle, uint32_t w2)
+{
+    return nead_dmem_base ? (alist_nead_segment_address(hle, w2) & 0x7fffffu) : (w2 & 0xffffffu);
+}
 
 /* whether FILTER averages the fresh coefficients with the saved table
  * (Ocarina lineage) or uses them straight (Shindou/Yoshi/1080) */
@@ -115,6 +123,26 @@ static void nead_slab_seed(struct hle_t* hle)
                        >> (((nead_slab + k) & 2) ? 0 : 16)) & 0xffff);
 }
 
+static void nead_seed(struct hle_t* hle, uint32_t pc)
+{
+    uint32_t k, text = *dmem_u32(hle, TASK_UCODE);
+    uint32_t data = *dmem_u32(hle, TASK_UCODE_DATA);
+    uint32_t size = *dmem_u32(hle, TASK_UCODE_DATA_SIZE);
+    /* Areas outside the data DMA retain the previous task's DMEM. */
+    memcpy(hle->alist_buffer, hle->dmem, sizeof(hle->alist_buffer));
+    nead_slab_seed(hle);
+    /* Constant tables and command scratch are real DMEM, including tables
+     * that the multiply/index commands can address without LOADBUFF. */
+    alist_dmem_dma(hle, 0, data, size - 1u, 0);
+    if (pc) {
+        uint32_t boot = *dmem_u32(hle, TASK_UCODE_BOOT);
+        for (k = 0; k < pc; ++k)
+            hle->imem[k ^ S8] = hle->dram[((boot + k) & 0x7fffffu) ^ S8];
+    }
+    for (k = pc; k < 4096; ++k)
+        hle->imem[k ^ S8] = hle->dram[((text + k - pc) & 0x7fffffu) ^ S8];
+}
+
 
 static void nead_v31_load(struct hle_t* hle, uint16_t data_off)
 {
@@ -124,24 +152,18 @@ static void nead_v31_load(struct hle_t* hle, uint16_t data_off)
         nead_v31[i] = *dram_u16(hle, ucode_data + data_off + 2*i);
 }
 
-static void UNKNOWN(struct hle_t* hle, uint32_t w1, uint32_t w2)
-{
-    uint8_t acmd = (w1 >> 24);
-
-    HleWarnMessage(hle->user_defined,
-                   "Unknown audio command %d: %08x %08x",
-                   acmd, w1, w2);
-}
-
-
 static void SPNOOP(struct hle_t* UNUSED(hle), uint32_t UNUSED(w1), uint32_t UNUSED(w2))
 {
+}
+static void NEAD_00(struct hle_t* hle, uint32_t w1, uint32_t w2)
+{
+    alist_nead_report(hle, w1, w2, nead_slab);
 }
 
 static void LOADADPCM(struct hle_t* hle, uint32_t w1, uint32_t w2)
 {
     uint16_t count   = w1;
-    uint32_t address = (w2 & 0xffffff);
+    uint32_t address = nead_address(hle, w2);
 
     {  size_t entries = count >> 1;
         const size_t cap = sizeof(hle->alist_nead.table)/sizeof(hle->alist_nead.table[0]);
@@ -157,18 +179,28 @@ static void LOADADPCM(struct hle_t* hle, uint32_t w1, uint32_t w2)
         uint16_t n = (uint16_t)(w1 & 0xffff);
         for (k = 0; k + 1 < n; k += 2)
             *nead_s16(hle, (uint16_t)(nead_book + k)) =
-                (int16_t)*dram_u16(hle, (w2 & 0xffffff) + k);
+                (int16_t)*dram_u16(hle, address + k);
     }
 
 }
 
 static void SETLOOP(struct hle_t* hle, uint32_t UNUSED(w1), uint32_t w2)
 {
-    hle->alist_nead.loop = w2 & 0xffffff;
+    hle->alist_nead.loop = nead_dmem_base ? alist_nead_segment_address(hle, w2) : w2 & 0xffffffu;
+    if (nead_setbuff_store) {
+        *nead_s16(hle, nead_setbuff_store+nead_loop_offset) = (int16_t)(hle->alist_nead.loop >> 16);
+        *nead_s16(hle, nead_setbuff_store+nead_loop_offset+2u) = (int16_t)hle->alist_nead.loop;
+    }
 }
 
 static void SETBUFF(struct hle_t* hle, uint32_t w1, uint32_t w2)
 {
+    if (nead_dmem_base && (w1 & 0x80000u)) {
+        *nead_s16(hle, nead_setbuff_store+10u) = (int16_t)(w1+nead_dmem_base);
+        *nead_s16(hle, nead_setbuff_store+12u) = (int16_t)((w2>>16)+nead_dmem_base);
+        *nead_s16(hle, nead_setbuff_store+14u) = (int16_t)(w2+nead_dmem_base);
+        return;
+    }
     hle->alist_nead.in    = w1 + nead_dmem_base;
     hle->alist_nead.out   = (w2 >> 16) + nead_dmem_base;
     hle->alist_nead.count = w2;
@@ -185,7 +217,7 @@ static void SETBUFF(struct hle_t* hle, uint32_t w1, uint32_t w2)
 static void ADPCM(struct hle_t* hle, uint32_t w1, uint32_t w2)
 {
     uint8_t  flags   = (w1 >> 16);
-    uint32_t address = (w2 & 0xffffff);
+    uint32_t address = nead_address(hle, w2);
 
     nead_v31_load(hle, 0x00);
     alist_adpcm(
@@ -216,18 +248,26 @@ static void LOADBUFF(struct hle_t* hle, uint32_t w1, uint32_t w2)
 {
     uint16_t count   = (w1 >> 12) & 0xfff;
     uint16_t dmem    = (w1 & 0xfff) + nead_dmem_base;
-    uint32_t address = (w2 & 0xffffff);
+    uint32_t address = nead_address(hle, w2);
 
-    alist_load(hle, dmem, address, count);
+    if (nead_dmem_base)
+        alist_dmem_dma(hle, (w1 & 0xffffu) + nead_dmem_base,
+            alist_nead_segment_address(hle, w2), ((w1 >> 12) & 0xff0u) - 1u, 0);
+    else
+        alist_load(hle, dmem, address, count);
 }
 
 static void SAVEBUFF(struct hle_t* hle, uint32_t w1, uint32_t w2)
 {
     uint16_t count   = (w1 >> 12) & 0xfff;
     uint16_t dmem    = (w1 & 0xfff) + nead_dmem_base;
-    uint32_t address = (w2 & 0xffffff);
+    uint32_t address = nead_address(hle, w2);
 
-    alist_save(hle, dmem, address, count);
+    if (nead_dmem_base)
+        alist_dmem_dma(hle, (w1 & 0xffffu) + nead_dmem_base,
+            alist_nead_segment_address(hle, w2), ((w1 >> 12) & 0xff0u) - 1u, 1);
+    else
+        alist_save(hle, dmem, address, count);
 }
 
 static void MIXER(struct hle_t* hle, uint32_t w1, uint32_t w2)
@@ -248,7 +288,7 @@ static void RESAMPLE(struct hle_t* hle, uint32_t w1, uint32_t w2)
 {
     uint8_t  flags   = (w1 >> 16);
     uint16_t pitch   = w1;
-    uint32_t address = (w2 & 0xffffff);
+    uint32_t address = nead_address(hle, w2);
 
     nead_v31_load(hle, 0x70);
     if (nead_resample_old) {
@@ -482,7 +522,7 @@ static void HILOGAIN(struct hle_t* hle, uint32_t w1, uint32_t w2)
 static void FILTER(struct hle_t* hle, uint32_t w1, uint32_t w2)
 {
     uint8_t  flags   = (w1 >> 16);
-    uint32_t address = (w2 & 0xffffff);
+    uint32_t address = nead_address(hle, w2);
 
     if (flags > 1) {
         /* setup: latch the byte count and snapshot the 16-byte
@@ -505,18 +545,21 @@ static void FILTER(struct hle_t* hle, uint32_t w1, uint32_t w2)
 
 static void S8DEC(struct hle_t* hle, uint32_t w1, uint32_t w2)
 {
-    uint8_t  flags   = (w1 >> 16);
-    uint32_t address = (w2 & 0xffffff);
-
-    alist_s8dec(
-            hle,
-            (flags & 0x1) != 0,
-            (flags & 0x2) != 0,
-            hle->alist_nead.in,
-            hle->alist_nead.out,
-            hle->alist_nead.count,
-            hle->alist_nead.loop,
-            address);
+    if (nead_setbuff_store) alist_nead_s8(hle, w1, w2, nead_setbuff_store, nead_loop_offset, 1);
+    else alist_s8dec(hle, (w1 & 0x10000u) != 0, (w1 & 0x20000u) != 0,
+        hle->alist_nead.in, hle->alist_nead.out, hle->alist_nead.count, hle->alist_nead.loop, w2 & 0xffffffu);
+}
+static void S8DEC_SFJ(struct hle_t* hle, uint32_t w1, uint32_t w2)
+{
+    alist_nead_s8(hle, w1, w2, nead_setbuff_store, nead_loop_offset, 0);
+}
+static void MULTIPLY(struct hle_t* hle, uint32_t w1, uint32_t w2)
+{
+    alist_nead_multiply(hle, w1, w2);
+}
+static void INDEXED(struct hle_t* hle, uint32_t w1, uint32_t w2)
+{
+    alist_nead_indexed(hle, w1, w2);
 }
 
 /* OoT aspMain command 0x03 (AudioSynth_UnkCmd3 in the OoT decomp,
@@ -528,11 +571,13 @@ static void UNKCMD3(struct hle_t* hle, uint32_t w1, uint32_t w2)
     uint16_t dmemi = (w2 >> 16);
     uint16_t dmemo = w2;
 
+    nead_v31_load(hle, 0);
     alist_unkcmd3(hle, dmemo, dmemi, count);
 }
 
-static void SEGMENT(struct hle_t* UNUSED(hle), uint32_t UNUSED(w1), uint32_t UNUSED(w2))
+static void SEGMENT(struct hle_t* hle, uint32_t UNUSED(w1), uint32_t w2)
 {
+    alist_nead_segment(hle, w2);
 }
 
 static void NEAD_16(struct hle_t* hle, uint32_t w1, uint32_t w2)
@@ -549,7 +594,7 @@ static void POLEF(struct hle_t* hle, uint32_t w1, uint32_t w2)
 {
     uint8_t  flags   = (w1 >> 16);
     uint16_t gain    = w1;
-    uint32_t address = (w2 & 0xffffff);
+    uint32_t address = nead_address(hle, w2);
 
     if (hle->alist_nead.count == 0)
         return;
@@ -583,10 +628,13 @@ void alist_process_nead_mk(struct hle_t* hle)
     nead_book = 0x3d0;
     nead_env_style = NEAD_ENV_MK;
     nead_resample_old = 1;
-    nead_slab_seed(hle);
+    nead_seed(hle, 0x80);
     nead_dmem_base = 0x450;
     nead_setbuff_store = 0x330;
-    alist_process(hle, ABI, 0x20);
+    nead_loop_offset = 16;
+    /* The resident initialization repeatedly clears only table slot zero. */
+    *nead_s16(hle, 0x320) = *nead_s16(hle, 0x322) = 0;
+    alist_nead_walk(hle, ABI, 0x20, 0x350, 128);
     rsp_break(hle, SP_STATUS_TASKDONE);
 }
 
@@ -599,7 +647,7 @@ void alist_process_nead_sf(struct hle_t* hle)
         MIXER,          INTERLEAVE_MK,  POLEF,          SETLOOP,
         NEAD_16,        INTERL,         ENVSETUP1,      ENVMIXER,
         LOADBUFF,       SAVEBUFF,       ENVSETUP2,      SPNOOP,
-        HILOGAIN,       UNKNOWN,        DUPLICATE,      SPNOOP,
+        HILOGAIN,       MULTIPLY,        DUPLICATE,      SPNOOP,
         SPNOOP,         SPNOOP,         SPNOOP,         SPNOOP
     };
 
@@ -607,10 +655,11 @@ void alist_process_nead_sf(struct hle_t* hle)
     nead_book = 0x3c0;
     nead_env_style = NEAD_ENV_SF;
     nead_resample_old = 0;
-    nead_slab_seed(hle);
+    nead_seed(hle, 0x80);
     nead_dmem_base = 0;
-    nead_setbuff_store = 0;
-    alist_process(hle, ABI, 0x20);
+    nead_setbuff_store = 0x320;
+    nead_loop_offset = 16;
+    alist_nead_walk(hle, ABI, 0x20, 0x340, 128);
     rsp_break(hle, SP_STATUS_TASKDONE);
 }
 
@@ -622,8 +671,8 @@ void alist_process_nead_sfj(struct hle_t* hle)
         SETBUFF,        SPNOOP,         DMEMMOVE,       LOADADPCM,
         MIXER,          INTERLEAVE_MK,  POLEF,          SETLOOP,
         NEAD_16,        INTERL,         ENVSETUP1,      ENVMIXER,
-        LOADBUFF,       SAVEBUFF,       ENVSETUP2,      UNKNOWN,
-        HILOGAIN,       UNKNOWN,        DUPLICATE,      SPNOOP,
+        LOADBUFF,       SAVEBUFF,       ENVSETUP2,      S8DEC_SFJ,
+        HILOGAIN,       MULTIPLY,        DUPLICATE,      SPNOOP,
         SPNOOP,         SPNOOP,         SPNOOP,         SPNOOP
     };
 
@@ -631,23 +680,24 @@ void alist_process_nead_sfj(struct hle_t* hle)
     nead_book = 0x3c0;
     nead_env_style = NEAD_ENV_SF;
     nead_resample_old = 0;
-    nead_slab_seed(hle);
+    nead_seed(hle, 0x80);
     nead_dmem_base = 0;
-    nead_setbuff_store = 0;
-    alist_process(hle, ABI, 0x20);
+    nead_setbuff_store = 0x320;
+    nead_loop_offset = 16;
+    alist_nead_walk(hle, ABI, 0x20, 0x340, 128);
     rsp_break(hle, SP_STATUS_TASKDONE);
 }
 
 void alist_process_nead_fz(struct hle_t* hle)
 {
     static const acmd_callback_t ABI[0x20] = {
-        UNKNOWN,        ADPCM,          CLEARBUFF,      SPNOOP,
+        NEAD_00,        ADPCM,          CLEARBUFF,      SPNOOP,
         ADDMIXER,       RESAMPLE,       SPNOOP,         SPNOOP,
         SETBUFF,        SPNOOP,         DMEMMOVE,       LOADADPCM,
         MIXER,          INTERLEAVE,     SPNOOP,         SETLOOP,
         NEAD_16,        INTERL,         ENVSETUP1,      ENVMIXER,
-        LOADBUFF,       SAVEBUFF,       ENVSETUP2,      UNKNOWN,
-        SPNOOP,         UNKNOWN,        DUPLICATE,      SPNOOP,
+        LOADBUFF,       SAVEBUFF,       ENVSETUP2,      S8DEC,
+        SPNOOP,         SPNOOP,        DUPLICATE,      SPNOOP,
         SPNOOP,         SPNOOP,         SPNOOP,         SPNOOP
     };
 
@@ -655,23 +705,24 @@ void alist_process_nead_fz(struct hle_t* hle)
     nead_book = 0x340;
     nead_env_style = NEAD_ENV_FZ;
     nead_resample_old = 0;
-    nead_slab_seed(hle);
+    nead_seed(hle, 0);
     nead_dmem_base = 0;
-    nead_setbuff_store = 0;
-    alist_process(hle, ABI, 0x20);
+    nead_setbuff_store = 0x2e0;
+    nead_loop_offset = 16;
+    alist_nead_walk(hle, ABI, 0x20, 0x300, 64);
     rsp_break(hle, SP_STATUS_TASKDONE);
 }
 
 void alist_process_nead_wrjb(struct hle_t* hle)
 {
     static const acmd_callback_t ABI[0x20] = {
-        SPNOOP,         ADPCM,          CLEARBUFF,      UNKNOWN,
+        SPNOOP,         ADPCM,          CLEARBUFF,      UNKCMD3,
         ADDMIXER,       RESAMPLE,       RESAMPLE_ZOH,   SPNOOP,
         SETBUFF,        SPNOOP,         DMEMMOVE,       LOADADPCM,
         MIXER,          INTERLEAVE,     SPNOOP,         SETLOOP,
         NEAD_16,        INTERL,         ENVSETUP1,      ENVMIXER,
-        LOADBUFF,       SAVEBUFF,       ENVSETUP2,      UNKNOWN,
-        HILOGAIN,       UNKNOWN,        DUPLICATE,      FILTER,
+        LOADBUFF,       SAVEBUFF,       ENVSETUP2,      S8DEC_SFJ,
+        HILOGAIN,       MULTIPLY,       DUPLICATE,      FILTER,
         SPNOOP,         SPNOOP,         SPNOOP,         SPNOOP
     };
 
@@ -680,22 +731,23 @@ void alist_process_nead_wrjb(struct hle_t* hle)
     nead_filter_avg = 0;
     nead_env_style = NEAD_ENV_SF;
     nead_resample_old = 0;
-    nead_slab_seed(hle);
+    nead_seed(hle, 0x80);
     nead_dmem_base = 0;
-    nead_setbuff_store = 0;
-    alist_process(hle, ABI, 0x20);
+    nead_setbuff_store = 0x320;
+    nead_loop_offset = 16;
+    alist_nead_walk(hle, ABI, 0x20, 0x340, 128);
     rsp_break(hle, SP_STATUS_TASKDONE);
 }
 
 void alist_process_nead_ys(struct hle_t* hle)
 {
     static const acmd_callback_t ABI[0x18] = {
-        UNKNOWN,        ADPCM,          CLEARBUFF,      UNKNOWN,
+        NEAD_00,        ADPCM,          CLEARBUFF,      UNKCMD3,
         ADDMIXER,       RESAMPLE,       RESAMPLE_ZOH,   FILTER,
         SETBUFF,        DUPLICATE,      DMEMMOVE,       LOADADPCM,
         MIXER,          INTERLEAVE,     HILOGAIN,       SETLOOP,
         NEAD_16,        INTERL,         ENVSETUP1,      ENVMIXER,
-        LOADBUFF,       SAVEBUFF,       ENVSETUP2,      UNKNOWN
+        LOADBUFF,       SAVEBUFF,       ENVSETUP2,      S8DEC
     };
 
     nead_slab = 0xfc0;
@@ -703,24 +755,23 @@ void alist_process_nead_ys(struct hle_t* hle)
     nead_filter_avg = 0;
     nead_env_style = NEAD_ENV_SF;
     nead_resample_old = 0;
-    nead_slab_seed(hle);
+    nead_seed(hle, 0);
     nead_dmem_base = 0;
-    nead_dmem_base = 0;
-    nead_setbuff_store = 0;
-    nead_setbuff_store = 0;
-    alist_process(hle, ABI, 0x18);
+    nead_setbuff_store = 0x2e0;
+    nead_loop_offset = 16;
+    alist_nead_walk(hle, ABI, 0x18, 0x300, 64);
     rsp_break(hle, SP_STATUS_TASKDONE);
 }
 
 void alist_process_nead_1080(struct hle_t* hle)
 {
     static const acmd_callback_t ABI[0x18] = {
-        UNKNOWN,        ADPCM,          CLEARBUFF,      UNKNOWN,
+        NEAD_00,        ADPCM,          CLEARBUFF,      UNKCMD3,
         ADDMIXER,       RESAMPLE,       RESAMPLE_ZOH,   FILTER,
         SETBUFF,        DUPLICATE,      DMEMMOVE,       LOADADPCM,
         MIXER,          INTERLEAVE,     HILOGAIN,       SETLOOP,
         NEAD_16,        INTERL,         ENVSETUP1,      ENVMIXER,
-        LOADBUFF,       SAVEBUFF,       ENVSETUP2,      UNKNOWN
+        LOADBUFF,       SAVEBUFF,       ENVSETUP2,      S8DEC
     };
 
     nead_slab = 0xfc0;
@@ -728,17 +779,18 @@ void alist_process_nead_1080(struct hle_t* hle)
     nead_filter_avg = 0;
     nead_env_style = NEAD_ENV_OOT;
     nead_resample_old = 0;
-    nead_slab_seed(hle);
+    nead_seed(hle, 0);
     nead_dmem_base = 0;
-    nead_setbuff_store = 0;
-    alist_process(hle, ABI, 0x18);
+    nead_setbuff_store = 0x2e0;
+    nead_loop_offset = 16;
+    alist_nead_walk(hle, ABI, 0x18, 0x300, 64);
     rsp_break(hle, SP_STATUS_TASKDONE);
 }
 
 void alist_process_nead_oot(struct hle_t* hle)
 {
     static const acmd_callback_t ABI[0x18] = {
-        UNKNOWN,        ADPCM,          CLEARBUFF,      UNKCMD3,
+        NEAD_00,        ADPCM,          CLEARBUFF,      UNKCMD3,
         ADDMIXER,       RESAMPLE,       RESAMPLE_ZOH,   FILTER,
         SETBUFF,        DUPLICATE,      DMEMMOVE,       LOADADPCM,
         MIXER,          INTERLEAVE,     HILOGAIN,       SETLOOP,
@@ -751,17 +803,18 @@ void alist_process_nead_oot(struct hle_t* hle)
     nead_filter_avg = 1;
     nead_env_style = NEAD_ENV_OOT;
     nead_resample_old = 0;
-    nead_slab_seed(hle);
+    nead_seed(hle, 0);
     nead_dmem_base = 0;
-    nead_setbuff_store = 0;
-    alist_process(hle, ABI, 0x18);
+    nead_setbuff_store = 0x2e0;
+    nead_loop_offset = 8;
+    alist_nead_walk(hle, ABI, 0x18, 0x2f0, 64);
     rsp_break(hle, SP_STATUS_TASKDONE);
 }
 
 void alist_process_nead_mm(struct hle_t* hle)
 {
     static const acmd_callback_t ABI[0x18] = {
-        UNKNOWN,        ADPCM,          CLEARBUFF,      SPNOOP,
+        MULTIPLY,       ADPCM,          CLEARBUFF,      SPNOOP,
         ADDMIXER,       RESAMPLE,       RESAMPLE_ZOH,   FILTER,
         SETBUFF,        DUPLICATE,      DMEMMOVE,       LOADADPCM,
         MIXER,          INTERLEAVE,     HILOGAIN,       SETLOOP,
@@ -774,10 +827,11 @@ void alist_process_nead_mm(struct hle_t* hle)
     nead_filter_avg = 1;
     nead_env_style = NEAD_ENV_OOT;
     nead_resample_old = 0;
-    nead_slab_seed(hle);
+    nead_seed(hle, 0);
     nead_dmem_base = 0;
-    nead_setbuff_store = 0;
-    alist_process(hle, ABI, 0x18);
+    nead_setbuff_store = 0x2d0;
+    nead_loop_offset = 8;
+    alist_nead_walk(hle, ABI, 0x18, 0x2f0, 64);
     rsp_break(hle, SP_STATUS_TASKDONE);
 }
 
@@ -789,7 +843,7 @@ void alist_process_nead_mmb(struct hle_t* hle)
         SETBUFF,        DUPLICATE,      DMEMMOVE,       LOADADPCM,
         MIXER,          INTERLEAVE,     HILOGAIN,       SETLOOP,
         NEAD_16,        INTERL,         ENVSETUP1,      ENVMIXER,
-        LOADBUFF,       SAVEBUFF,       ENVSETUP2,      UNKNOWN
+        LOADBUFF,       SAVEBUFF,       ENVSETUP2,      S8DEC
     };
 
     nead_slab = 0xfb0;
@@ -797,22 +851,25 @@ void alist_process_nead_mmb(struct hle_t* hle)
     nead_filter_avg = 1;
     nead_env_style = NEAD_ENV_OOT;
     nead_resample_old = 0;
-    nead_slab_seed(hle);
+    nead_seed(hle, 0);
+    *nead_s16(hle, 0x2ec) = (int16_t)(*dmem_u32(hle, TASK_DRAM_STACK) >> 16);
+    *nead_s16(hle, 0x2ee) = (int16_t)*dmem_u32(hle, TASK_DRAM_STACK);
     nead_dmem_base = 0;
-    nead_setbuff_store = 0;
-    alist_process(hle, ABI, 0x18);
+    nead_setbuff_store = 0x2e0;
+    nead_loop_offset = 8;
+    alist_nead_walk(hle, ABI, 0x18, 0x2f0, 64);
     rsp_break(hle, SP_STATUS_TASKDONE);
 }
 
 void alist_process_nead_ac(struct hle_t* hle)
 {
     static const acmd_callback_t ABI[0x18] = {
-        UNKNOWN,        ADPCM,          CLEARBUFF,      SPNOOP,
+        INDEXED,        ADPCM,          CLEARBUFF,      SPNOOP,
         ADDMIXER,       RESAMPLE,       RESAMPLE_ZOH,   FILTER,
         SETBUFF,        DUPLICATE,      DMEMMOVE,       LOADADPCM,
         MIXER,          INTERLEAVE,     HILOGAIN,       SETLOOP,
         NEAD_16,        INTERL,         ENVSETUP1,      ENVMIXER,
-        LOADBUFF,       SAVEBUFF,       ENVSETUP2,      UNKNOWN
+        LOADBUFF,       SAVEBUFF,       ENVSETUP2,      S8DEC
     };
 
     nead_slab = 0xfb0;
@@ -820,21 +877,20 @@ void alist_process_nead_ac(struct hle_t* hle)
     nead_filter_avg = 1;
     nead_env_style = NEAD_ENV_OOT;
     nead_resample_old = 0;
-    nead_slab_seed(hle);
+    nead_seed(hle, 0);
     nead_dmem_base = 0;
-    nead_setbuff_store = 0;
-    alist_process(hle, ABI, 0x18);
+    nead_setbuff_store = 0x2d0;
+    nead_loop_offset = 8;
+    alist_nead_walk(hle, ABI, 0x18, 0x2f0, 8);
     rsp_break(hle, SP_STATUS_TASKDONE);
 }
 
 void alist_process_nead_mats(struct hle_t* hle)
 {
-    /* Mario Artist: Talent Studio (64DD), ucode signature 0x1f701238.
-     * The command jump table (ucode_data + 0x10, indexed by cmd = w1 >> 24)
-     * was extracted from the running ucode and matches the nead_oot command
-     * layout for all 0x18 entries. */
+    /* Talent Studio's disk program uses 00 for signed multiplication;
+     * 03 points directly to the command-loop return at 094. */
     static const acmd_callback_t ABI[0x18] = {
-        UNKNOWN,        ADPCM,          CLEARBUFF,      UNKCMD3,
+        MULTIPLY,       ADPCM,          CLEARBUFF,      SPNOOP,
         ADDMIXER,       RESAMPLE,       RESAMPLE_ZOH,   FILTER,
         SETBUFF,        DUPLICATE,      DMEMMOVE,       LOADADPCM,
         MIXER,          INTERLEAVE,     HILOGAIN,       SETLOOP,
@@ -847,10 +903,13 @@ void alist_process_nead_mats(struct hle_t* hle)
     nead_filter_avg = 1;
     nead_env_style = NEAD_ENV_OOT;
     nead_resample_old = 0;
-    nead_slab_seed(hle);
+    nead_seed(hle, 0);
+    *nead_s16(hle, 0x2ec) = (int16_t)(*dmem_u32(hle, TASK_DRAM_STACK) >> 16);
+    *nead_s16(hle, 0x2ee) = (int16_t)*dmem_u32(hle, TASK_DRAM_STACK);
     nead_dmem_base = 0;
-    nead_setbuff_store = 0;
-    alist_process(hle, ABI, 0x18);
+    nead_setbuff_store = 0x2e0;
+    nead_loop_offset = 8;
+    alist_nead_walk(hle, ABI, 0x18, 0x2f0, 64);
     rsp_break(hle, SP_STATUS_TASKDONE);
 }
 

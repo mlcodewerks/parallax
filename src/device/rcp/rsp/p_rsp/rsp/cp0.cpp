@@ -16,6 +16,10 @@ using namespace RSP;
 
 extern "C"
 {
+#ifdef __LIBRETRO__
+    void rsp_capture_imem(const unsigned char*, const unsigned char*, unsigned,
+        unsigned, unsigned, unsigned);
+#endif
 
 	static void* dpc_opaque;
 	static void (*dpc_read)(void*, uint32_t, uint32_t*);
@@ -184,6 +188,9 @@ extern "C"
 		unsigned i = 0;
 		uint32_t source = *rsp->cp0.cr[CP0_REGISTER_DMA_DRAM];
 		uint32_t dest = *rsp->cp0.cr[CP0_REGISTER_DMA_CACHE];
+#ifdef __LIBRETRO__
+        uint32_t audit_source = source, audit_dest = dest;
+#endif
 
 #ifdef INTENSE_DEBUG
 		fprintf(stderr, "DMA READ: (0x%x <- 0x%x) len %u, count %u, skip %u\n", dest & 0x1ffc, source & 0x7ffffc,
@@ -218,6 +225,12 @@ extern "C"
 			dest = (dest & 0x1000) | ((dest + length) & 0xFFF);
 		} while (++i <= count);
 
+#ifdef __LIBRETRO__
+        if (audit_dest & 0x1000)
+            rsp_capture_imem(reinterpret_cast<const unsigned char *>(rsp->imem),
+                reinterpret_cast<const unsigned char *>(rsp->dmem), audit_dest,
+                audit_source, length_reg, rsp->pc);
+#endif
 		*rsp->cp0.cr[CP0_REGISTER_DMA_DRAM] = source & 0xffffff;
 		*rsp->cp0.cr[CP0_REGISTER_DMA_CACHE] = dest;
 		*rsp->cp0.cr[CP0_REGISTER_DMA_READ_LENGTH] =

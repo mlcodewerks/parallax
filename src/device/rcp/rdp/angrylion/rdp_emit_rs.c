@@ -1,3 +1,4 @@
+#include "../../rsp/hle/hle_timing.h"
 /* Factor 5 / LucasArts custom microcode walker (Star Wars: Rogue Squadron)
  * for the angrylion HLE path.
  *
@@ -561,6 +562,7 @@ void rs_run_dl(GSPState *gsp, RdpFifo *fifo, unsigned int dl_addr)
 
         w0 = rs_read_u32(pc);
         w1 = rs_read_u32(pc + 4u);
+        hle_timing_add(HLE_WORK_COMMAND, 1);
         op = w0 >> 24;
 
         if (op >= 0xc0u)

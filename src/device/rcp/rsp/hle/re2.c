@@ -1,3 +1,4 @@
+#include "hle_timing.h"
 /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * *
  *   Mupen64plus-rsp-hle - re2.c                                           *
  *   Mupen64Plus homepage: https://mupen64plus.org/                        *
@@ -89,6 +90,7 @@ void resize_bilinear_task(struct hle_t* hle)
             win[k] = *dram_u8(hle, row_src + k);
 
         for (j = 0; j < dst_width; ++j) {
+            if (!(j & 7u)) hle_timing_add(HLE_WORK_PIXEL, 1);
             uint32_t xi = (x >> 16) * 3;
             uint32_t xf = (x & 0xffff) >> 1;
             uint32_t nx = 0x7fff - xf;
@@ -195,6 +197,7 @@ void decode_video_frame_task(struct hle_t* hle)
 
         for (j = 0; j < nMovieWidth; j += 2)
         {
+            if (!(j & 2)) hle_timing_add(HLE_WORK_PIXEL, 1);
             dram_load_u8(hle, (uint8_t*)&Cb, pCb++, 1);
             dram_load_u8(hle, (uint8_t*)&Cr, pCr++, 1);
 
@@ -263,6 +266,7 @@ void fill_video_double_buffer_task(struct hle_t* hle)
     {
       for(j = 0; j < width; j=j+4)
       {
+        if (!(j & 28)) hle_timing_add(HLE_WORK_PIXEL, 1);
         pixel1 = *dram_u32(hle, pSrc+j);
         pixel2 = *dram_u32(hle, pDest+j);
       

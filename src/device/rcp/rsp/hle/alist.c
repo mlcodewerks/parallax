@@ -33,6 +33,7 @@
 #include "hle_external.h"
 #include "hle_internal.h"
 #include "memory.h"
+#include "hle_timing.h"
 
 struct ramp_t
 {
@@ -134,11 +135,17 @@ void alist_process(struct hle_t* hle, const acmd_callback_t abi[], unsigned int 
     const uint32_t *alist = dram_u32(hle, *dmem_u32(hle, TASK_DATA_PTR));
     const uint32_t *const alist_end = alist + (*dmem_u32(hle, TASK_DATA_SIZE) >> 2);
 
+    hle->alist_processed = 0;
+
     while (alist_end - alist >= 2) {
         w1 = *(alist++);
         w2 = *(alist++);
 
+        hle->alist_processed += 8;
+        hle->alist_remaining = (uint32_t)(alist_end - alist) * 4;
+
         acmd = (w1 >> 24) & 0x7f;
+        hle_timing_add(HLE_WORK_COMMAND, 1);
 
         if (acmd < abi_size)
             (*abi[acmd])(hle, w1, w2);
@@ -175,6 +182,8 @@ void alist_set_address(struct hle_t* hle, uint32_t so, uint32_t *segments, size_
 
 void alist_clear(struct hle_t* hle, uint16_t dmem, uint16_t count)
 {
+    hle_timing_add(HLE_WORK_COPY, (count + 15u) / 16u);
+
     while(count != 0) {
         *alist_u8(hle, dmem++) = 0;
         --count;
@@ -213,6 +222,9 @@ void alist_clear(struct hle_t* hle, uint16_t dmem, uint16_t count)
 static void alist_dma(struct hle_t* hle, uint16_t dmem, uint32_t address,
                       uint16_t count, int to_dram)
 {
+    hle_timing_add(HLE_WORK_DMA_SETUP, 1);
+    hle_timing_add(HLE_WORK_DMA, (count + 7u) / 8u);
+
     uint32_t i;
 
     /* enforce DMA alignment constraints */
@@ -243,6 +255,8 @@ void alist_save(struct hle_t* hle, uint16_t dmem, uint32_t address, uint16_t cou
 
 void alist_move(struct hle_t* hle, uint16_t dmemo, uint16_t dmemi, uint16_t count)
 {
+    hle_timing_add(HLE_WORK_COPY, (count + 15u) / 16u);
+
     while (count != 0) {
         *alist_u8(hle, dmemo++) = *alist_u8(hle, dmemi++);
         --count;
@@ -251,6 +265,8 @@ void alist_move(struct hle_t* hle, uint16_t dmemo, uint16_t dmemi, uint16_t coun
 
 void alist_copy_every_other_sample(struct hle_t* hle, uint16_t dmemo, uint16_t dmemi, uint16_t count)
 {
+    hle_timing_add(HLE_WORK_COPY, (count + 7u) / 8u);
+
     /* eight output samples per iteration, counter tested after */
     count = (uint16_t)((count + 7) & ~7);
     while (count != 0) {
@@ -263,6 +279,8 @@ void alist_copy_every_other_sample(struct hle_t* hle, uint16_t dmemo, uint16_t d
 
 void alist_repeat64(struct hle_t* hle, uint16_t dmemo, uint16_t dmemi, uint8_t count)
 {
+    hle_timing_add(HLE_WORK_COPY, count * 8u);
+
     uint16_t buffer[64];
 
     memcpy(buffer, hle->alist_buffer + dmemi, 128);
@@ -276,6 +294,8 @@ void alist_repeat64(struct hle_t* hle, uint16_t dmemo, uint16_t dmemi, uint8_t c
 
 void alist_copy_blocks(struct hle_t* hle, uint16_t dmemo, uint16_t dmemi, uint16_t block_size, uint8_t count)
 {
+    hle_timing_add(HLE_WORK_COPY, ((block_size + 31u) / 32u) * (count ? count : 1u) * 2u);
+
     int block_left = count;
 
     do
@@ -306,6 +326,8 @@ void alist_copy_blocks(struct hle_t* hle, uint16_t dmemo, uint16_t dmemi, uint16
 
 void alist_interleave(struct hle_t* hle, uint16_t dmemo, uint16_t left, uint16_t right, uint16_t count)
 {
+    hle_timing_add(HLE_WORK_COPY, (count + 7u) / 8u);
+
     uint16_t o = dmemo, l = left, r = right;
 
     count >>= 2;
@@ -567,6 +589,8 @@ void alist_envmix_audio1(
         const int32_t *rate,
         uint32_t address)
 {
+    hle_timing_add(HLE_WORK_ENVMIX, (count + 15u) / 16u);
+
     /* Program-order transcription of cmd_ENVMIXER, delay slots included.
      * Registers named after the microcode's:
      *   v20/v21 = left volume hi/lo,   v18/v19 = right volume hi/lo,
@@ -808,6 +832,8 @@ void alist_envmix_exp(
         const int32_t *rate,
         uint32_t address)
 {
+    hle_timing_add(HLE_WORK_ENVMIX, (count + 15u) / 16u);
+
     size_t n = (aux) ? 4 : 2;
 
     const int16_t* const in = (int16_t*)(hle->alist_buffer + dmemi);
@@ -927,6 +953,8 @@ void alist_envmix_ge(
         const int32_t *rate,
         uint32_t address)
 {
+    hle_timing_add(HLE_WORK_ENVMIX, (count + 15u) / 16u);
+
     unsigned k;
     size_t n = (aux) ? 4 : 2;
 
@@ -1027,6 +1055,8 @@ void alist_envmix_ge_lanes(
         const int32_t *rate,
         uint32_t address)
 {
+    hle_timing_add(HLE_WORK_ENVMIX, (count + 15u) / 16u);
+
     /* The GoldenEye/Blast Corps envmixer keeps its envelope the way the
      * naudio one does: eight 32-bit lane accumulators per channel, held
      * as separate high and low vectors, followed by the parameter
@@ -1187,6 +1217,8 @@ void alist_envmix_lin(
         uint32_t address,
         enum alist_envmix_input input_mode)
 {
+    hle_timing_add(HLE_WORK_ENVMIX, (count + 15u) / 16u);
+
     /* Exact model of the naudio ENVMIXER inner loop.
      *
      * The microcode does not step the envelope once per sample. It keeps,
@@ -1379,6 +1411,8 @@ void alist_envmix_nead(
         unsigned granule,
         bool wet_bypass)
 {
+    hle_timing_add(HLE_WORK_ENVMIX, (count + 7u) / 8u);
+
     /* Transcribed from the sequenced-audio microcodes.  The 16-sample
      * builds keep envelope value pairs [v, v+step] per channel, use one
      * pair lane per 8-sample half and advance both lanes by 2*step with
@@ -1454,6 +1488,8 @@ void alist_envmix_nead(
 
 void alist_mix(struct hle_t* hle, uint16_t dmemo, uint16_t dmemi, uint16_t count, int16_t gain)
 {
+    hle_timing_add(HLE_WORK_MIX, (count + 15u) / 16u);
+
     /* Offsets, not pointers: MIXER's caller aligns the count up to 32, and
      * both offsets come from the alist, so the walk can leave the buffer.
      * DMEM wraps inside SP memory. */
@@ -1474,6 +1510,8 @@ void alist_mix(struct hle_t* hle, uint16_t dmemo, uint16_t dmemi, uint16_t count
 
 void alist_multQ44(struct hle_t* hle, uint16_t dmem, uint16_t count, uint8_t gain)
 {
+    hle_timing_add(HLE_WORK_MIX, (count + 15u) / 16u);
+
     /* The microcode splits the gain byte into unsigned nibbles: the
      * integer part goes through vmadh, the fraction (low nibble <<12)
      * through vmudm, i.e. out = clamp(x * gain / 16) with the gain
@@ -1507,6 +1545,8 @@ void alist_multQ44(struct hle_t* hle, uint16_t dmem, uint16_t count, uint8_t gai
  * up in A/B testing. */
 void alist_add(struct hle_t* hle, uint16_t dmemo, uint16_t dmemi, uint16_t count)
 {
+    hle_timing_add(HLE_WORK_MIX, (count + 15u) / 16u);
+
     int16_t       *dst = (int16_t*)(hle->alist_buffer + dmemo);
     const int16_t *src = (int16_t*)(hle->alist_buffer + dmemi);
 
@@ -1597,6 +1637,8 @@ void alist_resample(
         uint32_t pitch,     /* Q16.16 */
         uint32_t address)
 {
+    hle_timing_add(HLE_WORK_RESAMPLE, (count + 15u) / 16u);
+
     uint32_t pitch_accu;
 
     uint16_t ipos = dmemi >> 1;
@@ -1665,6 +1707,8 @@ void alist_resample_audio(
         uint32_t pitch,     /* Q16.16 */
         uint32_t address)
 {
+    hle_timing_add(HLE_WORK_RESAMPLE, (count + 15u) / 16u);
+
     /* The plain audio (aspMain) microcode's RESAMPLE, modelled after
      * its disassembly.  It stages a 0x20 byte state block in the
      * shared slab: bytes 0x00..0x07 hold the four-sample
@@ -1785,6 +1829,8 @@ void alist_resample_nead(
         uint32_t pitch,     /* Q16.16 */
         uint32_t address)
 {
+    hle_timing_add(HLE_WORK_RESAMPLE, (count + 15u) / 16u);
+
     /* The sequenced-audio (nead) microcodes carry the same resample as
      * aspMain with the state slab at 0xfb0 and one extra restore mode:
      * flag bit 2 restores the previous window as duplicated sample
@@ -1891,6 +1937,8 @@ void alist_resample_naudio(
         uint32_t pitch,     /* Q16.16 */
         uint32_t address)
 {
+    hle_timing_add(HLE_WORK_RESAMPLE, (count + 15u) / 16u);
+
     /* The naudio resample is transposition-vectorized: each iteration
      * gathers the four-tap windows for eight outputs, computes the
      * per-tap vmulf products and the saturating pair-tree, and only
@@ -1989,6 +2037,8 @@ void alist_resample_zoh(
         uint32_t pitch,
         uint32_t pitch_accu)
 {
+    hle_timing_add(HLE_WORK_RESAMPLE, (count + 15u) / 16u);
+
     /* The microcode walks a byte-address 16.16 accumulator seeded
      * (dmemi << 16) | accu, stepping by pitch (the command's w1 << 2)
      * per output sample and even-masking each fetch address; the loop
@@ -2067,6 +2117,8 @@ void alist_adpcm(
         uint32_t loop_address,
         uint32_t last_frame_address)
 {
+    hle_timing_add(HLE_WORK_ADPCM, (count + 31u) / 32u);
+
     int16_t last_frame[16];
     size_t i;
 
@@ -2119,6 +2171,8 @@ void alist_adpcm(
  * count is zero) are stored back to the state address. */
 void alist_s8dec(struct hle_t* hle, bool init, bool loop, uint16_t dmemi, uint16_t dmemo, uint16_t count, uint32_t loop_address, uint32_t address)
 {
+    hle_timing_add(HLE_WORK_COPY, (count + 15u) / 16u);
+
     unsigned int i;
     int32_t remaining;
 
@@ -2165,6 +2219,8 @@ void alist_s8dec(struct hle_t* hle, bool init, bool loop, uint16_t dmemi, uint16
  * match the microcode. */
 void alist_mix_nead(struct hle_t* hle, uint16_t dmemo, uint16_t dmemi, uint16_t count, int16_t gain)
 {
+    hle_timing_add(HLE_WORK_MIX, (count + 15u) / 16u);
+
     int16_t d0[8], d1[8], s0[8], s1[8], r0[8], r1[8];
     int32_t remaining = (int32_t)count;
     unsigned int i;
@@ -2239,6 +2295,7 @@ void alist_filter(
         bool average,
         uint16_t slab)
 {
+    hle_timing_add(HLE_WORK_FILTER, (count + 15u) / 16u);
     int16_t state_samples[8];
     int16_t state_table[8];
     int16_t t[8];
@@ -2322,6 +2379,8 @@ void alist_polef(
         int16_t* table,
         uint32_t address)
 {
+    hle_timing_add(HLE_WORK_FILTER, (count + 15u) / 16u);
+
     /* dmemo is an alist-supplied offset and the walk advances 16 bytes a
      * block, so it can leave the buffer; index through a wrapping accessor
      * as DMEM does. */
@@ -2445,6 +2504,8 @@ void alist_iirf(
         int16_t* table,
         uint32_t address)
 {
+    hle_timing_add(HLE_WORK_FILTER, (count + 15u) / 16u);
+
     int16_t *dst = (int16_t*)(hle->alist_buffer + dmemo);
     int32_t i, prev;
     int16_t frame[8];
@@ -2497,6 +2558,8 @@ void alist_iirf(
 /* Perform a clamped gain, then attenuate it back by an amount */
 void alist_overload(struct hle_t* hle, uint16_t dmem, int16_t count, int16_t gain, uint16_t attenuation)
 {
+    hle_timing_add(HLE_WORK_FILTER, (count + 15u) / 16u);
+
     int16_t accu;
     int16_t * sample = (int16_t*)(hle->alist_buffer + dmem);
 
@@ -2526,6 +2589,8 @@ void alist_overload(struct hle_t* hle, uint16_t dmem, int16_t count, int16_t gai
  * (including 0) still processes exactly one chunk. */
 void alist_unkcmd3(struct hle_t* hle, uint16_t dmemo, uint16_t dmemi, uint16_t count)
 {
+    hle_timing_add(HLE_WORK_MIX, (count + 15u) / 16u);
+
     int32_t n = (int32_t)count;
 
     do

@@ -1,3 +1,4 @@
+#include "../../rsp/hle/hle_timing.h"
 /* SGI ZSortp screen-space object walker. Grammar reference:
  * https://github.com/gonetz/GLideN64/blob/master/src/uCodes/ZSort.cpp
  * Uses the shared integer frontend/RDP encoder, not the OpenGL renderer.
@@ -191,6 +192,8 @@ static int zs_rdplist(ZSortState *z, unsigned pointer)
         w0 = zs_get32(z->rdram, a);
         w1 = zs_get32(z->rdram, a + 4);
         op = w0 >> 24;
+        hle_timing_graphics_family("gfx_zsort");
+        hle_timing_add(HLE_WORK_COMMAND, 1);
         a += 8;
         if (op == 0xdf)
             return 1;
@@ -442,6 +445,8 @@ static int zs_walk(ZSortState *z, unsigned start)
         w0 = zs_get32(z->rdram, a);
         w1 = zs_get32(z->rdram, a + 4);
         op = w0 >> 24;
+        hle_timing_graphics_family("gfx_zsort");
+        hle_timing_add(HLE_WORK_COMMAND, 1);
         pc[depth] += 8;
         if (z->trace)
         {

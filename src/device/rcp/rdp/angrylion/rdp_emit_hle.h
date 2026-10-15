@@ -22,6 +22,8 @@ unsigned int rdp_emit_hle_state_size(void);
 void rdp_emit_hle_save(void *);
 void rdp_emit_hle_load(const void *);
 unsigned int rdp_emit_stream_state_size(void);
+unsigned int rdp_emit_stream_legacy_state_size(void);
+void rdp_emit_stream_load_legacy(const void *);
 void rdp_emit_stream_save(void *);
 void rdp_emit_stream_load(const void *);
 

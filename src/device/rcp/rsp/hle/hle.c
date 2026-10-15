@@ -35,6 +35,7 @@
 #include "hle_internal.h"
 #include "hle.h"
 #include "memory.h"
+#include <string.h>
 #include "ucodes.h"
 
 #define min(a,b) (((a) < (b)) ? (a) : (b))
@@ -118,6 +119,9 @@ void hle_init(struct hle_t* hle,
     hle->dpc_pipebusy = dpc_pipebusy;
     hle->dpc_tmem     = dpc_tmem;
     hle->user_defined = user_defined;
+    memset(hle->nead_v31, 0, sizeof(hle->nead_v31));
+    hle->rsp_vco=0;hle->rsp_vco_written=0;
+    hle->musyx_ucode_data=0;
 
     /* a streaming graphics task cannot span a plugin re-init (ROM
      * restart, savestate load): drop any suspended walk */
@@ -132,13 +136,20 @@ void hle_init(struct hle_t* hle,
 void rs_set_fog_block(unsigned int rdram_addr);
 
 #include "hle_audit_capture.h"
+#include "hle_timing.h"
+
+static void timing_identify(ucode_func_t handler);
 
 void hle_execute(struct hle_t* hle)
 {
+    hle_timing_begin();
+    hle->alist_chunk_capacity = 0;
     /* Direct RSP programs have no OSTask header. Do not inspect stale guest
      * pointers or reuse a task-cache entry when handling CIC boot code. */
     if (!is_task(hle)) {
-        non_task_detection(hle)(hle);
+        ucode_func_t handler = non_task_detection(hle);
+        timing_identify(handler);
+        handler(hle);
         return;
     }
     audit_capture_task(hle);
@@ -146,6 +157,8 @@ void hle_execute(struct hle_t* hle)
     uint32_t uc_start = *dmem_u32(hle, TASK_UCODE);
     uint32_t uc_dstart = *dmem_u32(hle, TASK_UCODE_DATA);
     uint32_t uc_dsize = *dmem_u32(hle, TASK_UCODE_DATA_SIZE);
+    hle_timing_ucode(sum_bytes(hle->dram + uc_start,
+        min(*dmem_u32(hle, TASK_UCODE_SIZE) ? *dmem_u32(hle, TASK_UCODE_SIZE) : 0xf80, 0xf80) >> 1));
 
     /* Rogue Squadron runs a fog/geometry setup overlay (ucode text word0
      * 0x40065800) immediately before its graphics task. That overlay's
@@ -191,6 +204,7 @@ void hle_execute(struct hle_t* hle)
         assert(info->uc_pfunc != NULL);
     }
 
+    timing_identify(info->uc_pfunc);
     info->uc_pfunc(hle);
 }
 
@@ -296,6 +310,7 @@ static void forward_gfx_task_to_lle(struct hle_t* hle)
 int angrylion_streaming_dlist(int resume);
 int angrylion_rs_dlist(int resume);
 int angrylion_zboss_dlist(int resume, unsigned int *sp_status);
+unsigned int zboss_cycles(void);
 
 /* ZSortBOSS (World Driver Championship, Stunt Racer 64): the task
  * carries two display lists (main at DMEM 0xff0, sub at 0xff8) and the
@@ -319,7 +334,9 @@ int angrylion_zboss_dlist(int resume, unsigned int *sp_status);
 static void zboss_gfx_task(struct hle_t* hle)
 {
     int r;
-
+    /* A bounded native polling slice executes 16 three-instruction
+     * status loops. Charge that work when no command runs. */
+    hle_timing_override(48u);
 
     if (!l_zboss_running) {
         /* task launch: the microcode clears SIG1|SIG2 and raises SIG4 */
@@ -342,6 +359,7 @@ static void zboss_gfx_task(struct hle_t* hle)
         r = angrylion_zboss_dlist(1, hle->sp_status);
     }
 
+    hle_timing_override(zboss_cycles() + 8u);
     if (r < 0) {
         l_zboss_running = 0;
         forward_gfx_task_to_lle(hle);
@@ -777,6 +795,49 @@ static ucode_func_t task_detection(struct hle_t* hle)
     else {
         return non_task_detection(hle);
     }
+}
+
+static void timing_identify(ucode_func_t handler)
+{
+    if (handler == task_done) { hle_timing_family("task_done"); return; }
+    if (handler == cicx105_ucode) { hle_timing_family("cicx105_ucode"); return; }
+    if (handler == send_dlist_to_gfx_plugin) { hle_timing_family("send_dlist_to_gfx_plugin"); return; }
+    if (handler == streaming_gfx_task) { hle_timing_family("streaming_gfx_task"); return; }
+    if (handler == rs_gfx_task) { hle_timing_family("rs_gfx_task"); return; }
+    if (handler == zboss_gfx_task) { hle_timing_family("zboss_gfx_task"); return; }
+    if (handler == naboo_gfx_task) { hle_timing_family("naboo_gfx_task"); return; }
+    if (handler == alist_process_audio) { hle_timing_family("alist_process_audio"); return; }
+    if (handler == alist_process_audio_ge) { hle_timing_family("alist_process_audio_ge"); return; }
+    if (handler == alist_process_audio_bc) { hle_timing_family("alist_process_audio_bc"); return; }
+    if (handler == alist_process_naudio) { hle_timing_family("alist_process_naudio"); return; }
+    if (handler == alist_process_naudio_bk) { hle_timing_family("alist_process_naudio_bk"); return; }
+    if (handler == alist_process_naudio_dk) { hle_timing_family("alist_process_naudio_dk"); return; }
+    if (handler == alist_process_naudio_mp3) { hle_timing_family("alist_process_naudio_mp3"); return; }
+    if (handler == alist_process_naudio_cbfd) { hle_timing_family("alist_process_naudio_cbfd"); return; }
+    if (handler == alist_process_nead_mk) { hle_timing_family("alist_process_nead_mk"); return; }
+    if (handler == alist_process_nead_sfj) { hle_timing_family("alist_process_nead_sfj"); return; }
+    if (handler == alist_process_nead_sf) { hle_timing_family("alist_process_nead_sf"); return; }
+    if (handler == alist_process_nead_fz) { hle_timing_family("alist_process_nead_fz"); return; }
+    if (handler == alist_process_nead_wrjb) { hle_timing_family("alist_process_nead_wrjb"); return; }
+    if (handler == alist_process_nead_ys) { hle_timing_family("alist_process_nead_ys"); return; }
+    if (handler == alist_process_nead_1080) { hle_timing_family("alist_process_nead_1080"); return; }
+    if (handler == alist_process_nead_oot) { hle_timing_family("alist_process_nead_oot"); return; }
+    if (handler == alist_process_nead_mm) { hle_timing_family("alist_process_nead_mm"); return; }
+    if (handler == alist_process_nead_mmb) { hle_timing_family("alist_process_nead_mmb"); return; }
+    if (handler == alist_process_nead_ac) { hle_timing_family("alist_process_nead_ac"); return; }
+    if (handler == alist_process_nead_mats) { hle_timing_family("alist_process_nead_mats"); return; }
+    if (handler == alist_process_nead_efz) { hle_timing_family("alist_process_nead_efz"); return; }
+    if (handler == musyx_v1_task) { hle_timing_family("musyx_v1_task"); return; }
+    if (handler == musyx_v2_task) { hle_timing_family("musyx_v2_task"); return; }
+    if (handler == jpeg_decode_PS0) { hle_timing_family("jpeg_decode_PS0"); return; }
+    if (handler == jpeg_decode_PS) { hle_timing_family("jpeg_decode_PS"); return; }
+    if (handler == jpeg_decode_OB) { hle_timing_family("jpeg_decode_OB"); return; }
+    if (handler == resize_bilinear_task) { hle_timing_family("resize_bilinear_task"); return; }
+    if (handler == decode_video_frame_task) { hle_timing_family("decode_video_frame_task"); return; }
+    if (handler == fill_video_double_buffer_task) { hle_timing_family("fill_video_double_buffer_task"); return; }
+    if (handler == hvqm2_decode_sp1_task) { hle_timing_family("hvqm2_decode_sp1_task"); return; }
+    if (handler == hvqm2_decode_sp2_task) { hle_timing_family("hvqm2_decode_sp2_task"); return; }
+    hle_timing_family("unknown");
 }
 
 enum hle_task_kind hle_get_task_kind(struct hle_t* hle)

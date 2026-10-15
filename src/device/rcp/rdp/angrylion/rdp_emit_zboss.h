@@ -3,6 +3,10 @@
 
 #include "rdp_emit_f3dex2.h"    /* RdpFifo */
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* triangle command buffer: one edge+shade+texture triangle is at most 44
  * words; a quad emits two */
 #define GSP_ZB_TRI_WORDS 44
@@ -20,9 +24,18 @@
  * the caller has satisfied the returned wait condition. Returns a
  * ZBOSS_R_* code, or -1 on error (caller falls back to LLE). */
 void zboss_set_shadow(int on);
+/* Estimated clocks of the last executed slice, excluding external waits. */
+unsigned int zboss_cycles(void);
 
 int zboss_run(unsigned char *rdram, unsigned int rdram_size,
               unsigned char *dmem, RdpFifo *fifo, int op,
               unsigned int *sp_status);
+/* Diagnostic walk; preserve the live BOSS continuation and bindings. */
+int zboss_run_shadow(unsigned char *rdram, unsigned int rdram_size,
+                     unsigned char *dmem, RdpFifo *fifo);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

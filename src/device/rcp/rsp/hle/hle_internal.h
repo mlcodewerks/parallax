@@ -76,6 +76,22 @@ struct hle_t
     uint8_t  mp3_buffer[0x1000];
 
     struct cached_ucodes_t cached_ucodes;
+    /* Current command's cursor counters; transient, outside audio snapshots. */
+    uint32_t alist_remaining;
+    uint32_t alist_processed;
+    uint32_t alist_next;
+    uint32_t alist_chunk;
+    uint32_t alist_chunk_offset;
+    uint32_t alist_v0;
+    int alist_stop;
+    uint32_t alist_chunk_capacity;
+    /* Persistent NEAD vector constant/carry source; extension in v1.23 states. */
+    uint16_t nead_v31[8];
+    /* Transient view of the shared RSP carry file. The native RSP snapshot
+     * already persists it; these fields are refreshed at each HLE entry. */
+    uint16_t rsp_vco;
+    int rsp_vco_written;
+    uint32_t musyx_ucode_data;
 };
 
 /* some mips interface interrupt flags */

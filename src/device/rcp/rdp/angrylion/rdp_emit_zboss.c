@@ -4,9 +4,9 @@
  * Racer 64). The CPU z-sorts; the RSP is a command server: it transforms
  * point batches back into DMEM for the sorter (MULT_MPMTX), concatenates
  * matrices, runs the audio decoder/resampler, and draws pre-sorted chains
- * of screen-space objects. Grammar and per-command semantics transcribed
- * from GLideN64's uCodes/ZSortBOSS.cpp (same repository); the task/slice
- * protocol was audited from the microcode's live behavior:
+ * of screen-space objects. ROM-backed disassembly, differential checks,
+ * instruction coverage and remaining equivalence limits are documented
+ * in benchmarks/zboss-audit/README.md. The task/slice protocol is:
  *
  *  - the OSTask carries TWO display lists: main (DMEM 0xff0) and sub
  *    (DMEM 0xff8); G_ZSBOSS_ENDMAINDL waits for the CPU to raise SIG0,
@@ -28,6 +28,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <math.h>
+#include <stddef.h>
 #include "rdp_emit_zboss.h"
 #include "rdp_emit_rsp.h"
 
@@ -66,9 +67,16 @@ typedef struct ZbState
     unsigned int    othermode_h;
     unsigned int    othermode_l;
     unsigned int    rdpcmds[3];
-    short           audio_table[8][8];
     int             tri_tile;
     int             tri_level;
+    int             rdp_pending;
+    unsigned int    alias_w0, alias_w1;
+    int             alias_pending;
+    unsigned int    obj_addr, obj_type, obj_list;
+    unsigned int    stage_bytes;
+    unsigned int    input_page[2];
+    short           legacy_book[8][8];
+    int             legacy_book_pending;
 } ZbState;
 
 static ZbState zb;
@@ -80,6 +88,27 @@ static unsigned int  *s_sp_status;
 static int            s_shadow;      /* free-run handshakes, no CPU coupling */
 static unsigned char *s_dmem;
 static RdpFifo       *s_fifo;
+static unsigned int s_cycles;
+
+/* Estimated RSP clocks for work performed in this invocation. These are
+ * instruction-path costs, with separate DMA and input-page charges. They
+ * intentionally exclude time spent waiting on the CPU or the RDP. */
+static void zb_charge(unsigned int clocks)
+{
+    if (clocks > 0x7fffffffu - s_cycles) s_cycles = 0x7fffffffu;
+    else s_cycles += clocks;
+}
+
+unsigned int zboss_cycles(void) { return s_cycles; }
+
+static void zb_dma_cost(unsigned int bytes)
+{
+    /* SP DMA setup plus one 64-bit transfer every RSP clock. Bus
+     * contention is outside the HLE model. */
+    zb_charge(16u + ((bytes + 7u) >> 3));
+}
+
+static int zb_compute(unsigned int handler, unsigned int w0, unsigned int w1);
 
 /* ---- memory accessors -------------------------------------------------- */
 
@@ -97,6 +126,21 @@ static void wr32(unsigned char *b, unsigned int a, unsigned int v)
     b[(a + 1) ^ BO8] = (unsigned char)(v >> 16);
     b[(a + 2) ^ BO8] = (unsigned char)(v >> 8);
     b[(a + 3) ^ BO8] = (unsigned char)v;
+}
+
+static void wr32d(unsigned char *b, unsigned int a, unsigned int v)
+{
+    unsigned int i;
+    for (i = 0; i < 4u; i++)
+        b[((a + i) & 0xfffu) ^ BO8] = (unsigned char)(v >> (24u - i * 8u));
+}
+
+static unsigned int rd32d(const unsigned char *b, unsigned int a)
+{
+    unsigned int i, v = 0;
+    for (i = 0; i < 4u; i++)
+        v = (v << 8) | b[((a + i) & 0xfffu) ^ BO8];
+    return v;
 }
 
 static int rd_s16(const unsigned char *b, unsigned int a)
@@ -127,8 +171,7 @@ static void wr_s16d(unsigned char *b, unsigned int a, int v)
 
 static void wr_s16(unsigned char *b, unsigned int a, int v)
 {
-    b[a ^ BO8]       = (unsigned char)((v >> 8) & 0xff);
-    b[(a + 1) ^ BO8] = (unsigned char)(v & 0xff);
+    wr_s16d(b, a, v);
 }
 
 static int rd_s8(const unsigned char *b, unsigned int a)
@@ -161,11 +204,18 @@ static int64_t zb_p_udm(int32_t a, int32_t b)
 static int64_t zb_p_udn(int32_t a, int32_t b)
 { return (int64_t)ZBU16(a) * (int64_t)ZBS16(b); }
 static int64_t zb_p_udh(int32_t a, int32_t b)
-{ return ((int64_t)ZBS16(a) * (int64_t)ZBS16(b)) << 16; }
+{ return (int64_t)ZBS16(a) * (int64_t)ZBS16(b) * 65536; }
+
+static int64_t zb_acc48(int64_t a)
+{
+    uint64_t bits = (uint64_t)a & (((uint64_t)0xffffu << 32) | 0xffffffffu);
+    return (bits & ((uint64_t)0x8000u << 32))
+        ? (int64_t)bits - ((int64_t)1 << 48) : (int64_t)bits;
+}
 
 static int32_t zb_acc_mid(int64_t a)
 {
-    int64_t hi = a >> 16;
+    int64_t hi = zb_acc48(a) >> 16;
     if (hi < -32768) return -32768;
     if (hi >  32767) return  32767;
     return (int32_t)(hi & 0xffff);
@@ -173,7 +223,7 @@ static int32_t zb_acc_mid(int64_t a)
 
 static int32_t zb_acc_low(int64_t a)
 {
-    int64_t hi = a >> 16;
+    int64_t hi = zb_acc48(a) >> 16;
     if (hi < -32768) return 0x0000;
     if (hi >  32767) return 0xffff;
     return (int32_t)(a & 0xffff);
@@ -182,10 +232,9 @@ static int32_t zb_acc_low(int64_t a)
 /* matrix element accessors: N64 packed layout at a DMEM slot -- 32 bytes
  * of s16 integer parts (row major) then 32 bytes of fraction parts */
 static int zb_mi(unsigned int base, int i, int j)
-{ return rd_s16(s_dmem, (base + (unsigned int)(i * 8 + j * 2)) & 0xfffu); }
+{ return rd_s16d(s_dmem, base + (unsigned int)(i * 8 + j * 2)); }
 static int zb_mf(unsigned int base, int i, int j)
-{ return (int)(((unsigned int)s_dmem[(base + 32u + (unsigned int)(i * 8 + j * 2)) & 0xfffu ^ BO8] << 8)
-              | s_dmem[((base + 32u + (unsigned int)(i * 8 + j * 2) + 1u) & 0xfffu) ^ BO8]); }
+{ return rd_s16d(s_dmem, base + 32u + (unsigned int)(i * 8 + j * 2)) & 0xffff; }
 static void zb_mw(unsigned int base, int i, int j, int vi, int vf)
 {
     wr_s16(s_dmem, (base + (unsigned int)(i * 8 + j * 2)) & 0xfffu, vi);
@@ -195,14 +244,12 @@ static void zb_mw(unsigned int base, int i, int j, int vi, int vf)
         = (unsigned char)(vf & 0xff);
 }
 
-/* matrix element as the transform consumes it: the fourth column is
- * scaled down by 32 relative to how it sits in memory */
+/* The resident matrix loader at IMEM 0x2b8 duplicates each packed row;
+ * it does not rescale either the W column or the Z translation. */
 static unsigned int zb_mcw(unsigned int base, int i, int j)
 {
     unsigned int v = ((unsigned int)ZBU16(zb_mi(base, i, j)) << 16)
                    |  (unsigned int)ZBU16(zb_mf(base, i, j));
-    if (j == 3)
-        v = (unsigned int)(((int32_t)v) >> 5);
     return v;
 }
 
@@ -215,12 +262,46 @@ static int zb_mcf(unsigned int base, int i, int j)
 
 /* ---- RDP output -------------------------------------------------------- */
 
+static void zb_drain(void)
+{
+    int32_t words[128];
+    unsigned int i;
+    zb_charge(25u);
+    if (zb.stage_bytes)
+    {
+        zb_dma_cost(zb.stage_bytes);
+        for (i = 0; i < zb.stage_bytes / 4u; i++)
+            words[i] = (int32_t)rd32d(s_dmem, 0xc20u + i * 4u);
+        rdp_fifo_append(s_fifo, words, (int)(zb.stage_bytes / 4u));
+    }
+    zb.stage_bytes = 0;
+    zb.rdp_pending = 0;
+}
+
+static void zb_append(const int32_t *words, int count)
+{
+    int i;
+    /* The staging area remains live across waits. CLEARBUFFER and
+     * overlapping compute outputs can change it before a drain. */
+    if (zb.stage_bytes + (unsigned int)count * 4u > 512u)
+    {
+        zb_drain();
+    }
+    for (i = 0; i < count; i++)
+        wr32d(s_dmem, 0xc20u + zb.stage_bytes + (unsigned int)i * 4u,
+              (unsigned int)words[i]);
+    zb.stage_bytes += (unsigned int)count * 4u;
+    if (count > 0) zb.rdp_pending = 1;
+}
+
 static void zb_emit_othermode(void)
 {
     int32_t two[2];
-    two[0] = (int32_t)(0xef000000u | (zb.othermode_h & 0x00ffffffu));
+    two[0] = (int32_t)zb.othermode_h;
     two[1] = (int32_t)zb.othermode_l;
-    rdp_fifo_append(s_fifo, two, 2);
+    wr32(s_dmem, 0x8f0u, zb.othermode_h);
+    wr32(s_dmem, 0x8f4u, zb.othermode_l);
+    zb_append(two, 2);
 }
 
 /* the RDP-side commands the microcode interprets rather than forwards:
@@ -231,20 +312,37 @@ static void zb_emit_othermode(void)
 static int zb_dispatch_ucode_rdp(unsigned int cmd, unsigned int w0,
                                  unsigned int w1)
 {
+    /* MOVEWORD/MOVEMEM can edit these slots between RDP commands. */
+    zb.othermode_h = rd32(s_dmem, 0x8f0u);
+    zb.othermode_l = rd32(s_dmem, 0x8f4u);
+    zb.updatemask[0] = rd32(s_dmem, 0x8f8u);
+    zb.updatemask[1] = rd32(s_dmem, 0x8fcu);
     switch (cmd)
     {
     case 0xdd:                              /* UPDATEMASK */
         zb.updatemask[0] = w0 | 0xff000000u;
         zb.updatemask[1] = w1;
+        wr32(s_dmem, 0x8f8u, zb.updatemask[0]);
+        wr32(s_dmem, 0x8fcu, zb.updatemask[1]);
         return 1;
     case 0xde:                              /* TRIANGLECOMMAND */
         zb.tri_level = (int)((w1 >> 3) & 7u);
         zb.tri_tile  = (int)(w1 & 7u);
+        wr_s16d(s_dmem, 0xc1eu, (int)w1);
         return 1;
     case 0xdf:                              /* FLUSHRDPCMDBUFFER */
-    case 0xe1:                              /* RDPHALF_1 */
-    case 0xf1:                              /* RDPHALF_2 */
         return 1;
+    case 0xe1:                              /* 0x6f8: stage first half */
+        wr32d(s_dmem, 0x900u, w1);
+        return 1;
+    case 0xf1:                              /* 0x704: emit paired halves */
+    {
+        int32_t two[2];
+        two[0] = (int32_t)rd32(s_dmem, 0x900u);
+        two[1] = (int32_t)w1;
+        zb_append(two, 2);
+        return 1;
+    }
     case 0xe2:                              /* SETOTHERMODE_L */
     {
         unsigned int mask =
@@ -274,75 +372,79 @@ static int zb_dispatch_ucode_rdp(unsigned int cmd, unsigned int w0,
     return 0;
 }
 
-/* run a chain of RDP commands at an RDRAM address until 0xDF, through
- * the command table (transcribed from ZSort_RDPCMD: TEXRECT spans three
- * command pairs) */
-static void zb_rdpcmd(unsigned int w1)
+/* The RDP table overlaps the primary table at C9..DC. Those entries
+ * execute command-server handlers and return to k0, abandoning the RDP
+ * chain. They are not raw RDP triangles. D0 re-enters RDPCMD without
+ * creating a return stack. Control handlers are handed to the walker. */
+static void zb_rdpcmd(unsigned int w1, int drain)
 {
-    unsigned int addr = seg_phys(w1);
+    unsigned int addr = seg_phys(w1) & ~7u;
+    unsigned int page_commands = 0;
     int guard = 0;
-    if (addr == 0)
+    if (addr == 0 && !drain)
         return;
     while (guard++ < 65536)
     {
-        unsigned int c0, c1, op;
+        unsigned int c0, c1, op, handler;
         if (!addr_ok(addr, 8u))
             return;
-        c0 = rd32(s_rdram, addr);
+        if (page_commands == 0)
+        {
+            unsigned int byte;
+            zb_dma_cost(64u);
+            /* Low RDP dispatch entries overlap the page DMA itself.
+             * Fetch before resolving the handler, exactly as 0x618 does. */
+            for (byte = 0; byte < 64u; byte++)
+                s_dmem[(0xb70u + byte) ^ BO8] =
+                    s_rdram[((addr + byte) & (s_rdram_size - 1u)) ^ BO8];
+        }
+        c0 = rd32d(s_dmem, 0xb70u + page_commands * 8u);
         op = (c0 >> 24) & 0xffu;
-        if (op == 0xdfu)
-            return;
-        c1 = rd32(s_rdram, addr + 4u);
+        c1 = rd32d(s_dmem, 0xb74u + page_commands * 8u);
+        handler = (unsigned int)rd_s16d(s_dmem, 0xa1eu + op * 2u) & 0xfffu;
+        page_commands = (page_commands + 1u) & 7u;
+        zb_charge(12u);
+        if (zb.stage_bytes >= 344u)
+        {
+            zb_drain();
+        }
         addr += 8u;
+        if (handler == 0x664u)
+        {
+            if (drain)
+            {
+                zb_drain();
+            }
+            return;
+        }
+        if (handler == 0x610u)
+        {
+            addr = seg_phys(c1) & ~7u;
+            page_commands = 0;
+            drain = 1;
+            zb_charge(2u);
+            continue;
+        }
+        if (handler == 0x718u) continue;
+        if (zb_compute(handler, c0, c1)) return;
+        switch (handler)
+        {
+        case 0x790: op = 0xdd; break;
+        case 0x7ec: op = 0xde; break;
+        case 0x6f8: op = 0xe1; break;
+        case 0x704: op = 0xf1; break;
+        case 0x758: op = 0xe2; break;
+        case 0x720: op = 0xe3; break;
+        case 0x7a4: op = 0xef; break;
+        case 0x7dc: op = 0xe0; break;
+        default:
+            zb.alias_w0 = c0;
+            zb.alias_w1 = c1;
+            zb.alias_pending = 1;
+            return;
+        }
         if (zb_dispatch_ucode_rdp(op, c0, c1))
             continue;
-        if (op >= 0xc8u && op <= 0xcfu)
-        {
-            /* raw RDP triangle built by the CPU: forward the full
-             * command (8..44 words). The LLE game path renders this
-             * way (CPU-computed coefficients in the chains); a
-             * two-word forward would misparse the coefficients as
-             * commands. */
-            static const unsigned char tri_words[8] =
-                { 8, 12, 24, 28, 24, 28, 40, 44 };
-            unsigned int clen = tri_words[op & 7u];
-            int32_t buf[44];
-            unsigned int q;
-            buf[0] = (int32_t)c0;
-            buf[1] = (int32_t)c1;
-            if (!addr_ok(addr, (clen - 2u) * 4u))
-                return;
-            for (q = 2; q < clen; q++)
-            {
-                buf[q] = (int32_t)rd32(s_rdram, addr);
-                addr += 4u;
-            }
-            rdp_fifo_append(s_fifo, buf, (int)clen);
-            continue;
-        }
-        if (op == 0xe4u || op == 0xe5u)
-        {
-            /* rectangle pair + the s/t and dsdx/dtdy halves from the two
-             * following command pairs (second word of each) */
-            int32_t tr[4];
-            unsigned int h0 = 0u, h1 = 0u;
-            if (addr_ok(addr, 16u))
-            {
-                h0 = rd32(s_rdram, addr + 4u);
-                h1 = rd32(s_rdram, addr + 12u);
-                addr += 16u;
-            }
-            tr[0] = (int32_t)c0;
-            tr[1] = (int32_t)c1;
-            tr[2] = (int32_t)h0;
-            tr[3] = (int32_t)h1;
-            rdp_fifo_append(s_fifo, tr, 4);
-        }
-        else if (op == 0x29u)
-        {
-            rdp_fifo_fullsync_note();
-        }
-        else if (op >= 0xc8u)
         {
             int32_t two[2];
             two[0] = (int32_t)c0;
@@ -354,7 +456,7 @@ static void zb_rdpcmd(unsigned int w1)
              * itself, so resolving them here only made the emitted
              * words diverge from the oracle stream. */
             two[1] = (int32_t)c1;
-            rdp_fifo_append(s_fifo, two, 2);
+            zb_append(two, 2);
         }
     }
 }
@@ -368,16 +470,15 @@ static int zb_calc_invw(int w)
     return (int)(0x7fffffffl / (long)w);
 }
 
-/* emit one triangle through the RSP edge writer, guarding the two ways
- * a screen-space sliver can poison the software rasterizer: zero area
- * feeds the reciprocal chain garbage, and the resulting coefficients
- * can carry y spans thousands of lines outside the input bounding box.
- * Such triangles cover no pixels the fill rules would keep; drop them. */
+/* Resident 0x904..0xbc8 emits an edge/shade/texture block even for a
+ * degenerate triangle. The BOSS writer mode preserves those commands. */
 static void zb_emit_tri(const RspTriVtx *a, const RspTriVtx *b,
                         const RspTriVtx *c)
 {
     int32_t cmd[GSP_ZB_TRI_WORDS];
     int nw;
+    zb_charge(183u);
+    if (zb.stage_bytes >= 344u) zb_drain();
     nw = rsp_tri_write(cmd, a, b, c,
                        1 /*textured*/, 0 /*z*/, 1 /*shaded*/, 1 /*smooth*/,
                        zb.tri_tile, zb.tri_level,
@@ -392,8 +493,10 @@ static void zb_emit_tri(const RspTriVtx *a, const RspTriVtx *b,
     /* the microcode assembles the command byte as the bare RDP opcode
      * (IMEM 0xb84-0xb94: tile/level halfword OR the LFT bit) without
      * the 0xc0 prefix the F3DEX2-family writer applies */
-    cmd[0] &= (int32_t)0x3fffffffl;
-    rdp_fifo_append(s_fifo, cmd, nw);
+    cmd[0] = (int32_t)(((uint32_t)cmd[0] & 0x0000ffffu)
+             | ((uint32_t)((rd_s16d(s_dmem, 0xc1eu) & 0xffff)
+                         | (((uint32_t)cmd[0] >> 16) & 0x80u)) << 16));
+    zb_append(cmd, nw);
 }
 
 static void zb_draw_object(unsigned int addr, unsigned int type)
@@ -431,20 +534,7 @@ static void zb_draw_object(unsigned int addr, unsigned int type)
         v[i].flat2d = 0;
     }
 
-    /* The CPU hands the microcode unclipped screen-space objects whose
-     * far vertices run to the s13.2 extremes; the F3DEX2 edge writer's
-     * fixed point (y*0x4000 anchor products, slope reciprocals) assumes
-     * the microcode's own post-clip domain and saturates on such input,
-     * emitting commands with ym/yh pinned at 0x8001 whose slopes sweep
-     * thousands of on-screen pixels (observed 9.4k px per triangle,
-     * 2.7x total triangle fill). BOSS's own triangle setup tolerates
-     * the wide domain; ours must not see it. Clip each triangle to a
-     * guard band around the frame in screen space before emission --
-     * attributes interpolate linearly in screen space, which is the
-     * plane equation the RDP evaluates, so this is render-equivalent
-     * inside the scissor.
-     *
-     * Triangulation follows the microcode exactly: the TXQUAD handler
+    /* Triangulation follows the resident code: the TXQUAD handler
      * (IMEM 0x8e4) first runs the triangle setup on records 2,3,4 and
      * then falls into the TXTRI path (IMEM 0x8f8) for records 1,2,3 --
      * per-record-index triangles, not a strip-ring fan (the shadow
@@ -466,6 +556,19 @@ static unsigned int zb_load_object(unsigned int zheader)
     unsigned int w1;
     if (!addr_ok(addr, 16u))
         return 0;
+    if (zb.obj_list)
+    {
+        addr = zb.obj_addr;
+        type = zb.obj_type;
+    }
+    else
+    {
+        zb.obj_addr = addr;
+        zb.obj_type = type;
+        zb.obj_list = 1;
+        zb_charge(25u);
+        zb_dma_cost(80u);
+    }
     /* the microcode's OBJ handler polls SIG0 once per chain link
      * (IMEM 0x85c): when the CPU has granted the sub list, take the
      * signal and remember it; the switch itself happens at the next
@@ -480,17 +583,28 @@ static unsigned int zb_load_object(unsigned int zheader)
     }
     if (type == ZH_NULL || type == ZH_TXTRI || type == ZH_TXQUAD)
     {
-        w1 = rd32(s_rdram, addr + 4u);
-        if (w1 != zb.rdpcmds[0]) { zb.rdpcmds[0] = w1; zb_rdpcmd(w1); }
-        w1 = rd32(s_rdram, addr + 8u);
-        if (w1 != zb.rdpcmds[1]) { zb_rdpcmd(w1); zb.rdpcmds[1] = w1; }
-        w1 = rd32(s_rdram, addr + 12u);
-        if (w1 != zb.rdpcmds[2]) { zb_rdpcmd(w1); zb.rdpcmds[2] = w1; }
+        while (zb.obj_list <= 3u)
+        {
+            unsigned int slot = zb.obj_list++ - 1u;
+            w1 = rd32(s_rdram, addr + 4u + slot * 4u);
+            if (w1 == 0u || w1 == rd32d(s_dmem, 0xef4u + slot * 4u))
+                continue;
+            zb.rdpcmds[slot] = w1;
+            wr32d(s_dmem, 0xef4u + slot * 4u, w1);
+            zb_rdpcmd(w1, 0);
+            if (zb.alias_pending) return zheader;
+        }
         if (type != ZH_NULL)
             zb_draw_object(addr + 16u, type);
-        else if (zb.sig0_taken && zb.pci == 0)
-            zb.switch_req = 1;
     }
+    /* Every no-op type enters 0x80c/0x810 too, even though it bypasses
+     * its own state lists. Drain prior staged words before the checkpoint. */
+    if (zb.rdp_pending)
+    {
+        zb_drain();
+        if (zb.sig0_taken && zb.pci == 0) zb.switch_req = 1;
+    }
+    zb.obj_list = 0;
     return seg_phys(rd32(s_rdram, addr));
 }
 
@@ -525,6 +639,7 @@ static int zb_obj(unsigned int w0, unsigned int w1)
             continue;
         }
         zb.obj_chain = zb_load_object(zb.obj_chain);
+        if (zb.alias_pending) return 2;
         if (zb.switch_req)
         {
             zb.switch_req = 0;
@@ -546,21 +661,25 @@ static void zb_movemem(unsigned int w0, unsigned int w1)
      * single source of truth also makes the game's DMEM->RDRAM
      * readbacks byte-exact. */
     int flag = (int)((w0 >> 23) & 1u);
-    unsigned int len = 1u + ((w0 >> 12) & 0x7ffu);
-    unsigned int addr = seg_phys(w1);
-    unsigned int off = w0 & 0xfffu;
+    unsigned int encoded_len = (w0 >> 12) & 0x7ffu;
+    unsigned int len = (encoded_len | 7u) + 1u;
+    unsigned int addr = seg_phys(w1) & ~7u;
+    unsigned int off = w0 & 0xff8u;
     unsigned int i;
 
-    if (!addr_ok(addr, len) || off + len > 0x1000u)
+    /* The common DMA helper at 0xf90 returns without starting a DMA
+     * for an encoded length of zero. SP rounds other lengths to eight
+     * bytes, aligns both addresses, and wraps inside the DMEM bank. */
+    if (encoded_len == 0u || !addr_ok(addr, len))
         return;
     if (!flag)
         for (i = 0; i < len; i++)
-            s_dmem[(off + i) ^ BO8] = s_rdram[(addr + i) ^ BO8];
+            s_dmem[((off + i) & 0xfffu) ^ BO8] = s_rdram[(addr + i) ^ BO8];
     else if (!s_shadow)
         /* the read-only shadow walk must not export into the live
          * game's RDRAM (the MOVEMEM readback buffers) */
         for (i = 0; i < len; i++)
-            s_rdram[(addr + i) ^ BO8] = s_dmem[(off + i) ^ BO8];
+            s_rdram[(addr + i) ^ BO8] = s_dmem[((off + i) & 0xfffu) ^ BO8];
 }
 
 static void zb_mtxcat(unsigned int w0, unsigned int w1)
@@ -573,22 +692,31 @@ static void zb_mtxcat(unsigned int w0, unsigned int w1)
     int oi[4][4], of4[4][4];
     int i, j, k;
     for (i = 0; i < 4; i++)
+    {
         for (j = 0; j < 4; j++)
         {
             int64_t acc = 0;
             for (k = 0; k < 4; k++)
             {
-                acc += zb_p_udl(zb_mf(sb, i, k), zb_mf(tb, k, j));
-                acc += zb_p_udm(zb_mi(sb, i, k), zb_mf(tb, k, j));
-                acc += zb_p_udn(zb_mf(sb, i, k), zb_mi(tb, k, j));
-                acc += zb_p_udh(zb_mi(sb, i, k), zb_mi(tb, k, j));
+                acc += zb_p_udl(zb_mf(sb, k, j), zb_mf(tb, i, k));
+                acc += zb_p_udm(zb_mi(sb, k, j), zb_mf(tb, i, k));
+                acc += zb_p_udn(zb_mf(sb, k, j), zb_mi(tb, i, k));
+                if (k == 3)
+                    of4[i][j] = zb_acc_low(acc);
+                acc += zb_p_udh(zb_mi(sb, k, j), zb_mi(tb, i, k));
             }
             oi[i][j] = zb_acc_mid(acc);
-            of4[i][j] = zb_acc_low(acc);
         }
-    for (i = 0; i < 4; i++)
-        for (j = 0; j < 4; j++)
-            zb_mw(db, i, j, oi[i][j], of4[i][j]);
+        if ((i & 1) != 0)
+        {
+            int row;
+            /* 0x2a4/0x2a8 export two rows before the next block
+             * reloads S. This ordering matters when destination=S. */
+            for (row = i - 1; row <= i; row++)
+                for (j = 0; j < 4; j++)
+                    zb_mw(db, row, j, oi[row][j], of4[row][j]);
+        }
+    }
 }
 
 static void zb_transpose(unsigned int w1)
@@ -628,8 +756,13 @@ static void zb_mult_mpmtx(unsigned int w0, unsigned int w1)
     int fogm = rd_s16(s_dmem, 6u);
     int fogo = rd_s16(s_dmem, 14u);
     int scale[2], trans[2], pre_i[2], pre_f[2];
+    unsigned int fog_addr[2], record_addr[2], clip_code[2];
     int j;
     unsigned int p;
+
+    /* The vector pipeline consumes and exports pairs, including the
+     * padded second point when the encoded count is odd. */
+    num = (num + 1u) & ~1u;
 
     {
         long t2 = (long)(short)ivf + (long)(short)ivf;   /* vadd lane sat */
@@ -658,6 +791,7 @@ static void zb_mult_mpmtx(unsigned int w0, unsigned int w1)
         int scr[2];
         int fog;
         unsigned int cc = 0;
+        unsigned int lane = p & 1u;
         int64_t acc;
 
         co[0] = rd_s16(s_dmem, src); src = (src + 2u) & 0xfffu;
@@ -666,34 +800,18 @@ static void zb_mult_mpmtx(unsigned int w0, unsigned int w1)
 
         for (j = 0; j < 4; j++)
         {
-            /* the w column is held five bits down from the other
-             * three: the reference's loaded matrix carries
-             * 0x0000daf7 where the block in memory reads 0x001b5ee5,
-             * and clipping against the wider value flags every vertex
-             * as outside on all six planes.
-             *
-             * the z translation is the mirror of that. The projection
-             * matrix carries a 1/32 scale in its z column, and the
-             * concatenation folds that scale through the whole column,
-             * the translation row included; but the transform adds the
-             * z translation at full scale, so it is lifted back up by
-             * five here. Without this the transformed z is a thirty-
-             * second of its true value, and vertices near the near
-             * plane clip on the wrong side. */
-            if (j == 2)
-                acc = ((int64_t)zb_p_udn(zb_mcf(mb, 3, j), 1)
-                     + (int64_t)zb_p_udh(zb_mci(mb, 3, j), 1)) << 5;
-            else
-                acc = zb_p_udn(zb_mcf(mb, 3, j), 1)
-                    + zb_p_udh(zb_mci(mb, 3, j), 1);
+            /* 0x348..0x388 accumulates translation, Y, Z, X in that
+             * order. Fraction and integer results latch separately. */
+            acc = zb_p_udn(zb_mcf(mb, 3, j), 1)
+                + zb_p_udh(zb_mci(mb, 3, j), 1);
             acc += zb_p_udn(zb_mcf(mb, 1, j), co[1])
                  + zb_p_udh(zb_mci(mb, 1, j), co[1]);
             acc += zb_p_udn(zb_mcf(mb, 2, j), co[2])
                  + zb_p_udh(zb_mci(mb, 2, j), co[2]);
-            acc += zb_p_udn(zb_mcf(mb, 0, j), co[0])
-                 + zb_p_udh(zb_mci(mb, 0, j), co[0]);
+            acc += zb_p_udn(zb_mcf(mb, 0, j), co[0]);
+            rf[j] = zb_acc_low(acc); /* VMADN at 0x380 precedes VMADH */
+            acc += zb_p_udh(zb_mci(mb, 0, j), co[0]);
             ri[j] = zb_acc_mid(acc);
-            rf[j] = zb_acc_low(acc);
             v32[j] = (int32_t)(((uint32_t)ZBU16(ri[j]) << 16)
                                | (uint32_t)ZBU16(rf[j]));
         }
@@ -713,9 +831,10 @@ static void zb_mult_mpmtx(unsigned int w0, unsigned int w1)
         {
             int ndc_i, ndc_f;
             acc  = zb_p_udl(rf[j], rcp_lo) + zb_p_udm(ri[j], rcp_lo);
-            acc += zb_p_udn(rf[j], hi_c)   + zb_p_udh(ri[j], hi_c);
+            acc += zb_p_udn(rf[j], hi_c);
+            ndc_f = zb_acc_low(acc); /* VMADN at 0x408 */
+            acc += zb_p_udh(ri[j], hi_c);
             ndc_i = zb_acc_mid(acc);
-            ndc_f = zb_acc_low(acc);
             acc  = zb_p_udh(trans[j], 1);
             acc += zb_p_udl(pre_f[j], ndc_f) + zb_p_udm(pre_i[j], ndc_f);
             acc += zb_p_udn(pre_f[j], ndc_i) + zb_p_udh(pre_i[j], ndc_i);
@@ -724,19 +843,16 @@ static void zb_mult_mpmtx(unsigned int w0, unsigned int w1)
 
         acc = zb_p_udh(fogo, 1) + zb_p_udm(ri[3], fogm);
         fog = zb_acc_mid(acc);
-        {
-            unsigned int fa = (0x7b0u + (unsigned int)fog) & 0xfffu;
-            fog = s_dmem[fa ^ BO8];
-        }
+        fog_addr[lane] = (0x7b0u + (unsigned int)fog) & 0xfffu;
 
         if (v32[0] >= v32[3])  cc |= 0x10u;
         if (v32[1] >= v32[3])  cc |= 0x20u;
         if (v32[2] >= v32[3])  cc |= 0x40u;
-        if (v32[0] <= -v32[3]) cc |= 0x01u;
-        if (v32[1] <= -v32[3]) cc |= 0x02u;
-        if (v32[2] <= -v32[3]) cc |= 0x04u;
+        if ((int64_t)v32[0] <= -(int64_t)v32[3]) cc |= 0x01u;
+        if ((int64_t)v32[1] <= -(int64_t)v32[3]) cc |= 0x02u;
+        if ((int64_t)v32[2] <= -(int64_t)v32[3]) cc |= 0x04u;
 
-        /* zSortVDest, 16 bytes: sy sx | invw | yi xi | cc fog | wi.
+        /* zSortVDest, 16 bytes: sx sy | invw | xi yi | cc fog | wi.
          *
          * The clip code and the fog byte sit at +0xc and +0xd, ahead
          * of the w term, not after it: the reference stores them with
@@ -748,16 +864,30 @@ static void zb_mult_mpmtx(unsigned int w0, unsigned int w1)
          * whole block to the game with MOVEMEM, and World Driver
          * Championship's intro reads the clip byte back to decide
          * whether the next frame's work is ready. */
-        wr_s16(s_dmem, dst, scr[1]);           dst = (dst + 2u) & 0xfffu;
+        record_addr[lane] = dst;
+        clip_code[lane] = cc;
         wr_s16(s_dmem, dst, scr[0]);           dst = (dst + 2u) & 0xfffu;
+        wr_s16(s_dmem, dst, scr[1]);           dst = (dst + 2u) & 0xfffu;
         wr32(s_dmem, dst, (unsigned int)(((unsigned int)rcp_hi << 16)
                                          | (unsigned int)rcp_lo));
         dst = (dst + 4u) & 0xfffu;
-        wr_s16(s_dmem, dst, ri[1]);            dst = (dst + 2u) & 0xfffu;
         wr_s16(s_dmem, dst, ri[0]);            dst = (dst + 2u) & 0xfffu;
-        s_dmem[dst ^ BO8] = (unsigned char)cc;           dst = (dst + 1u) & 0xfffu;
-        s_dmem[dst ^ BO8] = (unsigned char)fog;          dst = (dst + 1u) & 0xfffu;
+        wr_s16(s_dmem, dst, ri[1]);            dst = (dst + 2u) & 0xfffu;
+        /* SDV at 0x3fc first exports Z into this halfword. The
+         * lookahead iteration exports both screen words, then reads
+         * both fog bytes at 0x390/0x394, before replacing Z with the
+         * clip/fog bytes. A fog lookup can alias this result buffer. */
+        wr_s16(s_dmem, dst, ri[2]);            dst = (dst + 2u) & 0xfffu;
         wr_s16(s_dmem, dst, ri[3]);            dst = (dst + 2u) & 0xfffu;
+        if (lane != 0u)
+        {
+            unsigned char fog0 = s_dmem[fog_addr[0] ^ BO8];
+            unsigned char fog1 = s_dmem[fog_addr[1] ^ BO8];
+            s_dmem[((record_addr[0] + 12u) & 0xfffu) ^ BO8] = (unsigned char)clip_code[0];
+            s_dmem[((record_addr[0] + 13u) & 0xfffu) ^ BO8] = fog0;
+            s_dmem[((record_addr[1] + 12u) & 0xfffu) ^ BO8] = (unsigned char)clip_code[1];
+            s_dmem[((record_addr[1] + 13u) & 0xfffu) ^ BO8] = fog1;
+        }
     }
 }
 
@@ -769,6 +899,26 @@ static void zb_mult_mpmtx(unsigned int w0, unsigned int w1)
  * lookat vectors live in the light struct itself at each slot's
  * raw-direction offset + 8, packed by SPV (bits 15..8 of the final
  * lanes) and duplicated across two words. */
+
+static int zb_texgen(int dot, unsigned int w0)
+{
+    int square, cube;
+    int64_t acc;
+    if (w0 & 0x01000000u)
+    {
+        square = (int16_t)zb_acc_mid((int64_t)dot * dot * 2 + 0x8000);
+        cube = (int16_t)zb_acc_mid((int64_t)square * dot * 2 + 0x8000);
+        /* VMULF seeds the accumulator. VMACF retains it even if its
+         * intermediate destination saturates. Do not round each term. */
+        acc = (int64_t)cube * rd_s16d(s_dmem, 0x966u) * 2 + 0x8000;
+        acc += (int64_t)cube * rd_s16d(s_dmem, 0x968u) * 2;
+        acc += (int64_t)dot * rd_s16d(s_dmem, 0x96au) * 2;
+        dot = (int16_t)zb_acc_mid(acc);
+    }
+    /* VADDC wraps; VMUDL multiplies both operands as unsigned. */
+    return (int)((((unsigned int)dot + 0x8000u) & 0xffffu)
+        * (unsigned int)(rd_s16d(s_dmem, 0x962u) & 0xffff) >> 16);
+}
 
 static void zb_lighting(unsigned int w0, unsigned int w1)
 {
@@ -793,6 +943,8 @@ static void zb_lighting(unsigned int w0, unsigned int w1)
     unsigned int i, li;
     int k;
 
+    num = (num + 1u) & ~1u;
+
     if (lcount > 8u)
         lcount = 8u;
 
@@ -801,6 +953,7 @@ static void zb_lighting(unsigned int w0, unsigned int w1)
         int n[3];
         int32_t cacc[3];
         int32_t d[8];
+        unsigned int lane_offset = (i & 1u) * 4u;
         for (k = 0; k < 3; k++)
         {
             n[k] = rd_s8(s_dmem, nsrs);
@@ -808,14 +961,14 @@ static void zb_lighting(unsigned int w0, unsigned int w1)
         }
         /* ambient preload, u8<<7 domain */
         for (k = 0; k < 3; k++)
-            cacc[k] = (int32_t)s_dmem[((lbase + (unsigned int)k) & 0xfffu) ^ BO8] << 7;
+            cacc[k] = (int32_t)s_dmem[((lbase + lane_offset + (unsigned int)k) & 0xfffu) ^ BO8] << 7;
         for (li = 0; li < lcount; li++)
         {
             unsigned int slot = (lbase + li * 24u) & 0xfffu;
             int32_t acc = 0;
             for (k = 0; k < 3; k++)
             {
-                int lv = rd_s8(s_dmem, (slot + 24u + (unsigned int)k) & 0xfffu);
+                int lv = rd_s8(s_dmem, (slot + 24u + lane_offset + (unsigned int)k) & 0xfffu);
                 int32_t t = 2 * n[k] * lv;
                 if (t > 32767)  t = 32767;
                 if (t < -32768) t = -32768;
@@ -826,7 +979,7 @@ static void zb_lighting(unsigned int w0, unsigned int w1)
             d[li] = acc;
             for (k = 0; k < 3; k++)
             {
-                int32_t cs = (int32_t)s_dmem[((slot + 8u + (unsigned int)k) & 0xfffu) ^ BO8] << 7;
+                int32_t cs = (int32_t)s_dmem[((slot + 8u + lane_offset + (unsigned int)k) & 0xfffu) ^ BO8] << 7;
                 int32_t p = (int32_t)(((int64_t)cs * (int64_t)acc * 2 + 0x8000) >> 16);
                 if (p < 0)
                     p = 0;
@@ -838,10 +991,10 @@ static void zb_lighting(unsigned int w0, unsigned int w1)
         if (lcount >= 2u)
         {
             wr_s16(s_dmem, tdest,
-                   (int)(((unsigned int)(d[lcount - 2u] + 0x8000) & 0xffffu) >> 6));
+                   zb_texgen(d[lcount - 2u], w0));
             tdest = (tdest + 2u) & 0xfffu;
             wr_s16(s_dmem, tdest,
-                   (int)(((unsigned int)(d[lcount - 1u] + 0x8000) & 0xffffu) >> 6));
+                   zb_texgen(d[lcount - 1u], w0));
             tdest = (tdest + 2u) & 0xfffu;
         }
         /* color scale table + pack (suv: lane >> 7); the table is
@@ -903,7 +1056,8 @@ static void zb_transformlights(unsigned int w0, unsigned int w1)
         for (i = 0; i < 3; i++)
             dir[i] = rd_s8(s_dmem, (addr + 16u + (unsigned int)i) & 0xfffu);
 
-        rsp_zsort_light_xfrm(mi, mf, dir, outb);
+        rsp_zsort_light_xfrm((const uint16_t (*)[4])mi,
+                            (const uint16_t (*)[4])mf, dir, outb);
 
         for (j = 0; j < 4; j++)
         {
@@ -918,8 +1072,8 @@ static void zb_transformlights(unsigned int w0, unsigned int w1)
 
 static void zb_audio1(unsigned int w0, unsigned int w1)
 {
-    unsigned int addr = seg_phys(w1);
-    unsigned int val = rd32(s_dmem, w0 & 0xffcu);
+    unsigned int addr = seg_phys(w1) & ~7u;
+    unsigned int val = rd32d(s_dmem, w0);
     unsigned int i;
     wr32(s_dmem, 0u, val);
     if (!addr_ok(addr, 8u) || s_shadow)
@@ -944,29 +1098,56 @@ static void zb_audio2(unsigned int w0, unsigned int w1)
                       | s_dmem[0x905u ^ BO8]);
     int v11_1 = (int)(((unsigned int)s_dmem[0x906u ^ BO8] << 8)
                       | s_dmem[0x907u ^ BO8]);
+    int phase_i[4];
+    unsigned int phase_f[4];
     int i, j, k;
-    for (i = 0; i < len; i += 4)
+    for (j = 0; j < 4; j++)
     {
+        unsigned int initial = (unsigned int)j * step;
+        /* 0xc4c and 0xc50 are two VADDC instructions. The upper
+         * add deliberately does not consume the fractional carry. */
+        phase_i[j] = (int16_t)((initial >> 16) + (base >> 16));
+        phase_f[j] = (initial + base) & 0xffffu;
+    }
+    for (i = 0; i < len || i == 0; i += 4)
+    {
+        int output[8];
         for (j = 0; j < 4; j++)
         {
-            unsigned int pos = (unsigned int)(i + j) * step + base;
-            int index = (int)(pos >> 16) << 1;
-            unsigned int frac = pos & 0xffffu;
+            int index = phase_i[j] * 2;
+            unsigned int frac = phase_f[j];
             int v9  = rd_s16d(s_dmem, 0x30u + (unsigned int)index);
             int v10 = rd_s16d(s_dmem, 0x32u + (unsigned int)index);
-            int v12 = (short)(v10 - v9);
-            int v13 = rd_s16d(s_dmem, dst);
+            int v12 = v10 - v9;
+            if (v12 > 32767) v12 = 32767;
+            if (v12 < -32768) v12 = -32768;
             for (k = 0; k < 2; k++)
             {
                 int vk = (k == 0) ? v11_0 : v11_1;
-                long res1 = (long)v12 * (long)frac;
-                long res2 = (long)v9 << 16;
-                int res3 = (int)(short)((res2 + res1) >> 16);
-                res1 = (long)vk * (long)res3;
-                res2 = (long)v13 << 16;
-                res3 = (int)(short)((res2 + res1) >> 16);
-                wr_s16d(s_dmem, dst, res3);
-                dst += 2u;
+                int v13 = rd_s16d(s_dmem, dst + (unsigned int)(j * 4 + k * 2));
+                int64_t acc = zb_p_udm(v12, frac) + zb_p_udh(v9, 1);
+                int res3 = zb_acc_mid(acc);
+                acc = zb_p_udn(vk, res3) + zb_p_udh(v13, 1);
+                res3 = zb_acc_mid(acc);
+                output[j * 2 + k] = res3;
+            }
+        }
+        for (j = 0; j < 8; j++)
+            wr_s16d(s_dmem, dst + (unsigned int)(j * 2), output[j]);
+        dst += 16u;
+        {
+            int last_i = phase_i[3];
+            unsigned int last_f = phase_f[3];
+            for (j = 0; j < 4; j++)
+            {
+                unsigned int delta = (unsigned int)(j + 1) * step;
+                unsigned int sum_f = (delta & 0xffffu) + last_f;
+                int sum_i = (int)(delta >> 16) + last_i + (int)(sum_f >> 16);
+                /* 0xcbc/0xcc0 use VADDC/VADD for subsequent blocks. */
+                if (sum_i > 32767) sum_i = 32767;
+                if (sum_i < -32768) sum_i = -32768;
+                phase_f[j] = sum_f & 0xffffu;
+                phase_i[j] = sum_i;
             }
         }
     }
@@ -976,18 +1157,18 @@ static void zb_audio3(unsigned int w0, unsigned int w1)
 {
     unsigned int addr = seg_phys(w0);
     int i, j;
-    if (addr_ok(addr, 128u))
+    if (addr_ok(addr & ~7u, 128u))
         for (i = 0; i < 8; i++)
             for (j = 0; j < 8; j++)
-                zb.audio_table[i][j] = (short)rd_s16(s_rdram,
-                    addr + (unsigned int)((i << 4) + (j << 1)));
-    addr = seg_phys(w1);
+                wr_s16d(s_dmem, 0x630u + (unsigned int)((i << 4) + (j << 1)),
+                    rd_s16(s_rdram, (addr & ~7u) + (unsigned int)((i << 4) + (j << 1))));
+    addr = seg_phys(w1) & ~7u;
     if (addr_ok(addr, 8u))
     {
         unsigned int i2;
         for (i2 = 0; i2 < 8u; i2++)
             s_dmem[i2 ^ BO8] = s_rdram[(addr + i2) ^ BO8];
-        wr32(s_dmem, 8u, addr);
+        wr32(s_dmem, 8u, w1);
     }
 }
 
@@ -1008,41 +1189,46 @@ static void zb_audio4(unsigned int w0, unsigned int w1)
             return;
         r9 = s_rdram[src ^ BO8]; src += 1u;
         index = (int)((r9 & 0xfu) << 1);
-        if (index > 6)
-            return;
-        c1 = 1 << ((r9 >> 4) & 0x1fu);
+        c1 = (int16_t)(1u << ((r9 >> 4) & 0x0fu));
         for (l2 = 0; l2 < 2; l2++)
         {
-            int a = rd_s8(s_rdram, src); src += 1u;
-            int b = rd_s8(s_rdram, src); src += 1u;
-            int c = rd_s8(s_rdram, src); src += 1u;
-            int d = rd_s8(s_rdram, src); src += 1u;
+            int a, b, c, d;
             int coeff[8];
-            coeff[0] = a >> 4;  coeff[1] = (int)((a << 28) >> 28);
-            coeff[2] = b >> 4;  coeff[3] = (int)((b << 28) >> 28);
-            coeff[4] = c >> 4;  coeff[5] = (int)((c << 28) >> 28);
-            coeff[6] = d >> 4;  coeff[7] = (int)((d << 28) >> 28);
+            a = rd_s8(s_rdram, src); src += 1u;
+            b = rd_s8(s_rdram, src); src += 1u;
+            c = rd_s8(s_rdram, src); src += 1u;
+            d = rd_s8(s_rdram, src); src += 1u;
+            coeff[0] = a >> 4;  coeff[1] = ((a & 15) ^ 8) - 8;
+            coeff[2] = b >> 4;  coeff[3] = ((b & 15) ^ 8) - 8;
+            coeff[4] = c >> 4;  coeff[5] = ((c & 15) ^ 8) - 8;
+            coeff[6] = d >> 4;  coeff[7] = ((d & 15) ^ 8) - 8;
             for (i = 0; i < 8; i++)
             {
-                long res1 = 0;
-                long res2;
+                int64_t res1 = 0;
+                int64_t res2;
                 int out;
                 for (j = 0, k = i; j < i; j++, k--)
-                    res1 += (long)zb.audio_table[index + 1][k - 1]
-                          * (long)coeff[j];
-                res1 += (long)coeff[i] * 0x0800l;
-                res1 *= (long)c1;
-                res2 = (long)v1 * (long)zb.audio_table[index][i]
-                     + (long)v2 * (long)zb.audio_table[index + 1][i];
-                out = (int)((res1 * 0x20l + res2 * 0x20l) >> 16);
-                wr_s16d(s_dmem, dst + (unsigned int)((i ^ 1) << 1),
-                       (int)(short)out);
+                    res1 += (int64_t)rd_s16d(s_dmem, 0x630u + (unsigned int)((index + 1) * 16 + (k - 1) * 2))
+                          * (int64_t)coeff[j];
+                res1 += (int64_t)coeff[i] * 0x0800;
+                res1 *= (int64_t)c1;
+                /* 0xecc/0xed4 narrow the scaled residual before the
+                 * history terms are added. Preserve the VMUDN low
+                 * half, with the separately saturated VMADH middle. */
+                res1 = (int64_t)ZBS16(zb_acc_mid(res1)) * 65536
+                     + (int64_t)((uint64_t)res1 & 0xffffu);
+                res2 = (int64_t)v1 * rd_s16d(s_dmem, 0x630u + (unsigned int)(index * 16 + i * 2))
+                     + (int64_t)v2 * rd_s16d(s_dmem, 0x630u + (unsigned int)((index + 1) * 16 + i * 2));
+                out = zb_acc_mid((res1 + (int64_t)(int32_t)(uint32_t)res2) * 0x20);
+                wr_s16d(s_dmem, dst + (unsigned int)(i * 2), out);
             }
-            v1 = rd_s16d(s_dmem, dst + (unsigned int)((0x6 ^ 0x1) << 1));
-            v2 = rd_s16d(s_dmem, dst + (unsigned int)((0x7 ^ 0x1) << 1));
+            v1 = rd_s16d(s_dmem, dst + 12u);
+            v2 = rd_s16d(s_dmem, dst + 14u);
             dst += 16u;
         }
     }
+    wr_s16d(s_dmem, 0u, v1);
+    wr_s16d(s_dmem, 2u, v2);
 }
 
 /* ---- interpreter ------------------------------------------------------- */
@@ -1050,6 +1236,57 @@ static void zb_audio4(unsigned int w0, unsigned int w1)
 void zboss_set_shadow(int on)
 {
     s_shadow = on ? 1 : 0;
+}
+
+/* Shared primary/RDP-alias handlers. Keep the original words: the high
+ * byte also carries lighting mode and audio count/flags. */
+static int zb_compute(unsigned int handler, unsigned int w0, unsigned int w1)
+{
+    unsigned int count, len;
+    switch (handler)
+    {
+    case 0x1e8: zb_charge(2u); break;
+    case 0x1ec:
+        zb_charge(10u);
+        len = (w0 >> 12) & 0x7ffu;
+        if (len) zb_dma_cost((len | 7u) + 1u);
+        zb_movemem(w0, w1); break;
+    case 0x210: zb_charge(2u); wr32d(s_dmem, w0 & 0xfffu, w1); break;
+    case 0x218: zb_charge(16u); zb_transpose(w1); break;
+    case 0x258: zb_charge(124u); zb_mtxcat(w0, w1); break;
+    case 0x2fc:
+        count = (((w1 >> 24) + 2u) & ~1u) / 2u;
+        zb_charge(8u + count * 128u); zb_mult_mpmtx(w0, w1); break;
+    case 0x444:
+        count = ((w1 >> 24) + 4u) / 4u;
+        len = (rd32d(s_dmem, 0x948u) >> 12) + 1u;
+        if (len > 8u) len = 8u;
+        zb_charge(9u + count * (34u + 27u * len +
+                                  ((w0 & 0x01000000u) ? 5u : 0u))
+                  - ((((w1 >> 24) + 1u) & 3u) == 1u ||
+                     (((w1 >> 24) + 1u) & 3u) == 2u ? 6u : 0u));
+        zb_lighting(w0, w1); break;
+    case 0x570:
+        count = (w1 >> 12) + 1u;
+        if (count > 8u) count = 8u;
+        zb_charge(21u + count * 36u); zb_transformlights(w0, w1); break;
+    case 0xbcc: zb_charge(12u); zb_dma_cost(8u); zb_audio1(w0, w1); break;
+    case 0xbf0:
+        count = ((w1 >> 24) + 3u) / 4u;
+        if (!count) count = 1;
+        zb_charge(27u + count * 30u); zb_audio2(w0, w1); break;
+    case 0xcd4:
+        zb_charge(516u); memset(s_dmem + 0xc20u, 0, 512u); break;
+    case 0xcf0:
+        zb_charge(14u); zb_dma_cost(128u); zb_dma_cost(8u);
+        zb_audio3(w0, w1); break;
+    case 0xd20:
+        count = ((w0 & 0xffffu) + 8u) / 9u;
+        zb_charge(40u + count * 167u); zb_dma_cost(w0 & 0xffffu);
+        zb_audio4(w0, w1); break;
+    default: return 0;
+    }
+    return 1;
 }
 
 int zboss_run(unsigned char *rdram, unsigned int rdram_size,
@@ -1063,6 +1300,14 @@ int zboss_run(unsigned char *rdram, unsigned int rdram_size,
     s_dmem = dmem;
     s_fifo = fifo;
     s_sp_status = sp_status;
+    s_cycles = 0;
+    if (op == ZBOSS_OP_RESUME && zb.legacy_book_pending)
+    {
+        unsigned int i;
+        for (i = 0; i < 64u; i++)
+            wr_s16d(dmem, 0x630u + i * 2u, zb.legacy_book[i / 8u][i & 7u]);
+        zb.legacy_book_pending = 0;
+    }
 
     if (op == ZBOSS_OP_FRESH)
     {
@@ -1089,6 +1334,13 @@ int zboss_run(unsigned char *rdram, unsigned int rdram_size,
         zb.obj_chain = 0;
         zb.obj_chain2 = 0;
         zb.switch_req = 0;
+        zb.rdp_pending = 0;
+        zb.alias_pending = 0;
+        zb.obj_list = 0;
+        zb.stage_bytes = 0;
+        zb.legacy_book_pending = 0;
+        zb.input_page[0] = zb.input_page[1] = 0xffffffffu;
+        zb_charge(61u);
         rsp_tri_set_zboss_attr(1);
         rsp_set_keep_degenerate(1);
         zb.active = 1;
@@ -1111,6 +1363,7 @@ int zboss_run(unsigned char *rdram, unsigned int rdram_size,
             if (ud != 0 && ud + udl <= rdram_size)
             {
                 unsigned int i;
+                zb_dma_cost(udl);
                 for (i = 0; i < udl; i++)
                     dmem[i ^ BO8] = rdram[(ud + i) ^ BO8];
             }
@@ -1143,24 +1396,46 @@ int zboss_run(unsigned char *rdram, unsigned int rdram_size,
     while (guard++ < 200000)
     {
         unsigned int pc = zb.pc[zb.pci];
-        unsigned int w0, w1, cmd;
+        unsigned int w0, w1, cmd, handler;
         if (!addr_ok(pc, 8u))
             return -1;
         w0 = rd32(s_rdram, pc);
         w1 = rd32(s_rdram, pc + 4u);
         zb.pc[zb.pci] = pc + 8u;
         cmd = (w0 >> 24) & 0xffu;
-
-        switch (cmd)
+        if ((pc & ~255u) != zb.input_page[zb.pci])
         {
-        case 0x00:                              /* SPNOOP */
-            break;
-        case 0x02:                              /* ENDMAINDL */
+            zb.input_page[zb.pci] = pc & ~255u;
+            zb_dma_cost(256u);
+        }
+        zb_charge(zb.pci ? 8u : 13u);
+        handler = (unsigned int)rd_s16d(s_dmem, 0xbb0u + cmd) & 0xfffu;
+
+        /* Resident main dispatcher 0xf8/0x124 consumes the grant on
+         * every command, before entering its handler. */
+        if (zb.pci == 0 && !s_shadow && !zb.sig0_taken
+            && s_sp_status != 0 && (*s_sp_status & 0x80u))
+        {
+            *s_sp_status &= ~0x80u;
+            zb.sig0_taken = 1;
+            s_dmem[0x940u ^ BO8] = 1;
+        }
+
+dispatch_command:
+        if (zb_compute(handler, w0, w1)) continue;
+        switch (handler)
+        {
+        case 0x1ac:                            /* ENDMAINDL */
             if (zb.subdl_done)
             {
+                if (zb.stage_bytes) zb_drain();
                 zb.active = 0;
                 return ZBOSS_R_DONE;
             }
+            /* 0x1b8 precedes the branch into an already granted sub
+             * list. ENDSUBDL must see this even when no wait occurs. */
+            zb.maindl_done = 1;
+            s_dmem[0x941u ^ BO8] = 0xff;
             if (zb.sig0_taken || s_shadow)
             {
                 /* the grant already arrived mid-walk: service the sub
@@ -1168,13 +1443,12 @@ int zboss_run(unsigned char *rdram, unsigned int rdram_size,
                 zb.pci = 1;
                 break;
             }
-            zb.maindl_done = 1;
-            s_dmem[0x941u ^ BO8] = 0xff;    /* main list done */
             zb.wait_kind = ZB_WAIT_SIG0;
             return ZBOSS_R_WAIT_SIG0;
-        case 0x1a:                              /* ENDSUBDL */
+        case 0x188:                            /* ENDSUBDL */
             if (zb.maindl_done)
             {
+                if (zb.stage_bytes) zb_drain();
                 zb.active = 0;
                 return ZBOSS_R_DONE;
             }
@@ -1184,84 +1458,107 @@ int zboss_run(unsigned char *rdram, unsigned int rdram_size,
             zb.pci = 0;                     /* resume the main walk at
                                              * its OBJ checkpoint */
             break;
-        case 0x04:                              /* MOVEMEM */
-            zb_movemem(w0, w1);
+        case 0x610:                            /* RDPCMD */
+            zb_rdpcmd(w1, 1);
+            if (zb.alias_pending) goto dispatch_alias;
+            /* Standalone RDPCMD enters at 0x610 with s5=1, so its
+             * DF terminator drains the stage. Object lists use s5=0. */
             break;
-        case 0x06:                              /* MOVEWORD (DMEM write) */
-            if ((w0 & 0xfffu) <= 0xffcu)
-                wr32(s_dmem, w0 & 0xfffu, w1);
-            break;
-        case 0x08:                              /* TRANSPOSEMTX */
-            zb_transpose(w1);
-            break;
-        case 0x0a:                              /* MTXCAT */
-            zb_mtxcat(w0, w1);
-            break;
-        case 0x0c:                              /* MULT_MPMTX */
-            zb_mult_mpmtx(w0, w1);
-            break;
-        case 0x0e:                              /* RDPCMD */
-            zb_rdpcmd(w1);
-            break;
-        case 0x10:                              /* OBJ */
+        case 0x7f4:                            /* OBJ */
         {
-            if (zb_obj(w0, w1))
+            int result = zb_obj(w0, w1);
+            if (result)
             {
                 /* re-execute this OBJ command on the way back so the
                  * chain walk continues from its checkpoint (in_obj),
                  * the way the microcode resumes into the middle of the
                  * OBJ handler through the DMEM 0xf00 continuation */
                 zb.pc[zb.pci] = pc;
+                if (result == 2) goto dispatch_alias;
                 zb.pci = 1;                 /* service the sub list */
             }
             break;
         }
-        case 0x12:                              /* WAITSIGNAL */
+        case 0xfbc:                            /* WAITSIGNAL */
             if (s_shadow)
                 break;              /* free-run: records are task-stable */
             zb.wait_kind = ZB_WAIT_SIG3;
             return ZBOSS_R_WAIT_SIG3;
-        case 0x14:                              /* LIGHTING */
-        case 0x16:                              /* LIGHTING alias: the
-            dispatch table at DMEM 0xbb0 is byte-indexed by the opcode
-            and maps 0x16 to the same IMEM 0x444 handler (verified
-            against the cxd4 oracle: identical texgen output) */
-            zb_lighting(w0, w1);
-            break;
-        case 0x18:                              /* TRANSFORMLIGHTS */
-            zb_transformlights(w0, w1);
-            break;
-        case 0x1c:                              /* AUDIO2 */
-            zb_audio2(w0, w1);
-            break;
-        case 0x1e:                              /* CLEARBUFFER */
-        {
-            unsigned int i;
-            for (i = 0; i < 512u; i++)
-                s_dmem[(0xc20u + i) ^ BO8] = 0;
-            break;
-        }
-        case 0x22:                              /* AUDIO3 */
-            zb_audio3(w0, w1);
-            break;
-        case 0x24:                              /* AUDIO4 */
-            zb_audio4(w0, w1);
-            break;
-        case 0x26:                              /* AUDIO1 */
-            zb_audio1(w0, w1);
-            break;
         default:
-            if (zb_dispatch_ucode_rdp(cmd, w0, w1))
-                break;
-            /* unknown command: skip (transcription surface is the
-             * reference's full table; anything else is a list error) */
-            break;
+            return -1;
         }
+        continue;
+dispatch_alias:
+        w0 = zb.alias_w0;
+        w1 = zb.alias_w1;
+        handler = (unsigned int)rd_s16d(s_dmem, 0xa1eu + (w0 >> 24) * 2u) & 0xfffu;
+        zb.alias_pending = 0;
+        goto dispatch_command;
     }
     return -1;
 }
 
 #include "rdp_emit_state.h"
-#define WALKER_FIELDS(X) X(zb) X(session_init)
-EMIT_STATE_DEFINE(zboss, WALKER_FIELDS)
-#undef WALKER_FIELDS
+typedef struct ZbLegacyState {
+    int active, wait_kind;
+    unsigned int pc[2];
+    int pci, maindl_done, subdl_done, sig0_taken, in_obj;
+    unsigned int obj_chain, obj_chain2;
+    int switch_req;
+    unsigned int updatemask[2], othermode_h, othermode_l, rdpcmds[3];
+    short audio_table[8][8];
+    int tri_tile, tri_level;
+} ZbLegacyState;
+
+int zboss_run_shadow(unsigned char *rdram, unsigned int rdram_size,
+                     unsigned char *dmem, RdpFifo *fifo)
+{
+    ZbState saved = zb;
+    int saved_init = session_init, saved_shadow = s_shadow;
+    unsigned int saved_size = s_rdram_size, saved_cycles = s_cycles;
+    unsigned char *saved_ram = s_rdram, *saved_dm = s_dmem;
+    unsigned int *saved_status = s_sp_status;
+    RdpFifo *saved_fifo = s_fifo;
+    int result;
+    s_shadow = 1;
+    result = zboss_run(rdram, rdram_size, dmem, fifo, ZBOSS_OP_FRESH, 0);
+    zb = saved; session_init = saved_init; s_shadow = saved_shadow;
+    s_rdram = saved_ram; s_rdram_size = saved_size; s_dmem = saved_dm;
+    s_sp_status = saved_status; s_fifo = saved_fifo; s_cycles = saved_cycles;
+    return result;
+}
+
+unsigned int zboss_legacy_state_size(void) { return sizeof(ZbLegacyState) + sizeof(session_init); }
+unsigned int zboss_state_size(void) { return 8u + sizeof(zb) + sizeof(session_init); }
+void zboss_state_save(void *buffer)
+{
+    unsigned char *p = (unsigned char *)buffer;
+    unsigned int header[2];
+    header[0] = 0x5a425332u; header[1] = zboss_state_size();
+    memcpy(p, header, 8); memcpy(p + 8, &zb, sizeof(zb));
+    memcpy(p + 8 + sizeof(zb), &session_init, sizeof(session_init));
+}
+void zboss_state_load_legacy(const void *buffer)
+{
+    ZbLegacyState old;
+    memset(&zb, 0, sizeof(zb)); session_init = 0; s_cycles = 0;
+    if (!buffer) return;
+    memcpy(&old, buffer, sizeof(old));
+    memcpy(&zb, &old, offsetof(ZbLegacyState, audio_table));
+    zb.tri_tile = old.tri_tile; zb.tri_level = old.tri_level;
+    memcpy(zb.legacy_book, old.audio_table, sizeof(old.audio_table));
+    zb.legacy_book_pending = old.active;
+    zb.input_page[0] = zb.input_page[1] = 0xffffffffu;
+    memcpy(&session_init, (const unsigned char *)buffer + sizeof(old), sizeof(session_init));
+}
+void zboss_state_load(const void *buffer)
+{
+    unsigned int header[2];
+    const unsigned char *p = (const unsigned char *)buffer;
+    memset(&zb, 0, sizeof(zb)); session_init = 0; s_cycles = 0;
+    if (!p) return;
+    memcpy(header, p, 8);
+    if (header[0] != 0x5a425332u || header[1] != zboss_state_size()) return;
+    memcpy(&zb, p + 8, sizeof(zb));
+    memcpy(&session_init, p + 8 + sizeof(zb), sizeof(session_init));
+}

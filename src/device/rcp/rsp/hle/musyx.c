@@ -1,3 +1,4 @@
+#include "hle_timing.h"
 /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * *
  *   Mupen64plus-rsp-hle - musyx.c                                         *
  *   Mupen64Plus homepage: https://mupen64plus.org/                        *
@@ -23,6 +24,8 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <string.h>
+#include <stdio.h>
+#include <stdlib.h>
 
 #include "arithmetics.h"
 #include "audio.h"
@@ -127,6 +130,8 @@ typedef struct {
 
     /* */
     int16_t subframe_740_last4[4];
+    uint16_t auxiliary_carry;
+    int version2;
 } musyx_t;
 
 typedef void (*mix_sfx_with_main_subframes_t)(musyx_t *musyx, const int16_t *subframe,
@@ -149,9 +154,9 @@ static void dma_cat8(struct hle_t* hle, uint8_t *dst, uint32_t catsrc_ptr);
 static void dma_cat16(struct hle_t* hle, uint16_t *dst, uint32_t catsrc_ptr);
 
 static void load_samples_PCM16(struct hle_t* hle, uint32_t voice_ptr, int16_t *samples,
-                               unsigned *segbase, unsigned *offset);
+                               unsigned *segbase, unsigned *offset, int version2);
 static void load_samples_ADPCM(struct hle_t* hle, uint32_t voice_ptr, int16_t *samples,
-                               unsigned *segbase, unsigned *offset);
+                               unsigned *segbase, unsigned *offset, int version2);
 
 static void adpcm_decode_frames(struct hle_t* hle,
                                 int16_t *dst, const uint8_t *src,
@@ -223,6 +228,7 @@ static int32_t dot4(const int16_t *x, const int16_t *y)
  **************************************************************************/
 void musyx_v1_task(struct hle_t* hle)
 {
+    hle->musyx_ucode_data=*dmem_u32(hle,TASK_UCODE_DATA);
     /* Builds of this microcode differ in the order the envelope update
      * emits the e50 pair.  Where the carry-setting add lands on the high
      * half, that half never sees the carry out of its own low half and
@@ -260,7 +266,7 @@ void musyx_v1_task(struct hle_t* hle)
                       sfd_ptr,
                       sfd_count);
 
-    state_ptr = *dram_u32(hle, sfd_ptr + SFD_STATE_PTR);
+    state_ptr = *dram_u32(hle, sfd_ptr + SFD_STATE_PTR) & ~7u;
 
     /* load initial state */
     load_base_vol(hle, musyx.base_vol, state_ptr + STATE_BASE_VOL);
@@ -270,6 +276,7 @@ void musyx_v1_task(struct hle_t* hle)
 
     for (;;) {
         /* parse SFD structure */
+        hle_timing_add(HLE_WORK_COMMAND, 1); /* one subframe descriptor */
         uint16_t sfx_index   = *dram_u16(hle, sfd_ptr + SFD_SFX_INDEX);
         uint32_t voice_mask  = *dram_u32(hle, sfd_ptr + SFD_VOICE_BITMASK);
         uint32_t sfx_ptr     = *dram_u32(hle, sfd_ptr + SFD_SFX_PTR);
@@ -283,6 +290,7 @@ void musyx_v1_task(struct hle_t* hle)
 
         /* active voices get mixed into L,R,cc0,e50 subframes (optional) */
         output_ptr = voice_stage(hle, &musyx, voice_ptr, last_sample_ptr);
+        output_ptr &= ~7u;
 
         /* apply delay-based effects (optional) */
         sfx_stage(hle, mix_sfx_with_main_subframes_v1,
@@ -296,7 +304,7 @@ void musyx_v1_task(struct hle_t* hle)
             break;
 
         sfd_ptr += SFD_VOICES + MAX_VOICES * VOICE_SIZE;
-        state_ptr = *dram_u32(hle, sfd_ptr + SFD_STATE_PTR);
+        state_ptr = *dram_u32(hle, sfd_ptr + SFD_STATE_PTR) & ~7u;
     }
 
     /* writeback updated state */
@@ -305,31 +313,131 @@ void musyx_v1_task(struct hle_t* hle)
     dram_store_u16(hle, (uint16_t *)musyx.subframe_740_last4, state_ptr + STATE_740_LAST4_V1,
               4);
 
+    hle->rsp_vco=0;hle->rsp_vco_written=1;
     rsp_break(hle, SP_STATUS_TASKDONE);
 }
 
 /**************************************************************************
  * MusyX v2 audio ucode
  **************************************************************************/
-/* Bit-exactness note (Battle for Naboo, task-replay verified): every v2
- * task in a 1500-frame BfN run (1,477 tasks) replays bit-identically
- * through the real microcode on cxd4 from the same pre-state -- full
- * 8MB RDRAM post-state identity per task. The residual +-1 LSB bursts
- * an LLE stream comparison shows (1920 of 565k sample pairs, left
- * lanes, whole subframes) are NOT an HLE arithmetic divergence: the
- * microcode's volume-splat prologue (vadd v_n, v0, v5[lane] at task
- * text 0x1a0) assumes VCO == 0 at task entry, and Factor 5's streaming
- * graphics microcode leaves VCO carry set on lanes 0-1 -- the first
- * vadd folds that stale carry into the volume vector at DMEM 0x320 for
- * the whole subframe. An LLE (or real hardware) run reproduces this
- * cross-task register residue; a clean-context HLE computes the
- * microcode's intended value. Verified by injecting the captured
- * in-core VU state into a standalone cxd4 replay: with the stale
- * cf_co lanes the oracle output matches the LLE stream exactly, with
- * zeroed flags it matches this HLE exactly. Do not chase this as an
- * HLE bug. */
+/* The first volume splat consumes incoming VCO. Its eight biased left
+ * samples repeat through the entire 192-sample initialization; later channel
+ * splats consume cleared flags. Carry is shared with the RSP task context. */
+/* MusyX v2 overlay 6: four optional planar sources, each with a
+ * four-tap filter and four unsigned Q0.16 destination gains. VMULF
+ * rounds/clamps individual taps; VADDC folds wrap at sixteen bits.
+ * The destination mix uses VMUDM/VMADM, with no fractional rounding. */
+static void auxiliary_stage_v2(struct hle_t* hle, musyx_t *musyx,
+                             uint32_t descriptors, unsigned mask, uint32_t state)
+{
+    uint8_t saved[128];
+    unsigned slot, channel, sample, tap;
+    load_u8(saved, hle->dmem, 0xce0, 32);
+    dram_load_u8(hle, saved + 32, state + 32, 96);
+    for (slot = 0; slot < 4; slot++)
+    {
+        int16_t source[3][SUBFRAME_SIZE + 4];
+        int16_t filtered[3][SUBFRAME_SIZE];
+        int16_t coefficients[4];
+        uint16_t gains[4];
+        uint8_t last[4][2] = {{0}};
+        uint32_t descriptor, address;
+        int filtering = 0;
+        if (!(mask & (1u << slot))) continue;
+        descriptor = descriptors + slot * 24;
+        address = *dram_u32(hle, descriptor + 16) & ~7u;
+        for (tap = 0; tap < 4; tap++)
+        {
+            gains[tap] = *dram_u16(hle, descriptor + tap * 2);
+            coefficients[tap] = (int16_t)*dram_u16(hle, descriptor + 8 + tap * 2);
+            filtering |= coefficients[tap];
+        }
+        for (channel = 0; channel < 3; channel++)
+        {
+            unsigned history = 32 + slot * 24 + channel * 8;
+            for (tap = 0; tap < 4; tap++)
+                source[channel][tap] = (int16_t)((saved[history + tap * 2] << 8) | saved[history + tap * 2 + 1]);
+            dram_load_u16(hle, (uint16_t *)(source[channel] + 4),
+                          address + channel * SUBFRAME_SIZE * 2, SUBFRAME_SIZE);
+            /* These DMA planes share DMEM with the next voice's sample
+             * window. PCM's four-tap lookahead can read their surviving
+             * tail, even after both voice sample banks were replaced. */
+            store_u16(hle->dmem,0x7a8u+channel*0x190u,
+                      (uint16_t*)source[channel],SUBFRAME_SIZE+4);
+            for (sample = 0; sample < SUBFRAME_SIZE; sample++)
+            {
+                if (filtering)
+                {
+                    uint32_t sum = 0;
+                    for (tap = 0; tap < 4; tap++)
+                    {
+                        int64_t product = (int64_t)source[channel][sample + tap + 1] * coefficients[tap] * 2 + 0x8000;
+                        sum += (uint16_t)clamp_s16((int32_t)(product >> 16));
+                    }
+                    filtered[channel][sample] = (int16_t)sum;
+                }
+                else filtered[channel][sample] = source[channel][sample + 4];
+            }
+            for (tap = 0; tap < 4; tap++)
+            {
+                /* LDV uses the FIR cursor minus eight; that cursor
+                 * starts three samples before the planar input. */
+                uint16_t value = (uint16_t)source[channel][SUBFRAME_SIZE - 3 + tap];
+                saved[history + tap * 2] = value >> 8;
+                saved[history + tap * 2 + 1] = value;
+            }
+        }
+        if (filtering)
+        {
+            uint16_t product[8], pair[8];
+            unsigned lane;
+            musyx->auxiliary_carry = 0;
+            for (lane = 0; lane < 8; lane++)
+            {
+                int64_t acc = (int64_t)source[2][SUBFRAME_SIZE - 4 + lane] * coefficients[lane & 3] * 2 + 0x8000;
+                product[lane] = (uint16_t)clamp_s16((int32_t)(acc >> 16));
+            }
+            for (lane = 0; lane < 8; lane++) pair[lane] = product[lane] + product[(lane & ~1u) | 1u];
+            for (lane = 0; lane < 8; lane++)
+                if ((uint32_t)pair[lane] + pair[(lane & ~3u) | 2u] > 65535u)
+                    musyx->auxiliary_carry |= 1u << lane;
+        }
+        hle_timing_add(HLE_WORK_FILTER, filtering ? 3u * SUBFRAME_SIZE / 8u : 0u);
+        hle_timing_add(HLE_WORK_MIX, 4u * SUBFRAME_SIZE / 8u);
+        for (sample = 0; sample < SUBFRAME_SIZE; sample++)
+        {
+            int16_t *destinations[3] = {musyx->left, musyx->right, musyx->cc0};
+            int64_t e50 = 0;
+            for (channel = 0; channel < 3; channel++)
+            {
+                int64_t acc = (int64_t)filtered[channel][sample] * gains[channel];
+                if (sample == SUBFRAME_SIZE - 5)
+                    last[channel][0] = (uint8_t)clamp_s16((int32_t)(acc >> 16));
+                if (sample == SUBFRAME_SIZE - 4)
+                    last[channel][1] = (uint16_t)clamp_s16((int32_t)(acc >> 16)) >> 8;
+                acc += (int64_t)destinations[channel][sample] * 65535;
+                destinations[channel][sample] = clamp_s16((int32_t)(acc >> 16));
+                e50 += (int64_t)filtered[channel][sample] * gains[3];
+            }
+            if (sample == SUBFRAME_SIZE - 5) last[3][0] = (uint8_t)clamp_s16((int32_t)(e50 >> 16));
+            if (sample == SUBFRAME_SIZE - 4) last[3][1] = (uint16_t)clamp_s16((int32_t)(e50 >> 16)) >> 8;
+            e50 += (int64_t)musyx->e50[sample] * 65535;
+            musyx->e50[sample] = clamp_s16((int32_t)(e50 >> 16));
+        }
+        for (channel = 0; channel < 4; channel++)
+        {
+            /* SSV element 7 crosses bytes of lanes 3 and 4. */
+            saved[slot * 8 + channel * 2] = last[channel][0];
+            saved[slot * 8 + channel * 2 + 1] = last[channel][1];
+        }
+    }
+    dram_store_u8(hle, saved, state, sizeof(saved));
+    store_u8(hle->dmem, 0xce0, saved, sizeof(saved));
+}
+
 void musyx_v2_task(struct hle_t* hle)
 {
+    hle->musyx_ucode_data=*dmem_u32(hle,TASK_UCODE_DATA);
     musyx_env_e50_nocarry = 0;
     uint32_t sfd_ptr   = *dmem_u32(hle, TASK_DATA_PTR);
     uint32_t sfd_count = *dmem_u32(hle, TASK_DATA_SIZE);
@@ -342,9 +450,10 @@ void musyx_v2_task(struct hle_t* hle)
 
     for (;;) {
         /* parse SFD structure */
+        hle_timing_add(HLE_WORK_COMMAND, 1);
         uint16_t sfx_index       = *dram_u16(hle, sfd_ptr + SFD_SFX_INDEX);
         uint32_t voice_mask      = *dram_u32(hle, sfd_ptr + SFD_VOICE_BITMASK);
-        uint32_t state_ptr       = *dram_u32(hle, sfd_ptr + SFD_STATE_PTR);
+        uint32_t state_ptr       = *dram_u32(hle, sfd_ptr + SFD_STATE_PTR) & ~7u;
         uint32_t sfx_ptr         = *dram_u32(hle, sfd_ptr + SFD_SFX_PTR);
         uint32_t voice_ptr       = sfd_ptr + SFD2_VOICES;
 
@@ -352,10 +461,10 @@ void musyx_v2_task(struct hle_t* hle)
         uint8_t  mask_14         = *dram_u8 (hle, sfd_ptr + SFD2_14_BITMASK);
         uint8_t  mask_15         = *dram_u8 (hle, sfd_ptr + SFD2_15_BITMASK);
         uint16_t mask_16         = *dram_u16(hle, sfd_ptr + SFD2_16_BITMASK);
-        uint32_t ptr_18          = *dram_u32(hle, sfd_ptr + SFD2_18_PTR);
-        uint32_t ptr_1c          = *dram_u32(hle, sfd_ptr + SFD2_1C_PTR);
-        uint32_t ptr_20          = *dram_u32(hle, sfd_ptr + SFD2_20_PTR);
-        uint32_t ptr_24          = *dram_u32(hle, sfd_ptr + SFD2_24_PTR);
+        uint32_t ptr_18          = *dram_u32(hle, sfd_ptr + SFD2_18_PTR) & ~7u;
+        uint32_t ptr_1c          = *dram_u32(hle, sfd_ptr + SFD2_1C_PTR) & ~7u;
+        uint32_t ptr_20          = *dram_u32(hle, sfd_ptr + SFD2_20_PTR) & ~7u;
+        uint32_t ptr_24          = *dram_u32(hle, sfd_ptr + SFD2_24_PTR) & ~7u;
 
         uint32_t last_sample_ptr = state_ptr + STATE_LAST_SAMPLE;
         uint32_t output_ptr;
@@ -368,20 +477,25 @@ void musyx_v2_task(struct hle_t* hle)
         /* initialize internal subframes using updated base volumes */
         update_base_vol(hle, musyx.base_vol, voice_mask, last_sample_ptr, mask_15, ptr_24);
         init_subframes_v2(&musyx);
+        {
+            unsigned sample;
+            for(sample=0;sample<SUBFRAME_SIZE;sample++)
+                musyx.left[sample]=clamp_s16((int32_t)musyx.left[sample]+((hle->rsp_vco>>(sample&7u))&1u));
+            hle->rsp_vco=0;
+        }
 
         if (ptr_10) {
-            /* TODO */
-            HleWarnMessage(hle->user_defined,
-                           "ptr_10=%08x mask_14=%02x ptr_24=%08x",
-                           ptr_10, mask_14, ptr_24);
+            auxiliary_stage_v2(hle, &musyx, ptr_10 & ~7u, mask_14, ptr_24);
         }
 
         /* active voices get mixed into L,R,cc0,e50 subframes (optional) */
         output_ptr = voice_stage(hle, &musyx, voice_ptr, last_sample_ptr);
+        output_ptr &= ~7u;
 
         /* apply delay-based effects (optional) */
         sfx_stage(hle, mix_sfx_with_main_subframes_v2,
                   &musyx, sfx_ptr, sfx_index);
+        if(sfx_ptr)musyx.auxiliary_carry=0;
 
         dram_store_u16(hle, (uint16_t*)musyx.left,  output_ptr                  , SUBFRAME_SIZE);
         dram_store_u16(hle, (uint16_t*)musyx.right, output_ptr + 2*SUBFRAME_SIZE, SUBFRAME_SIZE);
@@ -392,8 +506,12 @@ void musyx_v2_task(struct hle_t* hle)
         dram_store_u16(hle, (uint16_t*)musyx.subframe_740_last4,
                 state_ptr + STATE_740_LAST4_V2, 4);
 
-        if (mask_16)
+        if (mask_16) {
             interleave_stage_v2(hle, &musyx, mask_16, ptr_18, ptr_1c, ptr_20);
+            musyx.auxiliary_carry=0;
+        }
+        hle->rsp_vco=musyx.auxiliary_carry;
+        hle->rsp_vco_written=1;
 
         --sfd_count;
         if (sfd_count == 0)
@@ -452,7 +570,8 @@ static void update_base_vol(struct hle_t* hle, int32_t *base_vol,
                 continue;
 
             for (k = 0; k < 4; ++k)
-                base_vol[k] += (int16_t)*dram_u16(hle, last_sample_ptr + k * 2);
+                base_vol[k] = (int32_t)((uint32_t)base_vol[k] +
+                    (int16_t)*dram_u16(hle, last_sample_ptr + k * 2));
         }
     }
 
@@ -464,13 +583,14 @@ static void update_base_vol(struct hle_t* hle, int32_t *base_vol,
                 continue;
 
             for(k = 0; k < 4; ++k)
-                base_vol[k] += (int16_t)*dram_u16(hle, ptr_24 + k * 2);
+                base_vol[k] = (int32_t)((uint32_t)base_vol[k] +
+                    (int16_t)*dram_u16(hle, ptr_24 + k * 2));
         }
     }
 
     /* apply 3% decay */
     for (k = 0; k < 4; ++k)
-        base_vol[k] = (base_vol[k] * 0x0000f850) >> 16;
+        base_vol[k] = (int32_t)(((int64_t)base_vol[k] * 0xf850) >> 16);
 
     HleVerboseMessage(hle->user_defined,
                       "AFTER: base_vol = %08x %08x %08x %08x",
@@ -482,6 +602,8 @@ static void update_base_vol(struct hle_t* hle, int32_t *base_vol,
 
 static void init_subframes_v1(musyx_t *musyx)
 {
+    musyx->version2 = 0;
+    musyx->auxiliary_carry = 0;
     unsigned i;
 
     int16_t base_cc0 = clamp_s16(musyx->base_vol[2]);
@@ -505,9 +627,15 @@ static void init_subframes_v2(musyx_t *musyx)
     unsigned i,k;
     int16_t values[4];
     int16_t* subframes[4];
+    musyx->auxiliary_carry = 0;
+    musyx->version2 = 1;
 
     for(k = 0; k < 4; ++k)
         values[k] = clamp_s16(musyx->base_vol[k]);
+
+    /* The v2 prologue writes its fourth clamp to a1, then moves the
+     * original t5 into v5[6]. Preserve that sixteen-bit truncation. */
+    values[3] = (int16_t)musyx->base_vol[3];
 
     subframes[0] = musyx->left;
     subframes[1] = musyx->right;
@@ -536,20 +664,26 @@ static uint32_t voice_stage(struct hle_t* hle, musyx_t *musyx,
         /* otherwise process voices until a non null output_ptr is encountered */
         for (;;) {
             /* load voice samples (PCM16 or APDCM) */
-            int16_t samples[SAMPLE_BUFFER_SIZE];
+            int16_t samples[SAMPLE_BUFFER_SIZE+4];
             unsigned segbase;
             unsigned offset;
 
             HleVerboseMessage(hle->user_defined, "Processing Voice #%d", i);
 
             if (*dram_u8(hle, voice_ptr + VOICE_ADPCM_FRAMES) == 0)
-                load_samples_PCM16(hle, voice_ptr, samples, &segbase, &offset);
+                load_samples_PCM16(hle, voice_ptr, samples, &segbase, &offset, musyx->version2);
             else
-                load_samples_ADPCM(hle, voice_ptr, samples, &segbase, &offset);
+                load_samples_ADPCM(hle, voice_ptr, samples, &segbase, &offset, musyx->version2);
 
             /* mix them with each internal subframes */
             mix_voice_samples(hle, musyx, voice_ptr, samples, segbase, offset,
                               last_sample_ptr + i * 8);
+            if (musyx->version2)
+            {
+                uint16_t last[4];
+                load_u16(last, hle->dram, (last_sample_ptr + i * 8) & 0xffffff, 4);
+                store_u16(hle->dmem, 0xce0 + (i & 15u) * 8u, last, 4);
+            }
 
             /* check break condition */
             output_ptr = *dram_u32(hle, voice_ptr + VOICE_INTERLEAVED_PTR);
@@ -572,8 +706,8 @@ static void dma_cat8(struct hle_t* hle, uint8_t *dst, uint32_t catsrc_ptr)
     uint16_t size1 = *dram_u16(hle, catsrc_ptr + CATSRC_SIZE1);
     uint16_t size2 = *dram_u16(hle, catsrc_ptr + CATSRC_SIZE2);
 
-    size_t count1 = size1;
-    size_t count2 = size2;
+    size_t count1 = align(size1, 8);
+    size_t count2 = align(size2, 8);
 
     HleVerboseMessage(hle->user_defined,
                       "dma_cat: %08x %08x %04x %04x",
@@ -582,12 +716,12 @@ static void dma_cat8(struct hle_t* hle, uint8_t *dst, uint32_t catsrc_ptr)
                       size1,
                       size2);
 
-    dram_load_u8(hle, dst, ptr1, count1);
+    dram_load_u8(hle, dst, ptr1 & ~7u, count1);
 
     if (size2 == 0)
         return;
 
-    dram_load_u8(hle, dst + count1, ptr2, count2);
+    dram_load_u8(hle, dst + (size1 & ~7u), ptr2 & ~7u, count2);
 }
 
 static void dma_cat16(struct hle_t* hle, uint16_t *dst, uint32_t catsrc_ptr)
@@ -597,8 +731,8 @@ static void dma_cat16(struct hle_t* hle, uint16_t *dst, uint32_t catsrc_ptr)
     uint16_t size1 = *dram_u16(hle, catsrc_ptr + CATSRC_SIZE1);
     uint16_t size2 = *dram_u16(hle, catsrc_ptr + CATSRC_SIZE2);
 
-    size_t count1 = size1 >> 1;
-    size_t count2 = size2 >> 1;
+    size_t count1 = align(size1, 8) >> 1;
+    size_t count2 = align(size2, 8) >> 1;
 
     HleVerboseMessage(hle->user_defined,
                       "dma_cat: %08x %08x %04x %04x",
@@ -607,16 +741,16 @@ static void dma_cat16(struct hle_t* hle, uint16_t *dst, uint32_t catsrc_ptr)
                       size1,
                       size2);
 
-    dram_load_u16(hle, dst, ptr1, count1);
+    dram_load_u16(hle, dst, ptr1 & ~7u, count1);
 
     if (size2 == 0)
         return;
 
-    dram_load_u16(hle, dst + count1, ptr2, count2);
+    dram_load_u16(hle, dst + ((size1 & ~7u) >> 1), ptr2 & ~7u, count2);
 }
 
 static void load_samples_PCM16(struct hle_t* hle, uint32_t voice_ptr, int16_t *samples,
-                               unsigned *segbase, unsigned *offset)
+                               unsigned *segbase, unsigned *offset, int version2)
 {
 
     uint8_t  u8_3e  = *dram_u8(hle, voice_ptr + VOICE_SKIP_SAMPLES);
@@ -624,6 +758,8 @@ static void load_samples_PCM16(struct hle_t* hle, uint32_t voice_ptr, int16_t *s
     uint16_t u16_42 = *dram_u16(hle, voice_ptr + VOICE_U16_42);
 
     unsigned count = align(u16_40 + u8_3e, 4);
+    unsigned base=version2?0x7a0u:0x600u;
+    load_u16((uint16_t*)samples,hle->dmem,base,SAMPLE_BUFFER_SIZE+4);
 
     HleVerboseMessage(hle->user_defined, "Format: PCM16");
 
@@ -634,15 +770,16 @@ static void load_samples_PCM16(struct hle_t* hle, uint32_t voice_ptr, int16_t *s
 
     if (u16_42 != 0)
         dma_cat16(hle, (uint16_t *)samples, voice_ptr + VOICE_CATSRC_1);
+    store_u16(hle->dmem,base,(uint16_t*)samples,SAMPLE_BUFFER_SIZE);
 }
 
 static void load_samples_ADPCM(struct hle_t* hle, uint32_t voice_ptr, int16_t *samples,
-                               unsigned *segbase, unsigned *offset)
+                               unsigned *segbase, unsigned *offset, int version2)
 {
     /* decompressed samples cannot exceed 0x400 bytes;
      * ADPCM has a compression ratio of 5/16 */
     uint8_t buffer[SAMPLE_BUFFER_SIZE * 2 * 5 / 16];
-    int16_t adpcm_table[128];
+    int16_t adpcm_table[256];
 
     uint8_t u8_3c = *dram_u8(hle, voice_ptr + VOICE_ADPCM_FRAMES    );
     uint8_t u8_3d = *dram_u8(hle, voice_ptr + VOICE_ADPCM_FRAMES + 1);
@@ -650,11 +787,24 @@ static void load_samples_ADPCM(struct hle_t* hle, uint32_t voice_ptr, int16_t *s
     uint8_t u8_3f = *dram_u8(hle, voice_ptr + VOICE_SKIP_SAMPLES + 1);
     uint32_t adpcm_table_ptr = *dram_u32(hle, voice_ptr + VOICE_ADPCM_TABLE_PTR);
     unsigned count;
+    unsigned sample_base=version2?0x7a0u:0x600u;
+    unsigned encoded_base=sample_base+SAMPLE_BUFFER_SIZE*2u;
+    unsigned table_base=version2?0xf00u:0xee0u,k;
+    load_u16((uint16_t*)samples,hle->dmem,sample_base,SAMPLE_BUFFER_SIZE+4);
+    load_u8(buffer,hle->dmem,encoded_base,sizeof(buffer));
 
     HleVerboseMessage(hle->user_defined, "Format: ADPCM");
 
     HleVerboseMessage(hle->user_defined, "Loading ADPCM table: %08x", adpcm_table_ptr);
-    dram_load_u16(hle, (uint16_t *)adpcm_table, adpcm_table_ptr, 128);
+    dram_load_u16(hle, (uint16_t *)adpcm_table, adpcm_table_ptr & ~7u, 128);
+    /* Predictor addressing wraps in DMEM. V2's books start at f00;
+     * v1 starts at ee0, so its first extra book also reads the OSTask. */
+    for(k=128;k<256;k++){
+        unsigned address=table_base+k*2u;
+        adpcm_table[k]=(int16_t)(address<4096?*dmem_u16(hle,address):
+            *dram_u16(hle,hle->musyx_ucode_data+(address&4095u)));
+    }
+    store_u16(hle->dmem,table_base,(uint16_t*)adpcm_table,128);
 
     count = u8_3c << 5;
 
@@ -668,6 +818,11 @@ static void load_samples_ADPCM(struct hle_t* hle, uint32_t voice_ptr, int16_t *s
         dma_cat8(hle, buffer, voice_ptr + VOICE_CATSRC_1);
         adpcm_decode_frames(hle, samples, buffer, adpcm_table, u8_3d, u8_3f);
     }
+    /* Resampling may read its four-tap lookahead past the decoded window.
+     * Those samples are the adjacent encoded DMA bytes, not host stack. */
+    store_u8(hle->dmem,encoded_base,buffer,sizeof(buffer));
+    load_u16((uint16_t*)samples+SAMPLE_BUFFER_SIZE,hle->dmem,encoded_base,4);
+    store_u16(hle->dmem,sample_base,(uint16_t*)samples,SAMPLE_BUFFER_SIZE);
 }
 
 static void adpcm_decode_frames(struct hle_t* hle,
@@ -675,6 +830,8 @@ static void adpcm_decode_frames(struct hle_t* hle,
                                 const int16_t *table, uint8_t count,
                                 uint8_t skip_samples)
 {
+    hle_timing_add(HLE_WORK_ADPCM, count);
+
     int16_t frame[32];
     const uint8_t *nibbles = src + 8;
     unsigned i;
@@ -737,6 +894,13 @@ static void mix_voice_samples(struct hle_t* hle, musyx_t *musyx,
                               uint32_t voice_ptr, const int16_t *samples,
                               unsigned segbase, unsigned offset, uint32_t last_sample_ptr)
 {
+    hle_timing_add(HLE_WORK_VOICE, 1);
+    hle_timing_add(HLE_WORK_RESAMPLE, SUBFRAME_SIZE / 8);
+    hle_timing_add(HLE_WORK_ENVMIX, SUBFRAME_SIZE / 8);
+    unsigned coefficient_bias = musyx->auxiliary_carry;
+    int16_t biased_lut[8][4];
+    musyx->auxiliary_carry = 0;
+
     int i, k;
 
     /* parse VOICE structure */
@@ -796,6 +960,40 @@ static void mix_voice_samples(struct hle_t* hle, musyx_t *musyx,
     for (i = 0; i < SUBFRAME_SIZE; ++i) {
         /* update sample and lut pointers and then pitch_accu */
         const int16_t *lut = (RESAMPLE_LUT + ((pitch_accu & 0xfc00) >> 8));
+        if (coefficient_bias)
+        {
+            if (!(i & 7))
+            {
+                const int16_t *cursor = sample;
+                uint32_t phase = pitch_accu;
+                uint16_t sample_address[8], coefficient_address[8];
+                unsigned lane, tap;
+                uint32_t data = hle->musyx_ucode_data;
+                for (lane = 0; lane < 8; lane++)
+                {
+                    int distance;
+                    cursor += phase >> 16;
+                    phase &= 0xffff;
+                    distance = cursor - sample_end;
+                    if (distance >= 0) cursor = sample_restart + distance;
+                    sample_address[lane] = (uint16_t)(0x7a0 + (cursor - samples) * 2);
+                    coefficient_address[lane] = (uint16_t)(0x20 + ((phase & 0xfc00) >> 7) +
+                                                    (((coefficient_bias >> lane) & 1u) * 32u));
+                    phase += pitch_step;
+                }
+                for (lane = 0; lane < 8; lane++)
+                    for (tap = 0; tap < 4; tap++)
+                    {
+                        unsigned address = coefficient_address[lane] + tap * 2;
+                        if (address < 0x220) biased_lut[lane][tap] = RESAMPLE_LUT[(address - 0x20) / 2];
+                        else if (address < 0x230) biased_lut[lane][tap] = (int16_t)*dram_u16(hle, data + address);
+                        else biased_lut[lane][tap] = (int16_t)sample_address[(address - 0x230) / 2];
+                    }
+            }
+            /* VADD seeds v28 with one plus the auxiliary carry; v28
+             * remains in every phase lookup for this voice. */
+            lut = biased_lut[i & 7];
+        }
         /* The microcode reads its phase here, before the accumulator
          * advances for the next output; the wider kernel has to use the
          * same one.  Taking it after the advance is a whole step out,
@@ -832,7 +1030,7 @@ static void mix_voice_samples(struct hle_t* hle, musyx_t *musyx,
              * so the output alternated between two filters with
              * different responses.  Cap what this path asks for - a
              * consistent 32-tap result beats a mixture. */
-            const int16_t* k = resample_hq_taps_capped(pitch_step, phase_accu, 32);
+            const int16_t* k = coefficient_bias ? NULL : resample_hq_taps_capped(pitch_step, phase_accu, 32);
             int            done = 0;
 
             if (k != NULL) {
@@ -894,7 +1092,8 @@ static void mix_voice_samples(struct hle_t* hle, musyx_t *musyx,
                 ? ((v * (int32_t)e50_hi[i & 7] + 0x4000) >> 15)
                 : ((v * (v4_env[k] >> 16) + 0x4000) >> 15);
             v4[k] = clamp_s16(accu);
-            *(v4_dst[k]) = clamp_s16(accu + *(v4_dst[k]));
+            *(v4_dst[k]) = clamp_s16(accu + *(v4_dst[k]) *
+                (1 + (int)((coefficient_bias >> (i & 7)) & 1u)));
 
             /* update envelopes and dst pointers */
             ++(v4_dst[k]);
@@ -941,7 +1140,7 @@ static void sfx_stage(struct hle_t* hle, mix_sfx_with_main_subframes_t mix_sfx_w
     int16_t tap_gains[8];
     int16_t fir4_hcoeffs[4];
 
-    int16_t delayed[SUBFRAME_SIZE];
+    int16_t delayed[SUBFRAME_SIZE+4];
     int dpos, dlength;
 
     const uint32_t pos = idx * SUBFRAME_SIZE;
@@ -956,12 +1155,15 @@ static void sfx_stage(struct hle_t* hle, mix_sfx_with_main_subframes_t mix_sfx_w
 
     if (sfx_ptr == 0)
         return;
+    sfx_ptr &= ~7u;
 
     /* load sfx  parameters */
     cbuffer_ptr    = *dram_u32(hle, sfx_ptr + SFX_CBUFFER_PTR);
     cbuffer_length = *dram_u32(hle, sfx_ptr + SFX_CBUFFER_LENGTH);
 
     tap_count      = *dram_u16(hle, sfx_ptr + SFX_TAP_COUNT);
+    hle_timing_add(HLE_WORK_EFFECT, tap_count);
+    hle_timing_add(HLE_WORK_FILTER, SUBFRAME_SIZE / 8);
 
     dram_load_u32(hle, tap_delays, sfx_ptr + SFX_TAP_DELAYS, 8);
     dram_load_u16(hle, (uint16_t *)tap_gains,  sfx_ptr + SFX_TAP_GAINS,  8);
@@ -998,16 +1200,21 @@ static void sfx_stage(struct hle_t* hle, mix_sfx_with_main_subframes_t mix_sfx_w
     for (i = 0; i < tap_count; ++i) {
 
         dpos = pos - tap_delays[i];
-        if (dpos <= 0)
+        if (dpos < 0)
             dpos += cbuffer_length;
         dlength = SUBFRAME_SIZE;
 
         if ((uint32_t)(dpos + SUBFRAME_SIZE) > cbuffer_length) {
             dlength = cbuffer_length - dpos;
-            dram_load_u16(hle, (uint16_t *)delayed + dlength, cbuffer_ptr, SUBFRAME_SIZE - dlength);
+            /* The wrapped head is transferred first. SP DMA rounds its
+             * destination down to eight bytes, then the rounded tail DMA
+             * overwrites their partial overlap. */
+            dram_load_u16(hle, (uint16_t *)delayed + (dlength&~3u),
+                cbuffer_ptr&~7u,align(SUBFRAME_SIZE-dlength,4));
         }
 
-        dram_load_u16(hle, (uint16_t *)delayed, cbuffer_ptr + dpos * 2, dlength);
+        dram_load_u16(hle, (uint16_t *)delayed, (cbuffer_ptr + dpos * 2)&~7u, align(dlength,4));
+        store_u16(hle->dmem,musyx->version2?0x970u:0x7d0u,(uint16_t*)delayed,SUBFRAME_SIZE);
 
         mix_subframes(subframe, delayed, tap_gains[i]);
     }
@@ -1019,7 +1226,7 @@ static void sfx_stage(struct hle_t* hle, mix_sfx_with_main_subframes_t mix_sfx_w
     memcpy(buffer, musyx->subframe_740_last4, 4 * sizeof(int16_t));
     memcpy(musyx->subframe_740_last4, subframe + SUBFRAME_SIZE - 4, 4 * sizeof(int16_t));
     mix_fir4(musyx->e50, buffer + 1, fir4_hgain, fir4_hcoeffs);
-    dram_store_u16(hle, (uint16_t *)musyx->e50, cbuffer_ptr + pos * 2, SUBFRAME_SIZE);
+    dram_store_u16(hle, (uint16_t *)musyx->e50, (cbuffer_ptr + pos * 2)&~7u, SUBFRAME_SIZE);
 }
 
 static void mix_sfx_with_main_subframes_v1(musyx_t *musyx, const int16_t *subframe,
@@ -1169,7 +1376,9 @@ static void interleave_stage_v2(struct hle_t* hle, musyx_t *musyx,
     for(i = 0; i < SUBFRAME_SIZE; ++i) {
         int16_t v = *dram_u16(hle, ptr_1c + i*2);
         musyx->left[i] = v;
-        musyx->right[i] = clamp_s16(-v);
+        /* VSUB consumes VCO left by the final auxiliary FIR fold on
+         * its first vector only; later iterations see cleared flags. */
+        musyx->right[i] = clamp_s16(-v - (i < 8 ? (int)((musyx->auxiliary_carry >> i) & 1u) : 0));
     }
 
     for (k = 0, mask = 1; k < 8; ++k, mask <<= 1, ptr_18 += 8) {
@@ -1179,7 +1388,7 @@ static void interleave_stage_v2(struct hle_t* hle, musyx_t *musyx,
         if ((mask_16 & mask) == 0)
             continue;
 
-        address = *dram_u32(hle, ptr_18);
+        address = *dram_u32(hle, ptr_18) & ~7u;
         hgain   = *dram_u16(hle, ptr_18 + 4);
 
         for(i = 0; i < SUBFRAME_SIZE; ++i, address += 2) {

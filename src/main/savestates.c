@@ -60,7 +60,7 @@ enum { GB_CART_FINGERPRINT_OFFSET = 0x134 };
 enum { DD_DISK_ID_OFFSET = 0x43670 };
 
 static const char* savestate_magic = "M64+SAVE";
-static const int savestate_latest_version = 0x00011500;  /* 1.21: fractional RDP clock conversion */
+static const int savestate_latest_version = 0x00011700;  /* 1.23: persistent NEAD vector constant */
 static const unsigned char pj64_magic[4] = { 0xC8, 0xA6, 0xD8, 0x23 };
 
 static savestates_job job = savestates_job_nothing;
@@ -946,7 +946,9 @@ int savestates_load_m64p(struct device* dev, const void *data)
     if (version < 0x00011100)
         dev->sp.rsp_completion_status &= SP_STATUS_HALT | SP_STATUS_BROKE;
 #ifdef __LIBRETRO__
-    if (version >= 0x00011000) optional_rsp_load(data_0001_0200 + 20480);
+    if (version >= 0x00011700) optional_rsp_load(data_0001_0200 + 20480);
+    else if (version >= 0x00011600) optional_rsp_load_v116(data_0001_0200 + 20480);
+    else if (version >= 0x00011000) optional_rsp_load_legacy_stream(data_0001_0200 + 20480);
     else optional_rsp_load_legacy(version >= 0x00010e00 ? data_0001_0200 + 20480 : NULL);
 #endif
     ai_rebase_timing(&dev->ai);

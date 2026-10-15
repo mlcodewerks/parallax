@@ -3,6 +3,9 @@
 #include "device/r4300/r4300_core.h"
 #include "device/rcp/mi_controller.h"
 #include "device/rcp/rdp/rdp_core.h"
+#ifdef __LIBRETRO__
+#include "optional_rsp.h"
+#endif
 
 void rsp_dma_read_memory(void* opaque, uint32_t address, uint32_t length)
 {
@@ -21,6 +24,9 @@ void rsp_dma_write_memory(void* opaque, uint32_t address, uint32_t length)
     address &= 0x7fffff;
     while (length) {
         uint32_t size = length < 0x800000 - address ? length : 0x800000 - address;
+#ifdef __LIBRETRO__
+        optional_rsp_timing_dma_write(address, size);
+#endif
         invalidate_r4300_cached_code(sp->mi->r4300, address, size);
         post_framebuffer_write(&sp->dp->fb, address, size);
         length -= size; address = 0;

@@ -28,6 +28,7 @@
 #include "rdp_emit_rsp.h"
 #include "rdp_emit_backend.h"
 #include "rdp_emit_state.h"
+#include "../../rsp/hle/hle_timing.h"
 
 /* The active rasterizer backend (angrylion or parallel-rdp).  Installed via
  * rdp_emit_set_backend() at plugin connect time.  The display-list walk,
@@ -1233,28 +1234,33 @@ int angrylion_naboo_dlist(int resume, int emit)
     naboo_set_emit(emit);
     if (!resume)
         naboo_seed_dmem(dmem);
-    /* Unsupported overlays must be rejected before an overflow flush can
-     * send any commands to the RDP. The walker changes only its private DMEM
-     * and emitter state, so replay a read-only probe with a discard sink. */
+    /* Probe before an overflow flush can send commands to the RDP. Roll
+     * back particle DMA writes as well as private DMEM/emitter state. */
     {
         unsigned int ns = naboo_state_size(), rs = rsp_emit_state_size();
         unsigned int fs = f3dex2_state_size();
         unsigned char *saved = (unsigned char *)malloc(ns + rs + fs);
+        struct hle_timing_work saved_work = hle_timing_get();
         if (!saved) return -1;
         naboo_state_save(saved);
         rsp_emit_state_save(saved + ns);
         f3dex2_state_save(saved + ns + rs);
         s_fifo.flush = fifo_discard;
+        naboo_begin_writes();
         r = naboo_run_dl(&s_fifo, dl_addr, resume);
+        naboo_end_writes(0);
         naboo_state_load(saved);
         rsp_emit_state_load(saved + ns);
         f3dex2_state_load(saved + ns + rs);
         free(saved);
+        hle_timing_restore(saved_work);
         s_fifo.used = 0;
         s_fifo.flush = fifo_flush_to_rdp;
         if (r < 0) return r;
     }
+    naboo_begin_writes();
     r = naboo_run_dl(&s_fifo, dl_addr, resume);
+    naboo_end_writes(r >= 0);
     {
         static int done, fb, t = -1;
         if (t < 0) t = getenv("NB_STATS") != NULL;
@@ -1427,15 +1433,20 @@ int angrylion_zboss_shadow(unsigned char *rdram, unsigned int rdram_size,
      * walks a private copy */
     RdpFifo sf;
     int r;
+    struct hle_timing_work saved_work = hle_timing_get();
+    void *saved_rsp = malloc(rsp_emit_state_size());
+    if (!saved_rsp) return -1;
+    rsp_emit_state_save(saved_rsp);
     memcpy(s_shadow_dmem, dmem, 0x1000);
     rdp_fifo_init(&sf, s_shadow_storage, rdram_size - HLE_FIFO_CAP,
                   HLE_FIFO_CAP);
     sf.flush = shadow_flush;
-    zboss_set_shadow(1);
-    r = zboss_run(rdram, rdram_size, s_shadow_dmem, &sf, ZBOSS_OP_FRESH, 0);
-    zboss_set_shadow(0);
+    r = zboss_run_shadow(rdram, rdram_size, s_shadow_dmem, &sf);
     fprintf(stderr, "SHADOW r=%d\n", r);
     shadow_flush(&sf);
+    rsp_emit_state_load(saved_rsp);
+    free(saved_rsp);
+    hle_timing_restore(saved_work);
     return r;
 }
 
@@ -1523,6 +1534,20 @@ void rdp_emit_stream_load(const void *buffer)
     const unsigned char *p = (const unsigned char *)buffer;
 #define LOAD_PART(name) name##_state_load(p); if (p) p += name##_state_size();
     LOAD_PART(f3dex2) LOAD_PART(rs) LOAD_PART(naboo) LOAD_PART(zboss)
+    LOAD_PART(rsp_emit) LOAD_PART(transport)
+#undef LOAD_PART
+}
+
+unsigned int rdp_emit_stream_legacy_state_size(void)
+{
+    return rdp_emit_stream_state_size() - zboss_state_size() + zboss_legacy_state_size();
+}
+void rdp_emit_stream_load_legacy(const void *buffer)
+{
+    const unsigned char *p = (const unsigned char *)buffer;
+#define LOAD_PART(name) name##_state_load(p); if (p) p += name##_state_size();
+    LOAD_PART(f3dex2) LOAD_PART(rs) LOAD_PART(naboo)
+    zboss_state_load_legacy(p); if (p) p += zboss_legacy_state_size();
     LOAD_PART(rsp_emit) LOAD_PART(transport)
 #undef LOAD_PART
 }

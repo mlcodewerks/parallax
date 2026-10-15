@@ -20,6 +20,8 @@ EMIT_STATE_DECLARE(f3dex2)
 EMIT_STATE_DECLARE(rs)
 EMIT_STATE_DECLARE(naboo)
 EMIT_STATE_DECLARE(zboss)
+unsigned int zboss_legacy_state_size(void);
+void zboss_state_load_legacy(const void *);
 EMIT_STATE_DECLARE(rsp_emit)
 EMIT_STATE_DECLARE(hle_stream)
 int hle_stream_can_resume(unsigned int checksum);

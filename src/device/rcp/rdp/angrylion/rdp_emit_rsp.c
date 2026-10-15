@@ -1,3 +1,4 @@
+#include "../../rsp/hle/hle_timing.h"
 /* RSP-exact triangle attribute setup for the angrylion HLE path.
  *
  * Transcribed from the F3DEX2 microcode triangle write (tri_to_rdp in the
@@ -596,6 +597,7 @@ void rsp_light_vtx(const int32_t n[3], const int32_t amb[3],
 {
     int32_t lt[3];
     int c, i;
+    if (num > 0) hle_timing_add(HLE_WORK_LIGHT, (unsigned int)num);
     for (c = 0; c < 3; c++)
         lt[c] = (amb[c] & 0xff) << 7;
     i = num - 1;
@@ -891,7 +893,9 @@ static int32_t s_rs_stale_l_sf, s_rs_stale_l_tf;
 
 void rsp_set_tri_attr_rs(int on)
 {
-    s_tri_attr_rs = on ? 1 : 0;
+    /* 2 selects the later Factor 5 writer: perspective normalization is
+     * controlled by geometry bit 12 independently of the depth-output bit. */
+    s_tri_attr_rs = on == 2 ? 2 : (on ? 1 : 0);
 }
 
 void rsp_tri_set_zboss_attr(int on)
@@ -2384,6 +2388,8 @@ int rsp_tri_write(int32_t *ew,
     int32_t inv_dy_lm_32;
     int32_t mh_x, mh_y, lh_x, lh_y, hl_y, hm_x, lm_x, lm_y;
 
+    hle_timing_add(HLE_WORK_TRIANGLE, 1);
+
     if (s_tri_attr_zboss)
     {
         /* The ZSortBOSS y-sort network (IMEM 0x904..0x94c), a
@@ -2496,7 +2502,10 @@ int rsp_tri_write(int32_t *ew,
 
     /* ---- cross product (lane 1):  MH.y*LH.x + LH.y*HM.x ---- */
     acc = p_udh(mh_y, lh_x);
-    acc += p_udh(lh_y, hm_x);
+    /* BOSS 0xac4 uses the independently saturated H-L Y delta and
+     * M-H X delta. Negating the opposite deltas is not equivalent
+     * when one side saturated to -32768 and the other to 32767. */
+    acc += s_tri_attr_zboss ? p_udh(hl_y, mh_x) : p_udh(lh_y, hm_x);
     cross_i = (int32_t)((acc >> 32) & 0xffff);   /* vreadacc upper */
     cross_f = (int32_t)((acc >> 16) & 0xffff);   /* vreadacc middle */
     if (cross_i == 0 && cross_f == 0 && !s_keep_degenerate)
@@ -2837,7 +2846,7 @@ int rsp_tri_write(int32_t *ew,
             }
         }
     }
-    else if (textured && s_tri_attr_rs && z_buffered)
+    else if (textured && s_tri_attr_rs && (z_buffered || s_tri_attr_rs == 2))
     {
         /* Rogue Squadron's z-enabled perspective texture path (live
          * IMEM 0x1a04..0x1abc, probe- and stream-verified): the fold
@@ -3232,6 +3241,78 @@ int rsp_tri_write(int32_t *ew,
     pre_z_dAdE  = dAdE[7];
     pre_z_dAdY  = dAdY[7];
 
+    if (textured && s_tri_attr_rs == 2)
+    {
+        /* The later Factor 5 writer normalizes the texture coefficient
+         * block as a whole, even without depth output. Its bound includes
+         * absolute integer X/Y gradients and the largest vertex S/T/W
+         * pair. Keep the intermediate low slices and the native 1.0 cap. */
+        Rsp32 bound = {0, 0}, normal;
+        int vi, lane;
+        for (lane = 4; lane <= 6; lane++) {
+            Rsp32 magnitude = {0, 0}, candidate;
+            for (vi = 0; vi < 3; vi++) {
+                int value = S16(at_i[vi][lane]);
+                if(value < 0)value=value == -32768 ? 32767 : -value;
+                if(value > S16(magnitude.i) || (value == S16(magnitude.i) &&
+                    U16(at_f[vi][lane]) >= U16(magnitude.f))) {
+                    magnitude.i=value;magnitude.f=at_f[vi][lane];
+                }
+            }
+            if(lane==6){
+                /* The bound spill is SLV, so only S/T are stored. The
+                 * adjacent W lane reads the earlier half-minimum-w spill,
+                 * rather than the maximum normalized vertex W. */
+                int32_t minimum=vh->pw;Rsp32 m;
+                if(vm->pw<minimum)minimum=vm->pw;
+                if(vl->pw<minimum)minimum=vl->pw;
+                m=mk32(minimum);
+                acc=p_udl(m.f,0x8000)+p_udm(m.i,0x8000);
+                magnitude.i=acc_clamp_mid(acc);magnitude.f=acc_clamp_low(acc);
+            }
+            acc=p_udl(magnitude.f,2048)+p_udm(magnitude.i,2048);
+            candidate.i=acc_clamp_mid(acc);candidate.f=acc_clamp_low(acc);
+            {
+                int dx=S16(dAdX[lane].i),dy=S16(dAdY[lane].i);
+                Rsp32 gradients[2];
+                if(dx<0)dx=dx == -32768 ? 32767 : -dx;
+                if(dy<0)dy=dy == -32768 ? 32767 : -dy;
+                acc=p_udm(dx,2048);
+                gradients[0].i=acc_clamp_mid(acc);gradients[0].f=acc_clamp_low(acc);
+                acc=p_udn(gradients[0].f,2)+p_udh(gradients[0].i,2);
+                gradients[0].i=acc_clamp_mid(acc);gradients[0].f=acc_clamp_low(acc);
+                acc=p_udm(dy,2048);
+                gradients[1].i=acc_clamp_mid(acc);gradients[1].f=acc_clamp_low(acc);
+                /* VMADN/VMADH continue the X accumulator through the Y
+                 * gradient and the vertex bound; this is their sum, not
+                 * a maximum of three separately rounded quantities. */
+                acc=p_udn(gradients[0].f,1)+p_udh(gradients[0].i,1);
+                acc+=p_udn(gradients[1].f,1)+p_udh(gradients[1].i,1);
+                acc+=p_udn(candidate.f,1);
+                candidate.f=acc_clamp_low(acc);
+                acc+=p_udh(candidate.i,1);candidate.i=acc_clamp_mid(acc);
+            }
+            if(S16(candidate.i)>S16(bound.i) || (S16(candidate.i)==S16(bound.i)&&U16(candidate.f)>=U16(bound.f)))
+                bound=candidate;
+        }
+        acc=p_udl(bound.f,64)+p_udm(bound.i,64);
+        bound.i=acc_clamp_mid(acc);bound.f=acc_clamp_low(acc);
+        normal=mk32(rsp_rcp32_dp((int32_t)((U16(bound.i)<<16)|U16(bound.f))));
+        acc=p_udn(normal.f,2);
+        normal.f=acc_clamp_low(acc);acc+=p_udh(normal.i,2);normal.i=acc_clamp_mid(acc);
+        if(S16(normal.i)>=1){normal.i=1;normal.f=0;}
+        for(lane=4;lane<=6;lane++){
+            base[lane]=mac32(base[lane],normal,0);
+            dAdX[lane]=mac32(dAdX[lane],normal,0);
+            dAdE[lane]=mac32(dAdE[lane],normal,0);
+            dAdY[lane]=mac32(dAdY[lane],normal,0);
+        }
+        pre_z_base=mac32(pre_z_base,normal,0);
+        pre_z_dAdX=mac32(pre_z_dAdX,normal,0);
+        pre_z_dAdE=mac32(pre_z_dAdE,normal,0);
+        pre_z_dAdY=mac32(pre_z_dAdY,normal,0);
+    }
+
     /* ---- z block scaling (x32 with the special base sequence) ---- */
     if (z_buffered && s_tri_attr_rs)
     {
@@ -3253,11 +3334,15 @@ int rsp_tri_write(int32_t *ew,
             gr5[gi5]->f = acc_clamp_low(acc);
             acc += p_udh(gr5[gi5]->i, 32);
             gr5[gi5]->i = acc_clamp_mid(acc);
+            /* The following zero VMADN re-latches the low slice after
+             * the high multiply, including signed accumulator saturation. */
+            gr5[gi5]->f = acc_clamp_low(acc);
         }
         acc = p_udn(at_f[0][7], 32);
         a5.f = acc_clamp_low(acc);
         acc += p_udh(at_i[0][7], 32);
         a5.i = acc_clamp_mid(acc);
+        a5.f = acc_clamp_low(acc);
         acc = p_udl(dAdE[7].f, yspx16);
         acc += p_udm(dAdE[7].i, yspx16);
         t5.i = acc_clamp_mid(acc);

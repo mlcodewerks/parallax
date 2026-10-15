@@ -32,6 +32,14 @@ int SP_STATUS_TIMEOUT;
 
 extern "C"
 {
+    uint16_t parallelRSPGetVCO(void)
+    {
+        return (uint16_t)rsp_get_flags(RSP::cpu.get_state().cp2.flags[RSP::RSP_VCO].e);
+    }
+    void parallelRSPSetVCO(uint16_t value)
+    {
+        rsp_set_flags(RSP::cpu.get_state().cp2.flags[RSP::RSP_VCO].e,value);
+    }
     void parallelRSPSaveState(uint32_t* words)
     {
         auto& s = RSP::cpu.get_state();

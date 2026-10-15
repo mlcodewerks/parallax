@@ -24,6 +24,7 @@
 #include <string.h>
 
 #include "hle_internal.h"
+#include "hle_timing.h"
 
 /**
  * During IPL3 stage of CIC x105 games, the RSP performs some checks and transactions
@@ -39,6 +40,8 @@ void cicx105_ucode(struct hle_t* hle)
     unsigned int i;
     unsigned char *dst = hle->dram + 0x2fb1f0;
     unsigned char *src = hle->imem + 0x120;
+    hle_timing_add(HLE_WORK_DMA, (0x1f0u + 24u * 8u) / 8u);
+    hle_timing_add(HLE_WORK_DMA_SETUP, 2);
 
     /* dma_read(0x1120, 0x1e8, 0x1e8) */
     memcpy(hle->imem + 0x120, hle->dram + 0x1e8, 0x1f0);

@@ -49,7 +49,11 @@ std::string disassemble(uint32_t pc, uint32_t instr)
 		};
 
 		if (ops_str[op])
+		{
+			if (op >= 0x30 && op <= 0x36)
+				DISASM("%s v%u[%u], v%u[%u]", ops_str[op], vd, vs & 7, vt, e & 7);
 			DISASM("%s v%u, v%u, v%u[%u]", ops_str[op], vd, vs, vt, e);
+		}
 		else
 			DISASM("cop2 %u reserved", op);
 	}
@@ -61,8 +65,8 @@ std::string disassemble(uint32_t pc, uint32_t instr)
 
 	uint32_t type = instr >> 26;
 
-#define NOP_IF_RD_ZERO() if (rd == 0) { DISASM_NOP(); break; }
-#define NOP_IF_RT_ZERO() if (rt == 0) { DISASM_NOP(); break; }
+#define NOP_IF_RD_ZERO() if (instr == 0) { DISASM_NOP(); break; }
+#define NOP_IF_RT_ZERO() ((void)0)
 
 	switch (type)
 	{
@@ -129,21 +133,25 @@ std::string disassemble(uint32_t pc, uint32_t instr)
 
 		case 011: // JALR
 		{
-			DISASM("jalr %s", NAME(rs));
+			DISASM("jalr %s, %s", NAME(rd), NAME(rs));
 			break;
 		}
 
 		case 015: // BREAK
 		{
-			DISASM("break %u", 0);
+			DISASM("break %u", (instr >> 6) & 0xfffff);
 			break;
 		}
 
 #define THREE_REG_OP(asmop) \
 	NOP_IF_RD_ZERO(); \
-	DISASM(#asmop " %s, %s, %s", NAME(rd), NAME(rt), NAME(rs))
+	DISASM(#asmop " %s, %s, %s", NAME(rd), NAME(rs), NAME(rt))
 
 		case 040: // ADD
+		{
+			THREE_REG_OP(add);
+			break;
+		}
 		case 041: // ADDU
 		{
 			THREE_REG_OP(addu);
@@ -151,6 +159,10 @@ std::string disassemble(uint32_t pc, uint32_t instr)
 		}
 
 		case 042: // SUB
+		{
+			THREE_REG_OP(sub);
+			break;
+		}
 		case 043: // SUBU
 		{
 			THREE_REG_OP(subu);
@@ -178,7 +190,7 @@ std::string disassemble(uint32_t pc, uint32_t instr)
 		case 047: // NOR
 		{
 			NOP_IF_RD_ZERO();
-			DISASM("nor %s, %s, %s", NAME(rd), NAME(rt), NAME(rs));
+			DISASM("nor %s, %s, %s", NAME(rd), NAME(rs), NAME(rt));
 			break;
 		}
 
@@ -226,7 +238,7 @@ std::string disassemble(uint32_t pc, uint32_t instr)
 		{
 			unsigned rs = (instr >> 21) & 31;
 			uint32_t target_pc = (pc + 4 + (instr << 2)) & 0xffc;
-			DISASM("bltzal %s, 0x%03x", NAME(rs), target_pc);
+			DISASM("bgezal %s, 0x%03x", NAME(rs), target_pc);
 			break;
 		}
 
@@ -299,9 +311,13 @@ std::string disassemble(uint32_t pc, uint32_t instr)
 	DISASM(#asmop " %s, %s, %d", NAME(rt), NAME(rs), immtype(instr))
 
 	case 010: // ADDI
-	case 011:
 	{
 		TWO_REG_IMM_OP(addi, int16_t);
+		break;
+	}
+	case 011:
+	{
+		TWO_REG_IMM_OP(addiu, int16_t);
 		break;
 	}
 
@@ -313,7 +329,7 @@ std::string disassemble(uint32_t pc, uint32_t instr)
 
 	case 013: // SLTIU
 	{
-		TWO_REG_IMM_OP(sltiu, uint16_t);
+		TWO_REG_IMM_OP(sltiu, int16_t);
 		break;
 	}
 
@@ -349,18 +365,24 @@ std::string disassemble(uint32_t pc, uint32_t instr)
 		unsigned rd = (instr >> 11) & 31;
 		unsigned rs = (instr >> 21) & 31;
 		unsigned rt = (instr >> 16) & 31;
+		static const char *cp0_names[16] = {
+			"SP_MEM_ADDR", "SP_DRAM_ADDR", "SP_RD_LEN", "SP_WR_LEN",
+			"SP_STATUS", "SP_DMA_FULL", "SP_DMA_BUSY", "SP_SEMAPHORE",
+			"DPC_START", "DPC_END", "DPC_CURRENT", "DPC_STATUS",
+			"DPC_CLOCK", "DPC_BUFBUSY", "DPC_PIPEBUSY", "DPC_TMEM"
+		};
 
 		switch (rs)
 		{
 		case 000: // MFC0
 		{
-			DISASM("mfc0 %s, %s", NAME(rt), NAME(rd));
+			DISASM("mfc0 %s, %s", NAME(rt), cp0_names[rd & 15]);
 			break;
 		}
 
 		case 004: // MTC0
 		{
-			DISASM("mtc0 %s, %s", NAME(rd), NAME(rt));
+			DISASM("mtc0 %s, %s", NAME(rt), cp0_names[rd & 15]);
 			break;
 		}
 
@@ -381,25 +403,25 @@ std::string disassemble(uint32_t pc, uint32_t instr)
 		{
 		case 000: // MFC2
 		{
-			DISASM("mfc2 %s, %s, %u", NAME(rt), NAME(rd), imm);
+			DISASM("mfc2 %s, v%u[%u]", NAME(rt), rd, imm);
 			break;
 		}
 
 		case 002: // CFC2
 		{
-			DISASM("cfc2 %s, %s", NAME(rt), NAME(rd));
+			DISASM("cfc2 %s, $%u", NAME(rt), rd);
 			break;
 		}
 
 		case 004: // MTC2
 		{
-			DISASM("mtc2 %s, %s, %u", NAME(rt), NAME(rd), imm);
+			DISASM("mtc2 %s, v%u[%u]", NAME(rt), rd, imm);
 			break;
 		}
 
 		case 006: // CTC2
 		{
-			DISASM("ctc2 %s, %s", NAME(rt), NAME(rd));
+			DISASM("ctc2 %s, $%u", NAME(rt), rd);
 			break;
 		}
 
@@ -487,11 +509,6 @@ std::string disassemble(uint32_t pc, uint32_t instr)
 	case 050: // SB
 	{
 		unsigned rt = (instr >> 16) & 31;
-		if (rt == 0)
-		{
-			DISASM_NOP();
-			break;
-		}
 
 		int16_t simm = int16_t(instr);
 		unsigned rs = (instr >> 21) & 31;
@@ -502,11 +519,6 @@ std::string disassemble(uint32_t pc, uint32_t instr)
 	case 051: // SH
 	{
 		unsigned rt = (instr >> 16) & 31;
-		if (rt == 0)
-		{
-			DISASM_NOP();
-			break;
-		}
 
 		int16_t simm = int16_t(instr);
 		unsigned rs = (instr >> 21) & 31;
@@ -517,11 +529,6 @@ std::string disassemble(uint32_t pc, uint32_t instr)
 	case 053: // SW
 	{
 		unsigned rt = (instr >> 16) & 31;
-		if (rt == 0)
-		{
-			DISASM_NOP();
-			break;
-		}
 
 		int16_t simm = int16_t(instr);
 		unsigned rs = (instr >> 21) & 31;
@@ -532,10 +539,8 @@ std::string disassemble(uint32_t pc, uint32_t instr)
 	case 062: // LWC2
 	{
 		unsigned rt = (instr >> 16) & 31;
-		int16_t simm = instr;
-		// Sign-extend.
-		simm <<= 9;
-		simm >>= 9;
+		int simm = int(instr & 127);
+		if (simm & 64) simm -= 128;
 		unsigned rs = (instr >> 21) & 31;
 		unsigned rd = (instr >> 11) & 31;
 		unsigned imm = (instr >> 7) & 15;
@@ -545,8 +550,9 @@ std::string disassemble(uint32_t pc, uint32_t instr)
 		};
 
 		const char *op = lwc2_ops[rd];
+		static const unsigned shift[12] = {0,1,2,3,4,4,3,3,4,4,4,4};
 		if (op)
-			DISASM("%s v%u, %u, %d(%s)", op, rt, imm, simm, NAME(rs));
+			DISASM("%s v%u, %u, %d(%s)", op, rt, imm, simm * (1 << shift[rd]), NAME(rs));
 		else
 			DISASM_NOP();
 		break;
@@ -555,10 +561,8 @@ std::string disassemble(uint32_t pc, uint32_t instr)
 	case 072: // SWC2
 	{
 		unsigned rt = (instr >> 16) & 31;
-		int16_t simm = instr;
-		// Sign-extend.
-		simm <<= 9;
-		simm >>= 9;
+		int simm = int(instr & 127);
+		if (simm & 64) simm -= 128;
 		unsigned rs = (instr >> 21) & 31;
 		unsigned rd = (instr >> 11) & 31;
 		unsigned imm = (instr >> 7) & 15;
@@ -568,8 +572,9 @@ std::string disassemble(uint32_t pc, uint32_t instr)
 		};
 
 		const char *op = swc2_ops[rd];
+		static const unsigned shift[12] = {0,1,2,3,4,4,3,3,4,4,4,4};
 		if (op)
-			DISASM("%s v%u, %u, %d(%s)", op, rt, imm, simm, NAME(rs));
+			DISASM("%s v%u, %u, %d(%s)", op, rt, imm, simm * (1 << shift[rd]), NAME(rs));
 		else
 			DISASM_NOP();
 

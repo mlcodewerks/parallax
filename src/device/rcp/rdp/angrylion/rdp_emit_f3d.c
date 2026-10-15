@@ -1,3 +1,4 @@
+#include "../../rsp/hle/hle_timing.h"
 #include <stdio.h>
 #include <stdlib.h>
 /* rdp_emit_f3d.c -- F3D (Fast3D / "RSP SW 2.0X") display-list dispatcher for
@@ -802,6 +803,8 @@ void f3d_run_dl(GSPState *gsp, RdpFifo *fifo, unsigned int addr,
         unsigned int w0 = rd32(r, pc);
         unsigned int w1 = rd32(r, pc + 4);
         int cmd = (int)((w0 >> 24) & 0xff);
+        hle_timing_graphics_family("gfx_f3d");
+        hle_timing_add(HLE_WORK_COMMAND, 1);
         pc += 8;
 
         if (s_stop_uc && cmd == 0xAF && s_dl_depth == s_uc_stop_depth)

@@ -1,3 +1,4 @@
+#include "../../rsp/hle/hle_timing.h"
 /* rdp_emit_frontend.c -- self-contained geometry frontend for the angrylion
  * HLE path. Reimplements the N64 matrix stack and vertex transform in C89,
  * reading matrices/vertices from RDRAM and producing clip-space vertices for
@@ -105,6 +106,7 @@ static void mtx_mul(int32_t d[4][4], int32_t a[4][4], int32_t b[4][4])
 {
     int32_t r[4][4];
     int i, j, k;
+    hle_timing_add(HLE_WORK_MATRIX_MUL, 1);
     for (i = 0; i < 4; i++)
     {
         for (j = 0; j < 4; j++)
@@ -295,6 +297,7 @@ void gsp_matrix_load(GSPState *s, const unsigned char *rdram, unsigned int addr,
                      int projection, int load, int push)
 {
     int32_t m[4][4];
+    hle_timing_add(HLE_WORK_MATRIX, 1);
     load_n64_matrix(m, rdram, addr);
 
     if (projection)
@@ -651,6 +654,7 @@ static void gsp_vertex_screen(GSPState *s, GSPVertex *vt)
     bridge_compute_screen(&bv, &s->viewport,
                           &vt->scr_x, &vt->scr_y, &vt->scr_z,
                           &vt->w_raw, &vt->rsp_ok, &vt->rsp_invw);
+    hle_timing_add(HLE_WORK_VERTEX, 1);
     vt->rs_ndc2z = rsp_vtx_last_ndc2z();
     vt->rs_pw = rsp_vtx_last_pw();
     vt->rs_outcode = rsp_vtx_last_outcode();

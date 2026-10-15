@@ -69,11 +69,42 @@ static int16_t naudio_clamp_s16(int_fast32_t x)
 /* the DMEM scratch the naudio state transfers stage through */
 enum { NAUDIO_STATE_SLAB = 0xfa0 };
 
+static uint16_t naudio_state_read_half(struct hle_t* hle, unsigned offset)
+{
+    unsigned at = (NAUDIO_STATE_SLAB + offset) & 0xfff;
+    return (uint16_t)((uint16_t)hle->alist_buffer[at ^ S8] << 8 |
+        hle->alist_buffer[((at+1)&0xfff) ^ S8]);
+}
+static uint32_t naudio_state_read_word(struct hle_t* hle, unsigned offset)
+{
+    return (uint32_t)naudio_state_read_half(hle, offset) << 16 | naudio_state_read_half(hle, offset+2);
+}
+
+static void naudio_state_half(struct hle_t* hle, unsigned offset, uint16_t value)
+{
+    unsigned byte;
+    for (byte = 0; byte < 2; ++byte) {
+        unsigned at = (NAUDIO_STATE_SLAB + offset + byte) & 0xfff;
+        uint8_t v = (uint8_t)(value >> (byte ? 0 : 8));
+        hle->alist_buffer[at ^ S8] = hle->dmem[at ^ S8] = v;
+        if (offset + byte < sizeof(hle->alist_naudio.state_scratch))
+            hle->alist_naudio.state_scratch[offset + byte] = v;
+    }
+}
+static void naudio_state_commit(struct hle_t* hle)
+{
+    unsigned byte;
+    for (byte = 0; byte < sizeof(hle->alist_naudio.state_scratch); ++byte)
+        hle->alist_buffer[(NAUDIO_STATE_SLAB+byte)^S8] =
+            hle->dmem[(NAUDIO_STATE_SLAB+byte)^S8] = hle->alist_naudio.state_scratch[byte];
+}
+
 static void naudio_seed(struct hle_t* hle)
 {
     uint32_t ucode_data = *dmem_u32(hle, TASK_UCODE_DATA);
     uint32_t data_size  = *dmem_u32(hle, TASK_UCODE_DATA_SIZE);
     unsigned k;
+    memcpy(hle->alist_buffer, hle->dmem, sizeof(hle->alist_buffer));
     if (data_size > 0x800) data_size = 0x800;
     for (k = 0; k + 1 < data_size; k += 2)
         *(int16_t*)(hle->alist_buffer + ((k ^ S16) & 0xfff)) =
@@ -89,14 +120,6 @@ static void naudio_seed(struct hle_t* hle)
                       >> ((k & 1) ? 0 : 8));
 }
 
-static void UNKNOWN(struct hle_t* hle, uint32_t w1, uint32_t w2)
-{
-    uint8_t acmd = (w1 >> 24);
-
-    HleWarnMessage(hle->user_defined,
-                   "Unknown audio command %d: %08x %08x",
-                   acmd, w1, w2);
-}
 
 
 static void SPNOOP(struct hle_t* UNUSED(hle), uint32_t UNUSED(w1), uint32_t UNUSED(w2))
@@ -105,8 +128,9 @@ static void SPNOOP(struct hle_t* UNUSED(hle), uint32_t UNUSED(w1), uint32_t UNUS
 
 static void NAUDIO_0000(struct hle_t* hle, uint32_t w1, uint32_t w2)
 {
-    /* ??? */
-    UNKNOWN(hle, w1, w2);
+    /* IMEM zero enters the surviving boot prefix, then resident 08c. */
+    (void)w1; (void)w2;
+    alist_naudio_reenter(hle);
 }
 
 static void NAUDIO_02B0(struct hle_t* hle, uint32_t UNUSED(w1), uint32_t w2)
@@ -114,6 +138,7 @@ static void NAUDIO_02B0(struct hle_t* hle, uint32_t UNUSED(w1), uint32_t w2)
     /* emulate code at 0x12b0 (inside SETVOL), because PC always execute in IMEM */
     hle->alist_naudio.rate[1] &= ~0xffff;
     hle->alist_naudio.rate[1] |= (w2 & 0xffff);
+    naudio_state_half(hle, 0x4a, (uint16_t)w2);
 }
 
 static int16_t naudio_vmulf(int16_t a, int16_t b)
@@ -276,15 +301,24 @@ static void SETVOL(struct hle_t* hle, uint32_t w1, uint32_t w2)
             hle->alist_naudio.vol[0] = w1;
             hle->alist_naudio.dry    = (w2 >> 16);
             hle->alist_naudio.wet    = w2;
+            naudio_state_half(hle, 0x50, (uint16_t)w1);
+            naudio_state_half(hle, 0x4c, (uint16_t)(w2 >> 16));
+            naudio_state_half(hle, 0x4e, (uint16_t)w2);
         }
         else { /* A_RIGHT */
             hle->alist_naudio.target[1] = w1;
             hle->alist_naudio.rate[1]   = w2;
+            naudio_state_half(hle, 0x46, (uint16_t)w1);
+            naudio_state_half(hle, 0x48, (uint16_t)(w2 >> 16));
+            naudio_state_half(hle, 0x4a, (uint16_t)w2);
         }
     }
     else { /* A_RATE */
         hle->alist_naudio.target[0] = w1;
         hle->alist_naudio.rate[0]   = w2;
+        naudio_state_half(hle, 0x40, (uint16_t)w1);
+        naudio_state_half(hle, 0x42, (uint16_t)(w2 >> 16));
+        naudio_state_half(hle, 0x44, (uint16_t)w2);
     }
 }
 
@@ -293,7 +327,16 @@ static void envmixer(struct hle_t* hle, uint32_t w1, uint32_t w2, enum alist_env
     uint8_t  flags   = (w1 >> 16);
     uint32_t address = (w2 & 0xffffff);
 
+    hle->alist_naudio.vol[0] = (int16_t)naudio_state_read_half(hle, 0x50);
+    hle->alist_naudio.target[0] = (int16_t)naudio_state_read_half(hle, 0x40);
+    hle->alist_naudio.target[1] = (int16_t)naudio_state_read_half(hle, 0x46);
+    hle->alist_naudio.rate[0] = (int32_t)naudio_state_read_word(hle, 0x42);
+    hle->alist_naudio.rate[1] = (int32_t)naudio_state_read_word(hle, 0x48);
+    hle->alist_naudio.dry = (int16_t)naudio_state_read_half(hle, 0x4c);
+    hle->alist_naudio.wet = (int16_t)naudio_state_read_half(hle, 0x4e);
+
     hle->alist_naudio.vol[1] = w1;
+    naudio_state_half(hle, 0x52, (uint16_t)w1);
 
     /* the handler loads the ramp-index row at DMEM 0x90 into the
      * register the filter command spills */
@@ -320,6 +363,7 @@ static void envmixer(struct hle_t* hle, uint32_t w1, uint32_t w2, enum alist_env
             hle->alist_naudio.rate,
             address,
             input_mode);
+    naudio_state_commit(hle);
 }
 
 static void ENVMIXER(struct hle_t* hle, uint32_t w1, uint32_t w2)
@@ -417,6 +461,8 @@ static void DMEMMOVE(struct hle_t* hle, uint32_t w1, uint32_t w2)
 static void SETLOOP(struct hle_t* hle, uint32_t UNUSED(w1), uint32_t w2)
 {
     hle->alist_naudio.loop = (w2 & 0xffffff);
+    naudio_state_half(hle, 0x10, (uint16_t)(hle->alist_naudio.loop >> 16));
+    naudio_state_half(hle, 0x12, (uint16_t)hle->alist_naudio.loop);
 }
 
 static void ADPCM(struct hle_t* hle, uint32_t w1, uint32_t w2)
@@ -448,7 +494,7 @@ static void ADPCM(struct hle_t* hle, uint32_t w1, uint32_t w2)
                 dmemi,
                 (count + 0x1f) & ~0x1f,
                 table,
-                hle->alist_naudio.loop,
+                naudio_state_read_word(hle, 0x10) & 0x7fffffu,
                 address);
     }
 }
@@ -480,6 +526,7 @@ static void RESAMPLE(struct hle_t* hle, uint32_t w1, uint32_t w2)
             NAUDIO_COUNT,
             pitch << 1,
             address);
+    naudio_state_commit(hle);
 }
 
 static void INTERLEAVE(struct hle_t* hle, uint32_t UNUSED(w1), uint32_t UNUSED(w2))
@@ -559,8 +606,7 @@ void alist_process_naudio(struct hle_t* hle)
         MIXER,          INTERLEAVE,     NAUDIO_02B0,    SETLOOP
     };
 
-    alist_process(hle, ABI, 0x10);
-    rsp_break(hle, SP_STATUS_TASKDONE);
+    alist_naudio_walk(hle, ABI, 0);
 }
 
 void alist_process_naudio_bk(struct hle_t* hle)
@@ -569,17 +615,8 @@ void alist_process_naudio_bk(struct hle_t* hle)
     naudio_mp3_bank_dmem = 0;
     naudio_mp3_bank_size = 0;
     naudio_seed(hle);
-    /* Banjo-Kazooie's audio library emits A_POLEF at opcode 0x0e, but
-     * this ucode does not implement a pole filter: its dispatch table
-     * sends the command to 0x2b0, the middle of the SETVOL handler, past
-     * the instruction that derives $v0 from the command words. The code
-     * there stores $v0 and w2 as the right-channel rate high/low halves,
-     * so the effective rate is built from register residue: $v0 still
-     * holds the DRAM address of the preceding LOADADPCM (the library
-     * always pairs A_POLEF with one), unless the 0x140-byte command
-     * chunk was refilled in between, in which case it holds the alist
-     * read pointer. The custom walk below models that residue; the
-     * NAUDIO_02B0 table entry is bypassed for this ucode. */
+    /* Opcode 0e enters SETVOL after its v0 calculation. The walker
+     * preserves LOADADPCM's address and clears v0 at each command DMA. */
     static const acmd_callback_t ABI[0x10] = {
         SPNOOP,         ADPCM,          CLEARBUFF,      ENVMIXER_RAW,
         LOADBUFF,       RESAMPLE,       SAVEBUFF,       NAUDIO_0000,
@@ -587,34 +624,7 @@ void alist_process_naudio_bk(struct hle_t* hle)
         MIXER,          INTERLEAVE,     NAUDIO_02B0,    SETLOOP
     };
 
-    {
-        uint32_t w1, w2;
-        unsigned int acmd;
-        long idx = 0;
-        uint32_t dptr = *dmem_u32(hle, TASK_DATA_PTR);
-        const uint32_t *alist = dram_u32(hle, dptr);
-        const uint32_t *const alist_end = alist + (*dmem_u32(hle, TASK_DATA_SIZE) >> 2);
-        uint32_t v0 = dptr;
-
-        while (alist_end - alist >= 2) {
-            if (idx != 0 && (idx % 40) == 0)
-                v0 = dptr + 8 * idx;
-
-            w1 = *(alist++);
-            w2 = *(alist++);
-            acmd = (w1 >> 24) & 0x7f;
-
-            if (acmd == 0x0e) {
-                hle->alist_naudio.rate[1] = (int32_t)((v0 << 16) | (w2 & 0xffff));
-            } else if (acmd < 0x10) {
-                (*ABI[acmd])(hle, w1, w2);
-                if (acmd == 0x0b)
-                    v0 = w2 & 0xffffff;
-            }
-            ++idx;
-        }
-    }
-    rsp_break(hle, SP_STATUS_TASKDONE);
+    alist_naudio_walk(hle, ABI, 1);
 }
 
 void alist_process_naudio_dk(struct hle_t* hle)

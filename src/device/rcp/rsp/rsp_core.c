@@ -38,6 +38,7 @@
 #endif
 #include "plugin/plugin.h"
 #include "api/callbacks.h"
+#include "rsp_ucode_capture.h"
 
 static void do_sp_dma(struct rsp_core* sp, const struct sp_dma* dma, int64_t start)
 {
@@ -89,6 +90,11 @@ static void do_sp_dma(struct rsp_core* sp, const struct sp_dma* dma, int64_t sta
         sp->regs[SP_DRAM_ADDR_REG] = dramaddr & 0xffffff;
         sp->regs[SP_RD_LEN_REG] = sp->regs[SP_WR_LEN_REG] = (l & 0xff800000) | 0xff8;
     }
+
+    if (dma->dir == SP_DMA_WRITE && (dma->memaddr & 0x1000))
+        rsp_capture_imem((const unsigned char *)sp->mem + 0x1000,
+            (const unsigned char *)sp->mem, dma->memaddr, dma->dramaddr,
+            dma->length, sp->regs2[SP_PC_REG]);
 
     /* schedule end of dma event */
     cp0_update_count(sp->mi->r4300);

@@ -1,3 +1,4 @@
+#include "hle_timing.h"
 /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * *
  *   Mupen64plus-rsp-hle - mp3.c                                           *
  *   Mupen64Plus homepage: https://mupen64plus.org/                        *
@@ -226,6 +227,8 @@ static void MP3AB0(int32_t* v)
 
 void mp3_task(struct hle_t* hle, unsigned int index, uint32_t address)
 {
+    hle_timing_add(HLE_WORK_MP3, 18);
+
     uint32_t inPtr, outPtr;
     uint32_t t6;/* = 0x08A0; - I think these are temporary storage buffers */
     uint32_t t5;/* = 0x0AC0; */

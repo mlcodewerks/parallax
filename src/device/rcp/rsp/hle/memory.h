@@ -28,6 +28,7 @@
 
 #include "common.h"
 #include "hle_internal.h"
+#include "hle_timing.h"
 
 #ifdef MSB_FIRST
 #define S 0
@@ -153,31 +154,49 @@ static inline uint32_t* dram_u32(struct hle_t* hle, uint32_t address)
 
 static inline void dram_load_u8(struct hle_t* hle, uint8_t* dst, uint32_t address, size_t count)
 {
+    hle_timing_add(HLE_WORK_DMA_SETUP, 1);
+    hle_timing_add(HLE_WORK_DMA, (uint32_t)((count * 1u + 7u) / 8u));
+
     load_u8(dst, hle->dram, address & 0xffffff, count);
 }
 
 static inline void dram_load_u16(struct hle_t* hle, uint16_t* dst, uint32_t address, size_t count)
 {
+    hle_timing_add(HLE_WORK_DMA_SETUP, 1);
+    hle_timing_add(HLE_WORK_DMA, (uint32_t)((count * 2u + 7u) / 8u));
+
     load_u16(dst, hle->dram, address & 0xffffff, count);
 }
 
 static inline void dram_load_u32(struct hle_t* hle, uint32_t* dst, uint32_t address, size_t count)
 {
+    hle_timing_add(HLE_WORK_DMA_SETUP, 1);
+    hle_timing_add(HLE_WORK_DMA, (uint32_t)((count * 4u + 7u) / 8u));
+
     load_u32(dst, hle->dram, address & 0xffffff, count);
 }
 
 static inline void dram_store_u8(struct hle_t* hle, const uint8_t* src, uint32_t address, size_t count)
 {
+    hle_timing_add(HLE_WORK_DMA_SETUP, 1);
+    hle_timing_add(HLE_WORK_DMA, (uint32_t)((count * 1u + 7u) / 8u));
+
     store_u8(hle->dram, address & 0xffffff, src, count);
 }
 
 static inline void dram_store_u16(struct hle_t* hle, const uint16_t* src, uint32_t address, size_t count)
 {
+    hle_timing_add(HLE_WORK_DMA_SETUP, 1);
+    hle_timing_add(HLE_WORK_DMA, (uint32_t)((count * 2u + 7u) / 8u));
+
     store_u16(hle->dram, address & 0xffffff, src, count);
 }
 
 static inline void dram_store_u32(struct hle_t* hle, const uint32_t* src, uint32_t address, size_t count)
 {
+    hle_timing_add(HLE_WORK_DMA_SETUP, 1);
+    hle_timing_add(HLE_WORK_DMA, (uint32_t)((count * 4u + 7u) / 8u));
+
     store_u32(hle->dram, address & 0xffffff, src, count);
 }
 

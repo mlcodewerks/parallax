@@ -1,3 +1,4 @@
+#include "../../rsp/hle/hle_timing.h"
 /* Turbo3D (original SGI "RSP SW Version: 2.0D") microcode walker for the
  * angrylion HLE path.
  *
@@ -162,6 +163,8 @@ static void turbo3d_process_rdp(GSPState *gsp, RdpFifo *fifo, unsigned int cmds)
         int cmd = (int)((w0 >> 24) & 0xffu);
         int rdp_id = cmd & 0x3f;
         int extra = 0;
+        hle_timing_graphics_family("gfx_turbo3d");
+        hle_timing_add(HLE_WORK_COMMAND, 1);
 
         if (cmd == 0xe4 || cmd == 0xe5)         /* G_TEXRECT / G_TEXRECTFLIP */
             extra = 2;
@@ -524,6 +527,9 @@ void turbo3d_run_dl(GSPState *gsp, RdpFifo *fifo, unsigned int dl_addr)
         unsigned int pstate  = rd_u32_be(addr + 4u);
         unsigned int pvtx    = rd_u32_be(addr + 8u);
         unsigned int ptri    = rd_u32_be(addr + 12u);
+
+        hle_timing_graphics_family("gfx_turbo3d");
+        hle_timing_add(HLE_WORK_COMMAND, 1);
 
         if (pstate == 0u)
             break;

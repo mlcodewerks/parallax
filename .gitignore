@@ -19,3 +19,16 @@ benchmarks/.optimization-baseline/
 benchmarks/*.exe
 benchmarks/*.log
 benchmarks/__pycache__/
+
+# User-ROM audit listings, captures and local emulator saves.
+benchmarks/zboss-audit/*
+!benchmarks/zboss-audit/README.md
+benchmarks/hle-timing/*
+benchmarks/hle-timing-extra/
+!benchmarks/hle-timing/README.md
+!benchmarks/hle-timing/calibration.json
+!benchmarks/hle-timing/nead-late-calibration.json
+!benchmarks/hle-timing/factor5-calibration.json
+benchmarks/ucode-audit/*
+!benchmarks/ucode-audit/README.md
+!benchmarks/ucode-audit/factor5-validation.json

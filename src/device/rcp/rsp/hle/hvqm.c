@@ -1,3 +1,4 @@
+#include "hle_timing.h"
 /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * *
  *   Mupen64plus-rsp-hle - hvqm.c                                          *
  *   Mupen64Plus homepage: https://mupen64plus.org/                        *
@@ -459,6 +460,7 @@ static void hvqm2_decode(struct hle_t* hle, int is32)
 
         for (j = arg.hmcus, out = arg.buf; j != 0; j--, out += length)
         {
+            hle_timing_add(HLE_WORK_BLOCK, 6);
             uint8_t base = 0x80;
             int16_t Cb[16], Cr[16], Y1[32], Y2[32];
             int16_t* pCb = Cb;

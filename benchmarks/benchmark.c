@@ -307,6 +307,8 @@ int main(int argc, char **argv)
     const char *control_path=getenv("M64P_BENCH_CONTROL");
     FILE *control=NULL,*input_record=NULL;
     uint64_t control_end=0;
+    uint64_t state_vi=getenv("M64P_BENCH_STATE_ROUNDTRIP") ? strtoull(getenv("M64P_BENCH_STATE_ROUNDTRIP"),NULL,0) : 0;
+    bool state_done=false;
 
     void (*retro_set_environment)(retro_environment_t) = NULL;
     void (*retro_set_video_refresh)(retro_video_refresh_t) = NULL;
@@ -322,6 +324,9 @@ int main(int argc, char **argv)
     void *(*retro_get_memory_data)(unsigned) = NULL;
     size_t (*retro_get_memory_size)(unsigned) = NULL;
     void (*retro_debug_timing)(uint32_t[12]) = NULL;
+    size_t (*retro_serialize_size)(void) = NULL;
+    bool (*retro_serialize)(void *, size_t) = NULL;
+    bool (*retro_unserialize)(const void *, size_t) = NULL;
 
     if (argc < 5)
     {
@@ -417,6 +422,11 @@ int main(int argc, char **argv)
     LOAD_SYMBOL(retro_get_memory_data);
     LOAD_SYMBOL(retro_get_memory_size);
     LOAD_SYMBOL(retro_debug_timing);
+    if(state_vi) {
+        LOAD_SYMBOL(retro_serialize_size);
+        LOAD_SYMBOL(retro_serialize);
+        LOAD_SYMBOL(retro_unserialize);
+    }
 
     retro_set_environment(environment_callback);
     retro_set_video_refresh(video_callback);
@@ -469,6 +479,14 @@ int main(int argc, char **argv)
         const uint64_t start_vi = g_vi_count;
         const double frame_start = frame_times ? benchmark_seconds() : 0.0;
         retro_run();
+        if(state_vi&&!state_done&&g_vi_count>=state_vi) {
+            size_t bytes=retro_serialize_size();void *state=malloc(bytes);
+            if(!bytes||!state||!retro_serialize(state,bytes)||!retro_unserialize(state,bytes)) {
+                free(state);fprintf(stderr,"savestate roundtrip failed at VI %llu\n",(unsigned long long)g_vi_count);return 4;
+            }
+            free(state);state_done=true;
+            fprintf(stderr,"savestate roundtrip at VI %llu: %zu bytes\n",(unsigned long long)g_vi_count,bytes);
+        }
         if (frame_times)
             fprintf(frame_times, "%llu,%llu,%.6f\n", (unsigned long long)start_vi,
                     (unsigned long long)g_vi_count, (benchmark_seconds()-frame_start)*1000.0);

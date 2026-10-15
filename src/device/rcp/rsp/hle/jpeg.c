@@ -1,3 +1,4 @@
+#include "hle_timing.h"
 /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * *
  *   Mupen64plus-rsp-hle - jpeg.c                                          *
  *   Mupen64Plus homepage: https://mupen64plus.org/                        *
@@ -347,6 +348,7 @@ static void jpeg_decode_std(struct hle_t* hle,
     dram_load_u16(hle, (uint16_t *)qtables[2], qtableV_ptr, SUBBLOCK_SIZE);
 
     for (mb = 0; mb < macroblock_count; ++mb) {
+        hle_timing_add(HLE_WORK_BLOCK, subblock_count);
         dram_load_u16(hle, (uint16_t *)macroblock, address, macroblock_size);
         decode_macroblock_std(transform_luma, transform_chroma,
                               macroblock, subblock_count, (const int16_t (*)[SUBBLOCK_SIZE])qtables);
@@ -576,6 +578,7 @@ void jpeg_decode_OB(struct hle_t* hle)
     }
 
     for (mb = 0; mb < macroblock_count; ++mb) {
+        hle_timing_add(HLE_WORK_BLOCK, 6);
         int16_t macroblock[6 * SUBBLOCK_SIZE];
         int16_t pixels[6][SUBBLOCK_SIZE];
         uint16_t line[16];
