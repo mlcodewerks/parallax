@@ -40,6 +40,10 @@ enum { SUBFRAME_SIZE = 192 };
 enum { MAX_VOICES = 32 };
 
 enum { SAMPLE_BUFFER_SIZE = 0x200 };
+/* The native four-tap reader can continue into the adjacent 320-byte
+ * encoded DMA window. Keep those halfwords explicit, including its retained
+ * bytes, rather than reading past a host decoded-sample array. */
+enum { SAMPLE_READ_SIZE = SAMPLE_BUFFER_SIZE + 160 };
 
 
 enum {
@@ -682,7 +686,7 @@ static uint32_t voice_stage(struct hle_t* hle, musyx_t *musyx,
         /* otherwise process voices until a non null output_ptr is encountered */
         for (;;) {
             /* load voice samples (PCM16 or APDCM) */
-            int16_t samples[SAMPLE_BUFFER_SIZE+4];
+            int16_t samples[SAMPLE_READ_SIZE];
             unsigned segbase;
             unsigned offset;
 
@@ -777,7 +781,7 @@ static void load_samples_PCM16(struct hle_t* hle, uint32_t voice_ptr, int16_t *s
 
     unsigned count = align(u16_40 + u8_3e, 4);
     unsigned base=version2?0x7a0u:0x600u;
-    load_u16((uint16_t*)samples,hle->dmem,base,SAMPLE_BUFFER_SIZE+4);
+    load_u16((uint16_t*)samples,hle->dmem,base,SAMPLE_READ_SIZE);
 
     HleVerboseMessage(hle->user_defined, "Format: PCM16");
 
@@ -788,7 +792,7 @@ static void load_samples_PCM16(struct hle_t* hle, uint32_t voice_ptr, int16_t *s
 
     if (u16_42 != 0)
         dma_cat16(hle, (uint16_t *)samples, voice_ptr + VOICE_CATSRC_1);
-    store_u16(hle->dmem,base,(uint16_t*)samples,SAMPLE_BUFFER_SIZE);
+    store_u16(hle->dmem,base,(uint16_t*)samples,SAMPLE_READ_SIZE);
 }
 
 static void load_samples_ADPCM(struct hle_t* hle, uint32_t voice_ptr, int16_t *samples,
@@ -808,7 +812,7 @@ static void load_samples_ADPCM(struct hle_t* hle, uint32_t voice_ptr, int16_t *s
     unsigned sample_base=version2?0x7a0u:0x600u;
     unsigned encoded_base=sample_base+SAMPLE_BUFFER_SIZE*2u;
     unsigned table_base=version2?0xf00u:0xee0u,k;
-    load_u16((uint16_t*)samples,hle->dmem,sample_base,SAMPLE_BUFFER_SIZE+4);
+    load_u16((uint16_t*)samples,hle->dmem,sample_base,SAMPLE_READ_SIZE);
     load_u8(buffer,hle->dmem,encoded_base,sizeof(buffer));
 
     HleVerboseMessage(hle->user_defined, "Format: ADPCM");
@@ -839,7 +843,8 @@ static void load_samples_ADPCM(struct hle_t* hle, uint32_t voice_ptr, int16_t *s
     /* Resampling may read its four-tap lookahead past the decoded window.
      * Those samples are the adjacent encoded DMA bytes, not host stack. */
     store_u8(hle->dmem,encoded_base,buffer,sizeof(buffer));
-    load_u16((uint16_t*)samples+SAMPLE_BUFFER_SIZE,hle->dmem,encoded_base,4);
+    load_u16((uint16_t*)samples+SAMPLE_BUFFER_SIZE,hle->dmem,encoded_base,
+             SAMPLE_READ_SIZE-SAMPLE_BUFFER_SIZE);
     store_u16(hle->dmem,sample_base,(uint16_t*)samples,SAMPLE_BUFFER_SIZE);
 }
 
@@ -931,10 +936,10 @@ static void mix_voice_samples(struct hle_t* hle, musyx_t *musyx,
     const uint16_t u16_4e = *dram_u16(hle, voice_ptr + VOICE_U16_4E);
 
     /* init values and pointers */
-    const int16_t       *sample         = samples + segbase + offset + u16_4e;
-    const int16_t *const sample_end     = samples + segbase + end_point;
-    const int16_t *const sample_restart = samples + (restart_point & 0x7fff) +
-                                          (((restart_point & 0x8000) != 0) ? 0x000 : segbase);
+    int sample_position = (int)segbase + offset + u16_4e;
+    const int sample_end = (int)segbase + end_point;
+    const int sample_restart = (restart_point & 0x7fff) +
+                               (((restart_point & 0x8000) != 0) ? 0 : (int)segbase);
 
 
     uint32_t pitch_accu = pitch_q16;
@@ -1009,7 +1014,7 @@ static void mix_voice_samples(struct hle_t* hle, musyx_t *musyx,
         {
             if (!(i & 7))
             {
-                const int16_t *cursor = sample;
+                int cursor = sample_position;
                 uint32_t phase = pitch_accu;
                 uint16_t sample_address[8], coefficient_address[8];
                 unsigned lane, tap;
@@ -1021,7 +1026,7 @@ static void mix_voice_samples(struct hle_t* hle, musyx_t *musyx,
                     phase &= 0xffff;
                     distance = cursor - sample_end;
                     if (distance >= 0) cursor = sample_restart + distance;
-                    sample_address[lane] = (uint16_t)(0x7a0 + (cursor - samples) * 2);
+                    sample_address[lane] = (uint16_t)(0x7a0 + cursor * 2);
                     coefficient_address[lane] = (uint16_t)(0x20 + ((phase & 0xfc00) >> 7) +
                                                     (((coefficient_bias >> lane) & 1u) * 32u));
                     phase += pitch_step;
@@ -1047,14 +1052,14 @@ static void mix_voice_samples(struct hle_t* hle, musyx_t *musyx,
         int dist;
         int16_t v;
 
-        sample += (pitch_accu >> 16);
+        sample_position += (pitch_accu >> 16);
         pitch_accu &= 0xffff;
         pitch_accu += pitch_step;
 
         /* handle end/restart points */
-        dist = sample - sample_end;
+        dist = sample_position - sample_end;
         if (dist >= 0)
-            sample = sample_restart + dist;
+            sample_position = sample_restart + dist;
 
         /* apply resample filter */
         v = 0;
@@ -1081,7 +1086,7 @@ static void mix_voice_samples(struct hle_t* hle, musyx_t *musyx,
             if (k != NULL) {
                 const int   taps  = resample_hq_taps_count();
                 const int   lead  = taps / 2 - 2;
-                const int16_t* lo = sample - lead;
+                const int lo = sample_position - lead;
 
                 /* Taps that run past the end of the voice follow it round
                  * to the restart point, which is where the stream really
@@ -1099,22 +1104,22 @@ static void mix_voice_samples(struct hle_t* hle, musyx_t *musyx,
                  * play position starts only a few samples above it.  A window
                  * reaching back past segbase would mix in unrelated audio, so
                  * it falls back instead. */
-                if (lo >= samples + segbase) {
+                if (lo >= (int)segbase) {
                     int64_t acc = 0;
                     int     t;
 
                     for (t = 0; t < taps; ++t) {
-                        const int16_t* p = lo + t;
+                        int p = lo + t;
 
                         if (p >= sample_end) {
                             p = sample_restart + (p - sample_end);
                             if (p >= sample_end)      /* loop shorter than the window */
                                 break;
                         }
-                        if (p < samples + segbase || p >= samples + SAMPLE_BUFFER_SIZE)
+                        if (p < (int)segbase || p >= SAMPLE_BUFFER_SIZE)
                             break;
 
-                        acc += (int64_t)*p * k[t];
+                        acc += (int64_t)samples[p] * k[t];
                     }
 
                     if (t == taps) {
@@ -1125,7 +1130,7 @@ static void mix_voice_samples(struct hle_t* hle, musyx_t *musyx,
             }
 
             if (!done)
-                v = clamp_s16(dot4(sample, lut));
+                v = clamp_s16(dot4(samples + sample_position, lut));
         }
 
         for (k = 0; k < 4; ++k) {
@@ -1166,7 +1171,7 @@ static void mix_voice_samples(struct hle_t* hle, musyx_t *musyx,
 
     /* save last resampled sample */
     if(musyx->version2){
-        int cursor=(int)(sample-samples);
+        int cursor=sample_position;
         uint32_t phase=pitch_accu;
         unsigned lane;
         /* The eight-lane loop stages the next batch's source addresses
@@ -1174,8 +1179,8 @@ static void mix_voice_samples(struct hle_t* hle, musyx_t *musyx,
         for(lane=0;lane<6;lane++){
             int distance;
             cursor+=(int)(phase>>16);phase=(phase&0xffffu)+pitch_step;
-            distance=cursor-(int)(sample_end-samples);
-            if(distance>=0)cursor=(int)(sample_restart-samples)+distance;
+            distance=cursor-sample_end;
+            if(distance>=0)cursor=sample_restart+distance;
         }
         hle->rsp_t6=(0x7a0u+(unsigned int)cursor*2u)&0xffffu;hle->rsp_t6_written=1;
     }

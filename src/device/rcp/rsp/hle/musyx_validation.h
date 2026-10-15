@@ -82,8 +82,11 @@ static inline int musyx_voice_supported(const unsigned char *ram, uint32_t v)
     for (unsigned i = 0; i < 192; ++i) {
         position += phase >> 16; phase = (phase & 0xffff) + step;
         if (position >= end) position = loop + position - end;
-        if (position < 0 || position > 511 ||
+        /* All four taps must remain in the decoded/adjacent DMA image.
+         * Real Rogue voices read the encoded window before their loop end. */
+        if (position < 0 || position + 3 >= 512 + 160 ||
             !((position >= (int)base && position < (int)(base + loaded)) ||
+              position >= 512 ||
               position < (int)count2)) return 0;
     }
     return 1;
