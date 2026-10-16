@@ -2363,6 +2363,172 @@ void rsp_tri_set_d64_sort(int on)
 static uint32_t s_factor5_context[5];
 void rsp_tri_factor5_context(uint32_t values[5]){memcpy(values,s_factor5_context,sizeof(s_factor5_context));}
 void rsp_tri_factor5_seed_fraction(uint32_t value){s_factor5_context[0]=value;}
+static uint16_t s_f5[32][8];
+static uint32_t s_f5_written;
+static Rsp32 s_f5_texture_bound;
+static Rsp32 s_f5_spare;
+void rsp_factor5_spare_bound(uint32_t i,uint32_t f){s_f5_spare.i=i&65535u;s_f5_spare.f=f&65535u;}
+void rsp_factor5_checkpoint(int restore)
+{
+    static uint16_t saved[32][8];static uint32_t mask;static Rsp32 bound;
+    if(restore){memcpy(s_f5,saved,sizeof(saved));s_f5_written=mask;s_f5_texture_bound=bound;}
+    else{memcpy(saved,s_f5,sizeof(saved));mask=s_f5_written;bound=s_f5_texture_bound;}
+}
+void rsp_factor5_seed(const uint16_t values[32][8]){memcpy(s_f5,values,sizeof(s_f5));s_f5_written=0;}
+uint32_t rsp_factor5_get(uint16_t values[32][8]){memcpy(values,s_f5,sizeof(s_f5));return s_f5_written;}
+void rsp_factor5_row(unsigned reg,const uint16_t values[8]){memcpy(s_f5[reg],values,16);s_f5_written|=1u<<reg;}
+void rsp_factor5_lane(unsigned reg,unsigned lane,uint16_t value){s_f5[reg][lane]=value;s_f5_written|=1u<<reg;}
+uint32_t rsp_factor5_bound_integer(void){return U16(s_f5_texture_bound.i);}
+uint32_t rsp_factor5_bound_fraction(void){return U16(s_f5_texture_bound.f);}
+void rsp_factor5_texture_bound(uint32_t integer,uint32_t fraction){s_f5_texture_bound.i=integer&65535u;s_f5_texture_bound.f=fraction&65535u;}
+/* Refine the paired projection/area reciprocals, retaining the partial
+ * low/mid products that the affine writer subsequently reads as L.W/ST. */
+static void factor5_refine(const Rsp32 input[8],unsigned first,unsigned count)
+{
+    unsigned k;
+    for(k=first;k<first+count;k++){
+        Rsp32 r={s_f5[27][k],s_f5[26][k]},t,u;
+        RspAcc a=p_udn(r.f,2)+p_udh(r.i,2);
+        r.i=acc_clamp_mid(a);r.f=acc_clamp_low(a);
+        t=mac32(r,input[k],0);
+        u.f=(0-U16(t.f))&65535u;
+        u.i=clamp_s16(2-S16(t.i)-(U16(t.f)!=0));
+        a=p_udl(r.f,u.f);s_f5[22][k]=acc_clamp_low(a);
+        a+=p_udm(r.i,u.f);s_f5[23][k]=acc_clamp_mid(a);
+        a+=p_udn(r.f,u.i);s_f5[26][k]=acc_clamp_low(a);
+        a+=p_udh(r.i,u.i);s_f5[27][k]=acc_clamp_mid(a);
+    }
+    s_f5_written|=(1u<<22)|(1u<<23)|(1u<<26)|(1u<<27);
+}
+void rsp_factor5_project_pair(const int32_t position[4],unsigned half)
+{
+    Rsp32 input[8];unsigned k,start=half*4u;
+    for(k=0;k<4;k++)input[start+k]=mk32(position[k]);
+    {uint32_t r=(uint32_t)rsp_rcp32_dp(position[3]);s_f5[26][start+3]=r;s_f5[27][start+3]=r>>16;}
+    factor5_refine(input,start,4);
+}
+static Rsp32 factor5_fold_add(Rsp32 a,Rsp32 b)
+{
+    Rsp32 v;uint32_t sum=U16(a.f)+U16(b.f);v.f=sum&65535u;
+    v.i=clamp_s16(S16(a.i)+S16(b.i)+(sum>>16));return v;
+}
+void rsp_factor5_reject(const int16_t xy[6])
+{
+    unsigned k;for(k=0;k<3;k++){s_f5[13+k][0]=xy[k*2];s_f5[13+k][1]=xy[k*2+1];}
+    for(k=0;k<8;k++){
+        s_f5[9][k]=clamp_s16(S16(s_f5[15][k])-S16(s_f5[13][k]));
+        s_f5[10][k]=clamp_s16(S16(s_f5[14][k])-S16(s_f5[13][k]));
+        s_f5[12][k]=clamp_s16(S16(s_f5[13][k])-S16(s_f5[14][k]));
+    }
+    s_f5_written|=(1u<<9)|(1u<<10)|(1u<<12)|(1u<<13)|(1u<<14)|(1u<<15);
+}
+void rsp_factor5_clip_residue(const int32_t in4[4],const int32_t out4[4],
+    const int16_t plane[4],const uint16_t constants[8],int32_t upper[4])
+{
+    Rsp32 a[8],b[8],num[8],den[8],tmp[8],scaled[8];int k,cu;uint16_t wt[8];
+    for(k=0;k<8;k++){
+        int p=k<4?plane[k]:S16(s_f5[1][k]);RspAcc v;
+        if(k<4){a[k]=mk32(in4[k]);b[k]=mk32(out4[k]);}
+        else{a[k].i=s_f5[4][k];a[k].f=s_f5[5][k];b[k].i=s_f5[9][k];b[k].f=s_f5[10][k];}
+        v=p_udn(a[k].f,p)+p_udh(a[k].i,p);num[k].i=acc_clamp_mid(v);num[k].f=acc_clamp_low(v);
+        v+=p_udn(b[k].f,-p)+p_udh(b[k].i,-p);den[k].i=acc_clamp_mid(v);den[k].f=acc_clamp_low(v);
+    }
+    for(k=0;k<8;k++){
+        tmp[k]=factor5_fold_add(den[k],den[k&~1]);
+        s_f5[26][k]=tmp[k].f;s_f5[27][k]=tmp[k].i;
+    }
+    for(k=0;k<8;k++)den[k]=factor5_fold_add(tmp[k],tmp[(k&4)|1]);
+    {
+        Rsp32 r=mk32(rsp_rcp32_dp(r32(den[3])));RspAcc v=p_udn(r.f,2)+p_udh(r.i,2);
+        r.i=acc_clamp_mid(v);r.f=acc_clamp_low(v);
+        if(r32(den[3])<0){Rsp32 z={0,0};r=sub32(z,r);}
+        cu=S16(r.i)==0?U16(r.f):65535;
+    }
+    for(k=0;k<8;k++){
+        RspAcc v=p_udl(den[k].f,cu)+p_udm(den[k].i,cu);
+        scaled[k].i=acc_clamp_mid(v);scaled[k].f=acc_clamp_low(v);
+    }
+    for(k=3;k<8;k+=4){uint32_t r=rsp_rcp32_dp(r32(scaled[k]));s_f5[26][k]=r;s_f5[27][k]=r>>16;}
+    factor5_refine(scaled,0,8);
+    for(k=0;k<8;k++)tmp[k]=factor5_fold_add(num[k],num[k&~1]);
+    for(k=0;k<8;k++)num[k]=factor5_fold_add(tmp[k],tmp[(k&4)|1]);
+    for(k=0;k<8;k++){
+        Rsp32 r={s_f5[27][k],s_f5[26][k]},t=mac32(num[k],r,0);
+        RspAcc v=p_udl(constants[k],constants[5])+p_udl(t.f,cu)+p_udm(t.i,cu);
+        int w=acc_clamp_mid(v)==0?U16(acc_clamp_low(v)):65535;
+        if(!w)w=1;wt[k]=(uint16_t)w;s_f5[8][k]=(uint16_t)(0u-w);s_f5[15][k]=(uint16_t)w;
+    }
+    for(k=0;k<4;k++){
+        RspAcc v=p_udl(a[k+4].f,s_f5[8][7])+p_udm(a[k+4].i,s_f5[8][7])+
+                 p_udl(b[k+4].f,wt[7])+p_udm(b[k+4].i,wt[7]);
+        upper[k]=(int32_t)((U16(acc_clamp_mid(v))<<16)|U16(acc_clamp_low(v)));
+    }
+    s_f5_written|=(1u<<8)|(1u<<15);
+}
+static void factor5_edge_attributes(const RspTriVtx *a,const RspTriVtx *b,const RspTriVtx *c,
+    const RspTriVtx *h,const RspTriVtx *m,const RspTriVtx *l,
+    int32_t ci,int32_t cf,int32_t ai[3][8],int32_t af[3][8],int affine)
+{
+    int32_t p[3][8],delta[8],x[8];Rsp32 area[8],sl[8],anchor[8];int k;
+    for(k=0;k<8;k++){
+        p[0][k]=S16(s_f5[13][k]);p[1][k]=S16(s_f5[14][k]);p[2][k]=S16(s_f5[15][k]);
+    }
+    p[0][0]=a->x;p[0][1]=a->y;p[1][0]=b->x;p[1][1]=b->y;p[2][0]=c->x;p[2][1]=c->y;
+    for(k=0;k<8;k++){
+        RspAcc v=p_udh(clamp_s16(p[2][k]-p[0][k]),clamp_s16(b->y-a->y))+
+                     p_udh(clamp_s16(p[0][k]-p[1][k]),clamp_s16(c->y-a->y));
+        area[k].i=(v>>32)&65535u;area[k].f=(v>>16)&65535u;
+        x[k]=clamp_s16(p[0][k]-p[1][k]);
+        delta[k]=clamp_s16(p[2][k]-p[1][k]);
+    }
+    if(U16(area[0].i)!=U16(ci)||U16(area[0].f)!=U16(cf))for(k=0;k<8;k++){
+        /* The orientation flip subtracts from the whole constant vector;
+         * only lane zero contains zero in both halves. */
+        Rsp32 origin={s_f5[30][k],s_f5[30][k]};area[k]=sub32(origin,area[k]);
+    }
+    area[3]=area[0];
+    for(k=3;k<8;k+=4){uint32_t r=rsp_rcp32_dp(r32(area[k]));s_f5[26][k]=r;s_f5[27][k]=r>>16;}
+    factor5_refine(area,0,8);
+    delta[0]=clamp_s16(l->x-m->x);delta[1]=clamp_s16(l->y-m->y);
+    delta[2]=clamp_s16(m->x-h->x);delta[3]=clamp_s16(m->y-h->y);
+    delta[4]=clamp_s16(l->x-h->x);delta[5]=clamp_s16(l->y-h->y);
+    for(k=0;k<8;k++)s_f5[4][k]=clamp_s16(delta[k]*4);
+    s_f5_written|=1u<<4;
+    for(k=1;k<6;k+=2){uint32_t r=rsp_rcp16(delta[k]);s_f5[8][k]=r;s_f5[7][k]=r>>16;}
+    for(k=0;k<8;k++){
+        Rsp32 reciprocal={s_f5[7][k],s_f5[8][k]},dx;
+        RspAcc v=p_udl(reciprocal.f,32)+p_udm(reciprocal.i,32);
+        reciprocal.i=acc_clamp_mid(v);reciprocal.f=acc_clamp_low(v);
+        /* The edge writer subsequently quarters the reciprocal vector
+         * itself as well as the computed slopes (text 35c..364). */
+        {RspAcc retained=p_udl(reciprocal.f,0x4000)+p_udm(reciprocal.i,0x4000);
+         s_f5[7][k]=acc_clamp_mid(retained);s_f5[8][k]=acc_clamp_low(retained);}
+        v=p_udm(delta[k&~1],0x4000);dx.i=acc_clamp_mid(v);dx.f=acc_clamp_low(v);
+        sl[k]=mac32(reciprocal,dx,&v);
+        sl[k].f=acc_clamp_low(v); /* post-high zero add re-latches saturation */
+        v=p_udl(sl[k].f,0x4000)+p_udm(sl[k].i,0x4000);
+        sl[k].i=vcr_bound_clamp(acc_clamp_mid(v),0x1cc);sl[k].f=acc_clamp_low(v);
+        s_f5[1][k]=sl[k].f;
+        v=p_udl(sl[k].f&0xfff8u,(U16(h->y)<<14)&65535u)+p_udm(sl[k].i,(U16(h->y)<<14)&65535u);
+        anchor[k].i=acc_clamp_mid(v);anchor[k].f=acc_clamp_low(v);
+    }
+    s_f5_written|=(1u<<1)|(1u<<7)|(1u<<8);
+    if(!affine)return;
+    x[0]=m->x;x[2]=h->x;x[4]=h->x;
+    for(k=0;k<3;k++){
+        const RspTriVtx *v=k==0?h:k==1?m:l;int lane=k*4;
+        ai[k][4]=v->s;ai[k][5]=v->t;
+        if(k<2){
+            Rsp32 q;RspAcc z=p_udm(x[lane+2],0x4000);
+            q.i=acc_clamp_mid(z);q.f=acc_clamp_low(z);q=sub32(q,anchor[lane+3]);
+            ai[k][6]=q.i;
+            af[k][4]=anchor[lane].i;af[k][5]=anchor[lane+1].i;af[k][6]=anchor[lane+2].i;
+        }else{
+            ai[k][6]=s_f5[22][2];
+            af[k][4]=s_f5[23][0];af[k][5]=s_f5[23][1];af[k][6]=s_f5[23][2];
+        }
+    }
+}
 int rsp_tri_write(int32_t *ew,
                   const RspTriVtx *v1c, const RspTriVtx *v2c,
                   const RspTriVtx *v3c,
@@ -2826,7 +2992,9 @@ int rsp_tri_write(int32_t *ew,
     }
 
     /* ---- texture S/T/W attributes ---- */
-    if (textured && (s_affine_tex || s_persp_skip
+    if(s_tri_attr_rs==2)factor5_edge_attributes(v1c,v2c,v3c,vh,vm,vl,cross_i,cross_f,at_i,at_f,textured&&s_persp_skip);
+    if(textured && s_tri_attr_rs==2 && s_persp_skip) { /* staged above */ }
+    else if (textured && (s_affine_tex || s_persp_skip
                      || (vh->flat2d && vm->flat2d && vl->flat2d)))
     {
         /* Fighting Force 64's 2D overlay path: the microcode's simplified
@@ -2878,6 +3046,7 @@ int rsp_tri_write(int32_t *ew,
         acc += p_udm(mn.i, 0x8000);
         half.i = acc_clamp_mid(acc);
         half.f = acc_clamp_low(acc);
+        if(s_tri_attr_rs==2)s_f5_texture_bound=half;
         for (vi = 0; vi < 3; vi++)
         {
             Rsp32 ivw, nrm;
@@ -3252,13 +3421,25 @@ int rsp_tri_write(int32_t *ew,
             acc=p_udn(y[k].f,32)+p_udh(y[k].i,32);
             y[k].f=acc_clamp_low(acc);y[k].i=acc_clamp_mid(acc);
             acc=p_udn(edge[k].f,32)+p_udh(edge[k].i,32);
-            edge[k].i=acc_clamp_mid(acc);
+            edge[k].i=acc_clamp_mid(acc);edge[k].f=acc_clamp_low(acc);
         }
         s_factor5_context[0]=U16(y[0].f)|(U16(y[1].f)<<16);
         for(k=0;k<2;k++){
             s_factor5_context[1+k]=U16(y[4+k*2].i)|(U16(y[5+k*2].i)<<16);
             s_factor5_context[3+k]=U16(edge[4+k*2].i)|(U16(edge[5+k*2].i)<<16);
         }
+        if(s_tri_attr_rs==2)for(k=0;k<8;k++){
+            RspAcc value=p_udn(at_f[0][k],z_buffered?32:1)+p_udh(at_i[0][k],z_buffered?32:1);
+            s_f5[15][k]=acc_clamp_mid(value);
+            s_f5[13][k]=edge[k].i;
+            /* The depth branch's delay slot scales E.f even when depth
+             * output is disabled; E.i then retains its unscaled value. */
+            s_f5[14][k]=z_buffered?edge[k].f:acc_clamp_low(p_udn(dAdE[k].f,32));
+            s_f5[11][k]=y[k].i;s_f5[12][k]=y[k].f;
+            {RspAcc value=p_udn(dAdX[k].f,z_buffered?32:1)+p_udh(dAdX[k].i,z_buffered?32:1);
+             s_f5[9][k]=acc_clamp_mid(value);s_f5[10][k]=acc_clamp_low(value);}
+        }
+        if(s_tri_attr_rs==2)s_f5_written|=(1u<<9)|(1u<<10)|(1u<<11)|(1u<<12)|(1u<<13)|(1u<<14)|(1u<<15);
     }
 
     if (textured && s_tri_attr_rs)
@@ -3267,9 +3448,9 @@ int rsp_tri_write(int32_t *ew,
          * block as a whole, even without depth output. Its bound includes
          * absolute integer X/Y gradients and the largest vertex S/T/W
          * pair. Keep the intermediate low slices and the native 1.0 cap. */
-        Rsp32 bound = {0, 0}, normal;
+        Rsp32 bound = {0, 0}, normal,candidates[8];
         int vi, lane;
-        for (lane = 4; lane <= 6; lane++) {
+        for (lane = s_tri_attr_rs==2?0:4; lane < (s_tri_attr_rs==2?8:7); lane++) {
             Rsp32 magnitude = {0, 0}, candidate;
             for (vi = 0; vi < 3; vi++) {
                 int value = S16(at_i[vi][lane]);
@@ -3289,7 +3470,13 @@ int rsp_tri_write(int32_t *ew,
                 m=mk32(minimum);
                 acc=p_udl(m.f,0x8000)+p_udm(m.i,0x8000);
                 magnitude.i=acc_clamp_mid(acc);magnitude.f=acc_clamp_low(acc);
+                if(s_tri_attr_rs==2)magnitude=s_f5_texture_bound;
             }
+            if(s_tri_attr_rs==2 && lane<4){
+                Rsp32 h={at_i[0][lane],at_f[0][lane]},m={at_i[1][lane],at_f[1][lane]},l={at_i[2][lane],at_f[2][lane]};
+                magnitude.i=sub32(h,l).f;magnitude.f=sub32(h,m).i;
+            }
+            if(s_tri_attr_rs==2 && lane==7)magnitude=s_f5_spare;
             acc=p_udl(magnitude.f,2048)+p_udm(magnitude.i,2048);
             candidate.i=acc_clamp_mid(acc);candidate.f=acc_clamp_low(acc);
             {
@@ -3312,7 +3499,8 @@ int rsp_tri_write(int32_t *ew,
                 candidate.f=acc_clamp_low(acc);
                 acc+=p_udh(candidate.i,1);candidate.i=acc_clamp_mid(acc);
             }
-            if(S16(candidate.i)>S16(bound.i) || (S16(candidate.i)==S16(bound.i)&&U16(candidate.f)>=U16(bound.f)))
+            candidates[lane]=candidate;
+            if(lane>=4 && lane<=6 && (S16(candidate.i)>S16(bound.i) || (S16(candidate.i)==S16(bound.i)&&U16(candidate.f)>=U16(bound.f))))
                 bound=candidate;
         }
         acc=p_udl(bound.f,64)+p_udm(bound.i,64);
@@ -3321,6 +3509,22 @@ int rsp_tri_write(int32_t *ew,
         acc=p_udn(normal.f,2);
         normal.f=acc_clamp_low(acc);acc+=p_udh(normal.i,2);normal.i=acc_clamp_mid(acc);
         if(S16(normal.i)>=1){normal.i=1;normal.f=0;}
+        if(s_tri_attr_rs==2){
+            for(lane=0;lane<8;lane++){
+                Rsp32 v=candidates[lane];int j;
+                for(j=5;j<=6;j++)if(S16(candidates[j].i)>S16(v.i)||(S16(candidates[j].i)==S16(v.i)&&U16(candidates[j].f)>=U16(v.f)))v=candidates[j];
+                acc=p_udl(v.f,64)+p_udm(v.i,64);v.i=acc_clamp_mid(acc);v.f=acc_clamp_low(acc);
+                acc=p_udn(v.f,2)+p_udh(v.i,2);v.i=acc_clamp_mid(acc);
+                s_f5[5][lane]=lane==0?U16(normal.i):(S16(v.i)>=1?1:U16(v.i));
+            }
+            for(lane=0;lane<8;lane++){
+                int dy=S16(dAdY[lane].i);Rsp32 e=dAdE[lane];
+                if(dy<0)dy=dy==-32768?32767:-dy;
+                s_f5[27][lane]=acc_clamp_low(p_udm(dy,2048));
+                s_f5[26][lane]=mac32(e,normal,0).f;
+            }
+            s_f5_written|=(1u<<5)|(1u<<26)|(1u<<27);
+        }
         for(lane=4;lane<=6;lane++){
             base[lane]=mac32(base[lane],normal,0);
             dAdX[lane]=mac32(dAdX[lane],normal,0);

@@ -31,6 +31,10 @@ extern uint32_t parallelRSPGetT6(void);
 extern void parallelRSPSetT6(uint32_t);
 extern void parallelRSPGetF5Context(uint32_t values[7]);
 extern void parallelRSPSetF5Context(const uint32_t values[7],uint32_t mask);
+extern uint32_t parallelRSPGetPacketCursor(void);
+extern void parallelRSPSetPacketCursor(uint32_t);
+extern void parallelRSPGetGraphicsLatches(uint16_t values[32][8]);
+extern void parallelRSPSetGraphicsLatches(const uint16_t values[32][8],uint32_t);
 static struct hle_t hle;
 static RSP_INFO info;
 static unsigned int forwarded_cycles;
@@ -243,6 +247,10 @@ unsigned int optional_rsp_execute(unsigned int cycles)
     hle.rsp_t6=parallelRSPGetT6();hle.rsp_t6_written=0;naboo_set_phase(hle.rsp_t6);
     parallelRSPGetF5Context(hle.rsp_f5);hle.rsp_f5_written=0;naboo_set_context(hle.rsp_f5);
     rsp_tri_factor5_seed_fraction(hle.rsp_f5[0]);
+    if(kind==HLE_TASK_GRAPHICS && (graphics_checksum==0x25c16u || graphics_checksum==0x25c53u)){
+        uint16_t latches[32][8];parallelRSPGetGraphicsLatches(latches);rsp_factor5_seed(latches);
+        naboo_set_packet_cursor(parallelRSPGetPacketCursor());
+    }
     if (kind == HLE_TASK_GRAPHICS) graphics_capture_begin(task);
     hle_execute(&hle);
     if(!forwarded && hle.rsp_vco_written)parallelRSPSetVCO(hle.rsp_vco);
@@ -253,6 +261,11 @@ unsigned int optional_rsp_execute(unsigned int cycles)
         if(kind==HLE_TASK_GRAPHICS && graphics_checksum==0x2095bu){
             uint32_t context[5];rsp_tri_factor5_context(context);
             hle.rsp_f5[0]=context[0];hle.rsp_f5_written=1u;
+        }
+        if(kind==HLE_TASK_GRAPHICS && (graphics_checksum==0x25c16u || graphics_checksum==0x25c53u)){
+            uint16_t latches[32][8];uint32_t mask=rsp_factor5_get(latches);
+            parallelRSPSetGraphicsLatches(latches,mask);
+            parallelRSPSetPacketCursor(naboo_get_packet_cursor());
         }
         if(hle.rsp_f5_written)parallelRSPSetF5Context(hle.rsp_f5,hle.rsp_f5_written);
     }
@@ -418,6 +431,14 @@ unsigned int optional_rsp_timing_replay(const char *path, char *family,
     rdp_emit_set_backend(&probe_backend);
     rdp_emit_hle_reset(); rdp_emit_stream_load(NULL); hle_stream_state_load(NULL);
     rsp_tri_factor5_seed_fraction(probe.rsp_f5[0]);
+    {
+        uint32_t state[369];uint16_t latches[32][8]={{0}};
+        if(hle_capture_rsp(f,state,369)){
+            unsigned r,k;for(r=0;r<32;r++)for(k=0;k<8;k++)latches[r][k]=(uint16_t)state[37+r*8+k];
+            naboo_set_packet_cursor(state[21]);
+        }else naboo_set_packet_cursor(0);
+        rsp_factor5_seed(latches);
+    }
     timing_probe_active = 1; timing_probe_failed = 0;
     uint32_t saved_limit=hle_timing_slice_limit();hle_timing_set_slice_limit(0);
     hle_execute(&probe);

@@ -42,6 +42,12 @@ extern "C"
     }
     uint32_t parallelRSPGetT6(void){return RSP::cpu.get_state().sr[14];}
     void parallelRSPSetT6(uint32_t value){RSP::cpu.get_state().sr[14]=value;}
+    uint32_t parallelRSPGetPacketCursor(void){return RSP::cpu.get_state().sr[16];}
+    void parallelRSPSetPacketCursor(uint32_t value){RSP::cpu.get_state().sr[16]=value;}
+    void parallelRSPGetGraphicsLatches(uint16_t values[32][8])
+    {auto& v=RSP::cpu.get_state().cp2.regs;for(unsigned r=0;r<32;r++)for(unsigned k=0;k<8;k++)values[r][k]=v[r].e[k];}
+    void parallelRSPSetGraphicsLatches(const uint16_t values[32][8],uint32_t mask)
+    {auto& v=RSP::cpu.get_state().cp2.regs;for(unsigned r=0;r<32;r++)if(mask&(1u<<r))for(unsigned k=0;k<8;k++)v[r].e[k]=values[r][k];}
     void parallelRSPGetF5Context(uint32_t values[7])
     {
         auto& v=RSP::cpu.get_state().cp2.regs;

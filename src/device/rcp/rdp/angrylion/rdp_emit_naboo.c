@@ -35,6 +35,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "rdp_emit_rsp.h"
 #include "rdp_emit_f3dex2.h"
 #include "rdp_emit_naboo.h"
 
@@ -59,6 +60,12 @@ static unsigned int nb_size_fraction,nb_size_fraction_saved;
 static int nb_size_fraction_written,nb_size_fraction_written_saved;
 static unsigned int nb_retained[6],nb_retained_saved[6];
 static unsigned int nb_retained_written,nb_retained_written_saved;
+/* s0 is the resident writer's DMEM output cursor, independent of the
+ * host FIFO, which can contain several already-drained guest batches. */
+static unsigned int nb_packet_bytes;
+static unsigned int nb_packet_saved;
+void naboo_set_packet_cursor(unsigned int cursor){nb_packet_bytes=cursor>=0xe80u&&cursor<=0xff0u?cursor-0xe80u:0;}
+unsigned int naboo_get_packet_cursor(void){return 0xe80u+nb_packet_bytes;}
 static int nb_dmem_s16(unsigned int off);
 void naboo_set_size_fraction(unsigned int fraction){nb_size_fraction=fraction;nb_size_fraction_written=0;}
 int naboo_get_size_fraction(unsigned int *fraction){*fraction=nb_size_fraction;return nb_size_fraction_written;}
@@ -76,6 +83,7 @@ static void nb_retain(unsigned int reg,const short lanes[4])
 {
     unsigned int i;
     for(i=0;i<2;i++)nb_retained[reg*2+i]=(unsigned short)lanes[i*2]|((unsigned int)(unsigned short)lanes[i*2+1]<<16);
+    for(i=0;i<4;i++)rsp_factor5_lane(reg==0?2u:reg==1?11u:13u,i+4u,(uint16_t)lanes[i]);
     nb_retained_written|=3u<<(reg*2);
 }
 static void nb_retain_dmem(unsigned int reg,unsigned int address)
@@ -101,11 +109,13 @@ void naboo_end_writes(int commit)
     if(!commit){nb_phase=nb_phase_saved;nb_phase_written=nb_phase_written_saved;}
     if(!commit){nb_size_fraction=nb_size_fraction_saved;nb_size_fraction_written=nb_size_fraction_written_saved;}
     if(!commit){memcpy(nb_retained,nb_retained_saved,sizeof(nb_retained));nb_retained_written=nb_retained_written_saved;}
+    if(!commit){nb_packet_bytes=nb_packet_saved;rsp_factor5_checkpoint(1);}
 }
 void naboo_begin_writes(void) {
     naboo_end_writes(1);s_record_writes=1;
     nb_phase_saved=nb_phase;nb_phase_written_saved=nb_phase_written;
     nb_size_fraction_saved=nb_size_fraction;nb_size_fraction_written_saved=nb_size_fraction_written;
+    nb_packet_saved=nb_packet_bytes;rsp_factor5_checkpoint(0);
     memcpy(nb_retained_saved,nb_retained,sizeof(nb_retained));nb_retained_written_saved=nb_retained_written;
 }
 
@@ -150,12 +160,18 @@ static struct {
      * viewport/live-tail words, ...) */
     unsigned char dmem[0x1000];
 } nb;
+static void nb_chunk_shadow(void)
+{
+    unsigned i;if(!s_rdram)return;
+    for(i=0;i<0x108u;i++)nb.dmem[(0x270u+i)^3u]=s_rdram[((nb.chunk+i)&0x7fffffu)^3u];
+}
 
 static void nb_dl_enter(unsigned int addr)
 {
     nb.chunk = addr & 0x00fffff8u;
     nb.off = 8u;
     nb.dl = nb.chunk + nb.off;
+    nb_chunk_shadow();
 }
 
 /* Advance the chunked cursor by len bytes, following the chain link in
@@ -170,6 +186,7 @@ static void nb_dl_step(unsigned int len)
         nb.off = 8u + rem;
         if (next == 0u)
             break;
+        nb_chunk_shadow();
     }
     nb.dl = nb.chunk + nb.off;
 }
@@ -181,6 +198,7 @@ void naboo_task_reset(unsigned int dl)
     nb_dl_enter(dl);
     nb.active = 1;
     nb.sp = 0;
+    nb_packet_bytes=0;
 }
 
 /* Seed the DMEM shadow from the live DMEM.  The streaming server's
@@ -216,6 +234,11 @@ static void nb_dmem_w8(unsigned int off, unsigned int v);
 static int nb_walk(RdpFifo *fifo, unsigned int stop_depth, int nested);
 static int nb_attribute_callback(RdpFifo *fifo);
 static int nb_call_splice(RdpFifo *fifo);
+static void nb_rdp_append(RdpFifo *fifo,const int32_t *words,int count)
+{
+    int k;for(k=0;k<count;k++)nb_dmem_w32(0xe80u+nb_packet_bytes+(unsigned)k*4u,(uint32_t)words[k]);
+    rdp_fifo_append(fifo,words,count);nb_packet_bytes+=(unsigned)count*4u;
+}
 
 void naboo_seed_dmem(const unsigned char *dmem)
 {
@@ -452,19 +475,24 @@ static NbFixed nb_fixed_scale(NbFixed a, unsigned int scale)
     result.lo = (unsigned int)nb_acc_low(acc); result.hi = nb_acc_mid(acc);
     return result;
 }
-static unsigned int nb_project(unsigned int rec)
+static unsigned int nb_project(unsigned int rec,unsigned int half)
 {
     NbFixed position[4], scaled[4], reciprocal, product, error;
     unsigned int persp = (unsigned short)nb_dmem_s16(0x14eu);
     unsigned int rbits, t1, t2, oc;
     int16_t si[8], sf[8], ti[8], tf[8];
     int j;
+    {uint16_t offsets[8];for(j=0;j<8;j++)offsets[j]=(uint16_t)nb_dmem_s16(0x138u+(unsigned)(j&3)*2u);rsp_factor5_row(1,offsets);}
     for (j = 0; j < 4; j++) {
         position[j].hi = nb_dmem_s16(rec + (unsigned int)j * 2u);
         position[j].lo = (unsigned short)nb_dmem_s16(rec + 8u + (unsigned int)j * 2u);
         scaled[j] = nb_fixed_scale(position[j], persp);
         si[j] = si[j+4] = (short)position[j].hi;
         sf[j] = sf[j+4] = (short)position[j].lo;
+    }
+    {
+        int32_t values[4];for(j=0;j<4;j++)values[j]=(int32_t)((uint32_t)(uint16_t)scaled[j].hi<<16|scaled[j].lo);
+        rsp_factor5_project_pair(values,half);
     }
     for (j = 0; j < 4; j++) {
         ti[j] = ti[j+4] = (short)position[3].hi;
@@ -492,14 +520,17 @@ static unsigned int nb_project(unsigned int rec)
     nb_dmem_w16(rec + 0x20u, (unsigned int)reciprocal.hi);
     nb_dmem_w16(rec + 0x22u, reciprocal.lo);
     if (reciprocal.hi < 0) reciprocal.hi = 0x7fff;
-    for (j = 0; j < 3; j++) {
+    for (j = 0; j < 4; j++) {
         NbFixed projected = nb_fixed_scale(nb_fixed_mul(position[j], reciprocal), persp);
         int scale = nb_dmem_s16(0x130u + (unsigned int)j * 2u);
         int offset = nb_dmem_s16(0x138u + (unsigned int)j * 2u);
         int64_t acc = (int64_t)offset * 65536 + (int64_t)projected.lo * scale + (int64_t)projected.hi * scale * 65536;
         int screen = nb_acc_mid(acc), lower = nb_dmem_s16(0x50u + (unsigned int)((j & ~1) | 1) * 2u);
         if (screen < lower) screen = lower;
-        nb_dmem_w16(rec + 0x18u + (unsigned int)j * 2u, (unsigned int)screen);
+        rsp_factor5_lane(7,half*4u+(unsigned int)j,(uint16_t)nb_acc_low(acc));
+        rsp_factor5_lane(4,half*4u+(unsigned int)j,(uint16_t)projected.hi);
+        rsp_factor5_lane(5,half*4u+(unsigned int)j,(uint16_t)projected.lo);
+        if(j<3)nb_dmem_w16(rec + 0x18u + (unsigned int)j * 2u, (unsigned int)screen);
         if (j == 2) {
             nb_dmem_w16(rec + 0x1eu, (unsigned int)nb_acc_low(acc));
             if (nb.geom & 0x10000u) {
@@ -519,6 +550,35 @@ static unsigned int nb_project(unsigned int rec)
         }
     }
     return oc;
+}
+/* The clipper loads four position lanes, while the paired projection also
+ * evaluates the retained upper bank. Its arithmetic latches feed affine ST. */
+static void nb_project_upper(const int32_t bits[4])
+{
+    NbFixed position[4],scaled[4],reciprocal;int32_t inputs[4];
+    uint16_t latches[32][8];unsigned j,persp=(uint16_t)nb_dmem_s16(0x14eu);
+    for(j=0;j<4;j++){
+        position[j].hi=(int16_t)((uint32_t)bits[j]>>16);position[j].lo=(uint16_t)bits[j];
+        scaled[j]=nb_fixed_scale(position[j],persp);inputs[j]=(int32_t)((uint32_t)(uint16_t)scaled[j].hi<<16|scaled[j].lo);
+    }
+    rsp_factor5_project_pair(inputs,1);rsp_factor5_get(latches);
+    reciprocal.hi=(int16_t)latches[27][7];reciprocal.lo=latches[26][7];
+    if(reciprocal.hi<0)reciprocal.hi=0x7fff;
+    for(j=0;j<4;j++){
+        NbFixed p=nb_fixed_scale(nb_fixed_mul(position[j],reciprocal),persp);
+        int64_t acc=(int64_t)nb_dmem_s16(0x138u+j*2u)*65536+
+            (int64_t)p.lo*nb_dmem_s16(0x130u+j*2u)+(int64_t)p.hi*nb_dmem_s16(0x130u+j*2u)*65536;
+        rsp_factor5_lane(7,j+4u,(uint16_t)nb_acc_low(acc));
+        if(nb.geom&0x10000u){
+            NbFixed m={nb_dmem_s16(0x160u),(uint16_t)nb_dmem_s16(0x162u)};unsigned sum;
+            p=nb_fixed_mul(p,m);sum=p.lo+(uint16_t)nb_dmem_s16(0x166u);p.lo=sum&65535u;
+            p.hi=nb_clamp_s16(p.hi+nb_dmem_s16(0x164u)+(sum>>16));
+            acc=(int64_t)p.lo*nb_dmem_s16(0x168u)+(int64_t)p.hi*nb_dmem_s16(0x168u)*65536;
+            p.hi=nb_acc_mid(acc);p.lo=nb_acc_low(acc);
+            if(p.hi<0)p.hi=0;if(p.hi>=nb_dmem_s16(0x168u))p.hi=nb_dmem_s16(0x168u);
+        }
+        rsp_factor5_lane(4,j+4u,(uint16_t)p.hi);rsp_factor5_lane(5,j+4u,(uint16_t)p.lo);
+    }
 }
 
 static void nb_xfrm_range(unsigned int count, unsigned int src,
@@ -562,6 +622,10 @@ static void nb_xfrm_range(unsigned int count, unsigned int src,
     nb_size_fraction_set((unsigned short)mf[0][0]|((unsigned int)(unsigned short)mf[0][1]<<16));
     nb_retain_dmem(1,matrix+24u);
     nb_retain_dmem(2,matrix+40u);
+    for(i=8;i<16;i++){
+        uint16_t row[8];for(j=0;j<8;j++)row[j]=(uint16_t)nb_dmem_s16(matrix+(unsigned)(i-8)*8u+(unsigned)(j&3)*2u);
+        rsp_factor5_row((unsigned)i,row);
+    }
 
     for (v = 0; v < count; v++, src += 8u, dst += 0x28u) {
         int in[3], p[3];
@@ -590,7 +654,7 @@ static void nb_xfrm_range(unsigned int count, unsigned int src,
          * record path, so share nb_project rather than carrying a
          * second transcription of text 0x8c0-0x9b8. */
         {
-            unsigned int oc = nb_project(dst);
+            unsigned int oc = nb_project(dst,v&1u);
             static unsigned int oc_prev;
             {
                 static int toc = -1;
@@ -611,16 +675,25 @@ static void nb_xfrm_range(unsigned int count, unsigned int src,
             oc_prev = oc;
         }
     }
-    if (pad_fog && (count & 1u) && (nb.geom & 0x10000u)) {
+    if (pad_fog && (count & 1u)) {
         unsigned char saved[40], alpha;
         unsigned int byte;
+        uint16_t before[32][8],after[32][8];unsigned r,k;
+        const unsigned regs[5]={4,5,7,26,27};
         for (byte = 0; byte < 40u; byte++) saved[byte] = nb.dmem[((dst + byte)&0xfffu)^3u];
-        /* The RSP computes both lanes even when only one record remains.
-         * Its second fog-byte store precedes the count check. */
+        /* Evaluate the second bank with its own incoming reciprocal
+         * latches, even though the count branch discards that record. */
+        rsp_factor5_get(before);
+        for(r=0;r<5;r++)for(k=0;k<4;k++)rsp_factor5_lane(regs[r],k,before[regs[r]][k+4]);
         nb_xfrm_range(1u, src, dst, matrix, translate, 0);
+        rsp_factor5_get(after);
+        for(r=0;r<5;r++){
+            for(k=0;k<4;k++)before[regs[r]][k+4]=after[regs[r]][k];
+            rsp_factor5_row(regs[r],before[regs[r]]);
+        }
         alpha = nb.dmem[((dst + 0x13u)&0xfffu)^3u];
         for (byte = 0; byte < 40u; byte++) nb.dmem[((dst + byte)&0xfffu)^3u] = saved[byte];
-        nb_dmem_w8(dst + 0x13u, alpha);
+        if(nb.geom&0x10000u)nb_dmem_w8(dst + 0x13u, alpha);
     }
     /* The projection pipeline prefetches the next pair before testing the
      * remaining count. An eight-byte-aligned LQV leaves the upper half. */
@@ -677,7 +750,7 @@ static void nb_ovl18(unsigned int w0, unsigned int w1)
                 acc+=(int64_t)nb_dmem_s16(0xe58u+j*2u)*65536;
                 nb_dmem_w16(dst+j*2u,(unsigned int)nb_acc_mid(acc));
             }
-            nb_project(dst);alpha=nb.dmem[((dst+0x13u)&0xfffu)^3u];
+            nb_project(dst,1);alpha=nb.dmem[((dst+0x13u)&0xfffu)^3u];
             for(j=0;j<40;j++)nb.dmem[((dst+j)&0xfffu)^3u]=saved[j];
             nb_dmem_w8(dst+0x13u,alpha);
         }
@@ -1126,6 +1199,7 @@ static int nb_ovl15(RdpFifo *fifo,unsigned int w0)
     /* Coordinate and texture setup precede the splice; depth, fog enable,
      * fog alpha and tile selection are read after the child list returns. */
     if(nb_call_splice(fifo)<0)return 0;
+    nb_packet_bytes=0;
     words[0]=0x2e000000u;
     words[1]=(unsigned int)(unsigned short)((int32_t)nb_dmem_r32(record+0x1cu)>>11)<<16;
     words[2]=0x3a000000u;words[3]=low[3];count=4;
@@ -1135,7 +1209,7 @@ static int nb_ovl15(RdpFifo *fifo,unsigned int w0)
     }
     for(k=0;k<4;k++)words[count+k]=low[nl-4u+k];
     words[count+1u]=(words[count+1u]&0x00ffffffu)|((nb.dmem[0x14au^3u]&7u)<<24);
-    rdp_fifo_append(fifo,(const int32_t*)words,(int)(count+4u));
+    nb_rdp_append(fifo,(const int32_t*)words,(int)(count+4u));nb_packet_bytes=0;
     return 1;
 }
 
@@ -1238,8 +1312,9 @@ static int nb_sprite24_packet(unsigned int record, unsigned int position,
 static int nb_ovl24(RdpFifo *fifo,unsigned int w0)
 {
     unsigned int batches=(w0>>16)&0xffu,address=nb_read_u32(nb.dl+8u),batch;
-    unsigned int boxes=nb_read_u32(nb.dl+36u)&0xffu;
+    unsigned int boxes=nb_read_u32(nb.dl+36u)&0xffu,packets=0;
     if (!batches || nb_call_splice(fifo)<0) return 0;
+    nb_packet_bytes=0;
     for(batch=0;batch<batches;batch++,address+=256u) {
         unsigned int mask=nb_read_u32(nb.dl+32u),slot,box;
         if(!mask) continue;
@@ -1255,6 +1330,10 @@ static int nb_ovl24(RdpFifo *fifo,unsigned int w0)
         }
         nb_xfrm(32u);
         {
+            short row[4];unsigned p;for(p=0;p<4;p++)row[p]=(short)((short)(nb_retained[2+p/2]>>((p&1u)*16u))>>1);
+            nb_retain(1,row);
+        }
+        {
             unsigned int value=nb_read_u32(nb.dl+16u);
             nb_size_fraction_set((value>>16)|((value&0xffffu)<<16));
         }
@@ -1267,11 +1346,12 @@ static int nb_ovl24(RdpFifo *fifo,unsigned int w0)
         for(slot=0;slot<32u;slot++) if((mask&(1u<<slot)) && !(nb_dmem_s16(0x624u+slot*40u)&0x4343u)) {
             unsigned int low[8],nl;
             if(!nb_sprite24_packet(0x600u+slot*40u,0x170u+slot*8u,fraction,low,&nl,&fraction)) return 0;
-            if(nl) rdp_fifo_append(fifo,(const int32_t*)low,(int)nl);
+            if(nl){nb_rdp_append(fifo,(const int32_t*)low,(int)nl);if(++packets==10u){packets=0;nb_packet_bytes=0;}}
         }
         }
     }
     nb_phase_set(address);
+    nb_packet_bytes=0;
     return 1;
 }
 
@@ -1793,6 +1873,15 @@ static void nb_process_loaded(unsigned int sub, unsigned int w0, unsigned int w1
                         nb.dmem[(0xd40u + (unsigned)i2*4u + j2) ^ 3u] =
                             (unsigned char)(r2 >> 7);
                     }
+                }
+                /* The last paired color multiply remains in v4, with
+                 * the intensity vector in v5. Clipping retains their
+                 * upper bank when loading a four-lane position. */
+                for(i2=0;i2<8;i2++){
+                    int color=(int)nb.dmem[(0x480u+(unsigned)(rounded-2)*4u+(unsigned)i2)^3u]<<7;
+                    int intensity=(int)nb.dmem[(0x158u+(unsigned)i2)^3u]<<7;
+                    rsp_factor5_lane(4,(unsigned)i2,(uint16_t)nb_acc_mid((int64_t)color*intensity*2+0x8000));
+                    rsp_factor5_lane(5,(unsigned)i2,(uint16_t)intensity);
                 }
             } else {
                 /* The non-scaled path always dispatches a lighting
@@ -2346,7 +2435,7 @@ static int nb_clip(RdpFifo *fifo, unsigned int ra, unsigned int rb,
                 /* crossing: build the interpolated vertex */
                 unsigned int vin  = sa ? vb : va;
                 unsigned int vout = sa ? va : vb;
-                int32_t in4[4], out4[4], wc, wt;
+                int32_t in4[4], out4[4], upper[4], wc, wt;
                 for (k = 0; k < 4u; k++) {
                     in4[k]  = (int32_t)((nb_dmem_s16(vin + k * 2u) << 16)
                               | ((unsigned)nb_dmem_s16(vin + 8u + k * 2u) & 0xffffu));
@@ -2355,6 +2444,11 @@ static int nb_clip(RdpFifo *fifo, unsigned int ra, unsigned int rb,
                 }
                 wt = (int32_t)nb_clip_wt(in4, out4, P);
                 wc = (int32_t)((0x10000u - (unsigned)wt) & 0xffffu);
+                {
+                    uint16_t constants[8];
+                    for(k=0;k<8;k++)constants[k]=(uint16_t)nb_dmem_s16(0x30u+k*2u);
+                    rsp_factor5_clip_residue(in4,out4,P,constants,upper);
+                }
                 {
                     static int t = -1;
                     if (t < 0) t = getenv("NB_CLIP_TRACE") != NULL;
@@ -2407,7 +2501,8 @@ static int nb_clip(RdpFifo *fifo, unsigned int ra, unsigned int rb,
                     nb_dmem_w16(stage + 0x14u + k * 2u,
                                 (unsigned int)r & 0xffffu);
                 }
-                nb_dmem_w16(stage + 0x24u, nb_project(stage));
+                nb_dmem_w16(stage + 0x24u, nb_project(stage,0));
+                nb_project_upper(upper);
                 if(!(rc&15u))nb_retain_dmem(0,rc+8u);
                 lists[cur ^ 1u][n_out++] = stage;
                 stage += 0x28u;
@@ -2495,6 +2590,7 @@ static int nb_clip_fan(RdpFifo *fifo)
             int64_t cross = (int64_t)nb_clamp_s16(cx-ax)*nb_clamp_s16(by-ay)
                           - (int64_t)nb_clamp_s16(bx-ax)*nb_clamp_s16(cy-ay);
             if (!cross || (cross < 0 && (nb.geom & 0x2000u))) {
+                int16_t xy[6]={(int16_t)ax,(int16_t)ay,(int16_t)bx,(int16_t)by,(int16_t)cx,(int16_t)cy};rsp_factor5_reject(xy);
                 nb.clip_idx++;
                 continue;
             }
@@ -2509,6 +2605,7 @@ static int nb_clip_fan(RdpFifo *fifo)
         if ((nb_dmem_s16(0x152u)&0xfffu)!=0xcc8u && nb_call_splice(fifo)<0)return -1;
         if (nb_emit_tri(fifo, va, vb, vc) < 0)
             return -1;
+        nb_packet_bytes=0; /* clip fan tail jumps through the drain */
         nb.clip_idx++;
     }
     nb.clip_active = 0u;
@@ -2551,6 +2648,9 @@ static int nb_tri_gate(unsigned int ra, unsigned int rb, unsigned int rc)
     if (d2y > 32767)  d2y = 32767;
     if (d2y < -32768) d2y = -32768;
     cross = (int64_t)d2x * d1y - (int64_t)d1x * d2y;
+    if(!cross || (cross<0 && (nb.geom&0x2000u))){
+        int16_t xy[6]={(int16_t)ax,(int16_t)ay,(int16_t)bx,(int16_t)by,(int16_t)cx,(int16_t)cy};rsp_factor5_reject(xy);
+    }
     if (cross == 0) {
         nb_dmem_w8(0x58au,0);
         return 1;                       /* degenerate */
@@ -2589,6 +2689,9 @@ static int nb_emit_tri(RdpFifo *fifo, unsigned int ra, unsigned int rb,
      * attribute conventions; the shared writer's flags are global, so
      * assert them per call (another walker may have run) */
     rsp_set_tri_attr_rs(2);
+    {uint16_t constants[8];unsigned p;for(p=0;p<8;p++)constants[p]=(uint16_t)nb_dmem_s16(0x30u+p*2u);rsp_factor5_row(30,constants);}
+    rsp_factor5_texture_bound(nb_dmem_s16(0xfc4u),nb_dmem_s16(0xfccu));
+    rsp_factor5_spare_bound(nb_dmem_s16(0xfc6u),nb_dmem_s16(0xfceu));
     rsp_tri_set_rs_sort(1);
     nw = rsp_tri_write(ew, &va, &vb, &vc,
                        (int)(nb.geom >> 1) & 1,
@@ -2597,6 +2700,10 @@ static int nb_emit_tri(RdpFifo *fifo, unsigned int ra, unsigned int rb,
                        tilebyte & 7, (tilebyte >> 3) & 7,
                        0x1000, 0x20, (int32_t)0xfff8, 0x1cc);
     if (nw > 0) {
+        if((nb.geom&2u) && !(nb.geom&0x1000u)){
+            nb_dmem_w16(0xfc4u,rsp_factor5_bound_integer());
+            nb_dmem_w16(0xfccu,rsp_factor5_bound_fraction());
+        }
         unsigned int context[5],p;
         rsp_tri_factor5_context(context);
         nb_size_fraction_set(context[0]);
@@ -2616,13 +2723,7 @@ static int nb_emit_tri(RdpFifo *fifo, unsigned int ra, unsigned int rb,
         ew[0] |= (int32_t)(((unsigned int)tilebyte & 0xc0u)<<16);
         ew[0] |= (int32_t)((nb.geom & 0x30u)<<24);
         nb_phase_set(((unsigned int)ew[0]>>16)&0xffu);
-        {
-            int k;
-            /* The per-triangle callback drains the previous DMEM packet.
-             * Its bytes remain observable as padding in a later mode sync. */
-            for(k=0;k<nw;k++)nb_dmem_w32(0xe80u+(unsigned int)prefix+(unsigned int)k*4u,(unsigned int)ew[k]);
-        }
-        rdp_fifo_append(fifo, ew, nw);
+        nb_rdp_append(fifo, ew, nw);
     }
     /* Resident return 744/748 clears the batch rejection countdown.
      * Winding-cull returns bypass this store and retain the countdown. */
@@ -2759,6 +2860,7 @@ static int nb_tri(RdpFifo *fifo, unsigned int w0, unsigned int w1, int quad)
             if (nb_emit_tri(fifo, va, vb, vc) < 0)
                 return -1;
         }
+        nb_packet_bytes=0; /* b6c drains even a rejected first half */
         nb.tri_phase = 1u;
     }
     if (quad && nb.tri_phase == 1u) {
@@ -2795,6 +2897,7 @@ static int nb_tri(RdpFifo *fifo, unsigned int w0, unsigned int w1, int quad)
         }
     }
     nb.tri_phase = 0u;
+    nb_packet_bytes=0;
     nb_dl_step(len);
     return 0;
 }
@@ -2895,13 +2998,17 @@ static int nb_attribute_callback(RdpFifo *fifo)
     int32_t old, tag;
     int32_t words[6];
     unsigned int k;
-    if ((nb_dmem_s16(0x152u)&0xfffu) != 0xcc8u) return 0;
+    if ((nb_dmem_s16(0x152u)&0xfffu) != 0xcc8u) {
+        nb_packet_bytes=0; /* default 7b0/7b4 returns through the drain */
+        return 0;
+    }
     old = nb_dmem_s16(0x101u);
     tag = (signed char)nb.dmem[0x103u^3u];
     nb_dmem_w16(0x100u, (unsigned int)old | (unsigned int)tag);
     if (nb_dmem_r32(0x58cu)) {
         unsigned int mode;
         if (nb_call_splice(fifo) < 0) return -1;
+        nb_packet_bytes=0; /* c4c, after the splice list has run */
         mode = nb_dmem_r32(0x120u)&0xffcfffffu;
         nb_dmem_w32(0xe70u, mode);
         nb_dmem_w32(0xe60u, mode|0x00100000u);
@@ -2909,17 +3016,18 @@ static int nb_attribute_callback(RdpFifo *fifo)
         if (tag) {
             for (k=0;k<4;k++) words[k]=(int32_t)nb_dmem_r32(0xe50u+(unsigned int)tag+k*4u);
             for (k=0;k<4;k++) nb_dmem_w32(0xe80u+k*4u,(unsigned int)words[k]);
-            rdp_fifo_append(fifo, words, 4);
+            nb_rdp_append(fifo, words, 4);
         }
         nb_dmem_w32(0x58cu,0);
         return tag ? 16 : 0;
     }
+    nb_packet_bytes=0; /* c9c drains before comparing classifications */
     if ((unsigned int)tag != (unsigned int)old*256u) {
         words[0]=(int32_t)0xe7000000u;
         words[1]=(int32_t)nb_dmem_r32(0xe84u);
         for(k=0;k<4;k++) words[k+2]=(int32_t)nb_dmem_r32(0xe50u+(unsigned int)tag+k*4u);
         for(k=0;k<6;k++) nb_dmem_w32(0xe80u+k*4u,(unsigned int)words[k]);
-        rdp_fifo_append(fifo,words,6);
+        nb_rdp_append(fifo,words,6);
         return 24;
     }
     return 0;
@@ -2960,16 +3068,17 @@ static int nb_morph_quad(RdpFifo *fifo)
         if(kind==2u){
             int32_t words[6];unsigned int k;
             if(nb_call_splice(fifo)<0)return -1;
+            nb_packet_bytes=0; /* Indiana's explicit pre-pass drain */
             words[0]=(int32_t)0xe7000000u;
-            words[1]=(int32_t)nb_dmem_r32(0xe84u+(fifo->used&0x17fu));
+            words[1]=(int32_t)nb_dmem_r32(0xe84u);
             for(k=0;k<4;k++)words[k+2]=(int32_t)nb_dmem_r32(0xe60u+k*4u);
-            rdp_fifo_append(fifo,words,6);
+            nb_rdp_append(fifo,words,6);
             nb.geom^=2u;
             if(nb_morph_draw(fifo,records)<0){nb.geom^=2u;return -1;}
             nb.geom^=2u;
             for(k=0;k<4;k++)words[k]=(int32_t)nb_dmem_r32(0xe50u+k*4u);
             words[4]=(int32_t)nb_dmem_r32(0x120u);words[5]=(int32_t)nb_dmem_r32(0x124u);
-            rdp_fifo_append(fifo,words,6);
+            nb_rdp_append(fifo,words,6);
         } else if(nb_morph_draw(fifo,records)<0)return -1;
     }
     return 0;
@@ -3053,7 +3162,7 @@ static int nb_walk(RdpFifo *fifo, unsigned int stop_depth, int nested)
         {
             static int t = -1;
             if (t < 0) t = getenv("NB_CMD_TRACE") != NULL;
-            if (t) fprintf(stderr, "[NC] @%06x %08x %08x\n", nb.dl, w0, w1);
+            if (t) fprintf(stderr, "[NC] @%06x %08x %08x cursor=%x\n", nb.dl, w0, w1,0xe80u+nb_packet_bytes);
         }
         unsigned int cls = w0 >> 30;
         unsigned int op  = (w0 >> 24) & 0xffu;
@@ -3084,17 +3193,19 @@ static int nb_walk(RdpFifo *fifo, unsigned int stop_depth, int nested)
                     nb_dl_enter(splice);
                     continue;
                 }
+                nb_packet_bytes=0; /* texrect's 7b0/7b4 callback drains */
             }
             words[0] = (int32_t)w0;
             words[1] = (int32_t)w1;
-            rdp_fifo_append(fifo, words, 2);
+            nb_rdp_append(fifo, words, 2);
             nb_dl_step(8u);
             if (op == 0xe4u || op == 0xe5u) {
                 words[0] = (int32_t)nb_read_u32(nb.dl);
                 words[1] = (int32_t)nb_read_u32(nb.dl + 4);
-                rdp_fifo_append(fifo, words, 2);
+                nb_rdp_append(fifo, words, 2);
                 nb_dl_step(8u);
             }
+            if(nb_packet_bytes>0xf0u)nb_packet_bytes=0;
             continue;
         }
 
@@ -3194,6 +3305,7 @@ static int nb_walk(RdpFifo *fifo, unsigned int stop_depth, int nested)
                 nb.chunk = nb.stack[nb.sp * 2u];
                 nb.off = nb.stack[nb.sp * 2u + 1u];
                 nb.dl = nb.chunk + nb.off;
+                nb_chunk_shadow();
                 if (nb.off >= 0x108u) {
                     nb.off -= 8u;
                     nb.dl = nb.chunk + nb.off;
@@ -3241,7 +3353,9 @@ static int nb_walk(RdpFifo *fifo, unsigned int stop_depth, int nested)
             nb.chunk = nb.stack[nb.sp * 2u];
             nb.off   = nb.stack[nb.sp * 2u + 1u];
             nb.dl    = nb.chunk + nb.off;
+            nb_chunk_shadow();
             nb_dmem_w32(0x5a0u, nb.chunk);
+            nb_packet_bytes=0; /* c4c */
             mode = nb_dmem_r32(0x120u) & 0xffcfffffu;
             nb_dmem_w32(0xe70u, mode);
             nb_dmem_w32(0xe60u, mode | 0x00100000u);
@@ -3251,10 +3365,10 @@ static int nb_walk(RdpFifo *fifo, unsigned int stop_depth, int nested)
                 unsigned int src = (0xe50u + gate) & 0xfffu;
                 words[0] = (int32_t)nb_dmem_r32(src);
                 words[1] = (int32_t)nb_dmem_r32(src + 4u);
-                rdp_fifo_append(fifo, words, 2);
+                nb_rdp_append(fifo, words, 2);
                 words[0] = (int32_t)nb_dmem_r32(src + 8u);
                 words[1] = (int32_t)nb_dmem_r32(src + 12u);
-                rdp_fifo_append(fifo, words, 2);
+                nb_rdp_append(fifo, words, 2);
             }
             nb_dmem_w32(0x58cu, 0u);
             continue;
@@ -3312,6 +3426,7 @@ static int nb_walk(RdpFifo *fifo, unsigned int stop_depth, int nested)
                 nb.chunk = next;
                 nb.off = 8u;
                 nb.dl = nb.chunk + nb.off;
+                nb_chunk_shadow();
             }
             continue;
         case 0x0d:                              /* GeometryMode &= w1
@@ -3365,11 +3480,12 @@ static int nb_walk(RdpFifo *fifo, unsigned int stop_depth, int nested)
                 int32_t words[2];
                 words[0] = (int32_t)nb_dmem_r32(0x120u);
                 words[1] = (int32_t)nb_dmem_r32(0x124u);
-                if (fifo->used >= 8u &&
+                if (nb_packet_bytes && fifo->used >= 8u &&
                     (*(const uint32_t *)(fifo->storage + fifo->used - 8u)
                      >> 24) == 0xefu)
-                    fifo->used -= 8u;
-                rdp_fifo_append(fifo, words, 2);
+                {fifo->used -= 8u;nb_packet_bytes-=8u;}
+                nb_rdp_append(fifo, words, 2);
+                if(nb_packet_bytes>0xf0u)nb_packet_bytes=0;
             }
             nb_dl_step(8u);
             continue;

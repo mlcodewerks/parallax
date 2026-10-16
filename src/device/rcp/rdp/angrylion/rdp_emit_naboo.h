@@ -19,6 +19,8 @@ int naboo_get_size_fraction(unsigned int *fraction);
 /* Packed retained lanes: V12[0:1], V2[4:7], V11[4:7], V13[4:7].
  * A pair stores its first lane in the low halfword. */
 void naboo_set_context(const unsigned int context[7]);
+void naboo_set_packet_cursor(unsigned int cursor);
+unsigned int naboo_get_packet_cursor(void);
 unsigned int naboo_get_context(unsigned int context[7]);
 void naboo_begin_writes(void);
 void naboo_end_writes(int commit);

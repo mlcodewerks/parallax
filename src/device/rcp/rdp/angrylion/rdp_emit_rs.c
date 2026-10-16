@@ -749,22 +749,19 @@ void rs_run_dl(GSPState *gsp, RdpFifo *fifo, unsigned int dl_addr)
                     gsp_modify_vertex(gsp, 1, 0x10u, rs_fog_color_always(gsp, 1, c1));
                     gsp_modify_vertex(gsp, 2, 0x10u, rs_fog_color_always(gsp, 2, c2));
                     gsp_modify_vertex(gsp, 3, 0x10u, rs_fog_color_always(gsp, 3, c3));
-                    /* Corner order of the two triangles (validated
-                     * against the LLE stream: 808/940 header-exact vs
-                     * 692 for the other diagonal). */
-                    if (!rs_cull(gsp, 2, 0, 3))
-                    {
-                        nw = gsp_triangle(gsp, cmd, 0, 3, 2,
-                                          s_rs_tex_on, rs_zbuffered());
-                        if (nw > 0)
-                            rdp_fifo_append(fifo, cmd, nw);
-                    }
-                    if (!rs_cull(gsp, 0, 1, 3))
-                    {
-                        nw = gsp_triangle(gsp, cmd, 0, 1, 3,
-                                          s_rs_tex_on, rs_zbuffered());
-                        if (nw > 0)
-                            rdp_fifo_append(fifo, cmd, nw);
+                    /* Overlay 24 compares the signed stored depth shorts
+                     * of vertices 1 and 2, then XORs command byte 2 bit 0.
+                     * The two halves share a diagonal but their draw order
+                     * changes as the terrain crosses the camera. */
+                    int first=((int16_t)(gsp->vtx[1].scr_z>>16) <
+                               (int16_t)(gsp->vtx[2].scr_z>>16)) ^ ((w0>>8)&1u);
+                    int pass;
+                    for(pass=0;pass<2;pass++){
+                        int b=(first^pass)?1:3,c=(first^pass)?3:2;
+                        if(!rs_cull(gsp,0,b,c)){
+                            nw=gsp_triangle(gsp,cmd,0,b,c,s_rs_tex_on,rs_zbuffered());
+                            if(nw>0)rdp_fifo_append(fifo,cmd,nw);
+                        }
                     }
                 }
                 size = 40u;
@@ -1191,8 +1188,11 @@ void rs_run_dl(GSPState *gsp, RdpFifo *fifo, unsigned int dl_addr)
                                     gsp->vtx[tr[0]].scr_z >> 16,
                                     gsp->vtx[tr[1]].scr_z >> 16,
                                     gsp->vtx[tr[2]].scr_z >> 16);
+                                /* Border setup reuses t0 for the record
+                                 * base (0x670); its full value reaches
+                                 * the insertion XOR at f34/f78. */
                                 rs_sort_insert(tkey, lnxt, lprv,
-                                               &lhead, &lcur, cnt2, tdir);
+                                               &lhead, &lcur, cnt2, 0x670);
                                 cnt2++;
                             }
                         }
@@ -1418,12 +1418,18 @@ void rs_run_dl(GSPState *gsp, RdpFifo *fifo, unsigned int dl_addr)
         case 0x0bu: case 0xbcu:        /* moveword */
         {
             unsigned int index = w0 & 0xffu;
-            unsigned int fm, fo;
-            if (index == 0x08u)
+            if (index == 0x08u || index == 0x0au)
             {
-                fm = (w1 >> 16) & 0xffffu;
-                fo = w1 & 0xffffu;
-                gsp_set_fog(gsp, (int)(int16_t)fm, (int)(int16_t)fo);
+                /* Rogue's table maps 08 to DMEM 160 and 0a to 164:
+                 * separate 16.16 multiplier/offset words, not the SGI
+                 * packed pair of signed fog coefficients. */
+                unsigned int address=(index==8u?0x160u:0x164u)+((w0>>8)&0xffffu);
+                if(address==0x160u){s_rs_fog_mi=w1>>16;s_rs_fog_mf=w1&0xffffu;}
+                if(address==0x164u){s_rs_fog_oi=w1>>16;s_rs_fog_of=w1&0xffffu;}
+                if(address==0x168u)s_rs_fog_k=w1>>16;
+                gsp->rs_fog_mi=s_rs_fog_mi;gsp->rs_fog_mf=s_rs_fog_mf;
+                gsp->rs_fog_oi=s_rs_fog_oi;gsp->rs_fog_of=s_rs_fog_of;
+                gsp->rs_fog_k=s_rs_fog_k;
             }
             else if (index == 0x0eu)
             {

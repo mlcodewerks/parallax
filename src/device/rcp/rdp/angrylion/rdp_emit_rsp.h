@@ -19,6 +19,21 @@ void rsp_set_vtx_invw_2rd(int on);
 void rsp_set_tri_attr_rs(int on);
 void rsp_tri_factor5_context(uint32_t values[5]);
 void rsp_tri_factor5_seed_fraction(uint32_t value);
+/* Arithmetic latches consumed when Factor 5 skips perspective staging.
+ * The native RSP snapshot owns their lifetime across audio and save/load. */
+void rsp_factor5_seed(const uint16_t values[32][8]);
+uint32_t rsp_factor5_get(uint16_t values[32][8]);
+void rsp_factor5_row(unsigned reg, const uint16_t values[8]);
+void rsp_factor5_lane(unsigned reg,unsigned lane,uint16_t value);
+uint32_t rsp_factor5_bound_integer(void);
+uint32_t rsp_factor5_bound_fraction(void);
+void rsp_factor5_project_pair(const int32_t position[4], unsigned half);
+void rsp_factor5_texture_bound(uint32_t integer, uint32_t fraction);
+void rsp_factor5_spare_bound(uint32_t integer,uint32_t fraction);
+void rsp_factor5_checkpoint(int restore);
+void rsp_factor5_clip_residue(const int32_t in4[4],const int32_t out4[4],
+    const int16_t plane[4],const uint16_t constants[8],int32_t upper[4]);
+void rsp_factor5_reject(const int16_t xy[6]);
 void rsp_set_vtx_invw_raw(int on);
 void rsp_set_vtx_y_round(int on);
 void rsp_set_vtx_x_round(int on);
