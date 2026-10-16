@@ -143,6 +143,11 @@ void read_rdram_fb(void* opaque, uint32_t address, uint32_t* value)
 void write_rdram_fb(void* opaque, uint32_t address, uint32_t value, uint32_t mask)
 {
     struct fb* fb = (struct fb*)opaque;
+    /* Masked unaligned stores can select no bytes. In particular, WDC uses
+     * these while updating CPU framebuffers. Do not invalidate GPU pixels
+     * or report a four-byte CPU write when RDRAM was left untouched. */
+    if (!mask)
+        return;
     write_rdram_dram(fb->rdram, address, value, mask);
 
     /* Plugin notifications use N64 addresses, like PI/RSP DMA callbacks.

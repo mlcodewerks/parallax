@@ -40,6 +40,7 @@ static const struct retro_variable options[] = {
     {"wtfn64_glrdp_color_dither", "GLRDP RGB dithering (restart required); enabled|disabled"},
     {"wtfn64_glrdp_alpha_dither", "GLRDP alpha dithering (restart required); enabled|disabled"},
     {"wtfn64_glrdp_vi_filter", "GLRDP VI filters (restart required); enabled|disabled"},
+    {"wtfn64_glrdp_deinterlace", "GLRDP deinterlacing (restart required); weave|bob"},
     {"wtfn64_glrdp_coverage", "GLRDP coverage emulation (restart required); off|reduced|full"},
     {"wtfn64_glrdp_vi_aa", "GLRDP VI antialiasing (restart required); off|reduced|full"},
     {"wtfn64_glrdp_vi_restore", "GLRDP VI dedithering (restart required); disabled|enabled"},
@@ -126,6 +127,8 @@ void renderer_register_options(retro_environment_t environment)
                 d->info = "Accurate preserves signed nine-bit combiner arithmetic and rounding. Fast clamps the colour equation and uses eight-bit normalized factors; lighting and sharpening may differ. Both retain both cycles and alpha tests. Restart content to apply.";
             if (!strcmp(d->key, "wtfn64_glrdp_vi_filter"))
                 d->info = "Disable all GLRDP VI filters, including resampling, gamma and gamma dithering. Individual selections are retained and apply when enabled. Independent of RDP coverage and blending. Restart content to apply.";
+            if (!strcmp(d->key, "wtfn64_glrdp_deinterlace"))
+                d->info = "Weave retains alternating VI fields for stable interlaced detail. Bob duplicates the latest field for less motion combing at half vertical detail. Independent of VI filtering. Restart content to apply.";
             if (!strcmp(d->key, "wtfn64_glrdp_texture_filter"))
                 d->info = "Native follows the game's RDP texture filtering. Point skips multi-tap texture filtering for lower GPU cost and a sharper, pixelated image. Independent of VI resampling. Restart content to apply.";
             if (!strcmp(d->key, "wtfn64_glrdp_texcoords"))
@@ -264,6 +267,7 @@ void renderer_read_options(retro_environment_t env)
     s->glrdp.combiner = !strcmp(value(env, "wtfn64_glrdp_combiner", "accurate"), "fast") ?
         GLRDP_ARITHMETIC_FAST : GLRDP_ARITHMETIC_ACCURATE;
     s->glrdp.vi_filter = toggle(env, "wtfn64_glrdp_vi_filter", true);
+    s->glrdp.vi_bob = !strcmp(value(env, "wtfn64_glrdp_deinterlace", "weave"), "bob");
     s->glrdp.texture_filter = strcmp(value(env, "wtfn64_glrdp_texture_filter", "native"), "point") != 0;
     s->glrdp.accurate_texcoords = strcmp(value(env, "wtfn64_glrdp_texcoords", "accurate"), "fast") != 0;
     s->glrdp.texture_lod = toggle(env, "wtfn64_glrdp_texture_lod", true);

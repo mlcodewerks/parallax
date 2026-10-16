@@ -1146,6 +1146,7 @@ uniform sampler2D source;
 uniform vec4 image_info, layout_info, timing, active_scan, scales, flags;
 uniform float vi_pass;
 uniform vec2 filter_config;
+uniform vec4 field_state; // interlaced, lower field, retain sibling field
 vec2 vi_center;
 vec4 fetch(vec2 p) {
     float scale = image_info.z;
@@ -1198,16 +1199,28 @@ bool vi_precomputed() {
 }
 )") + glrdp_vi::filter + R"(
 void main() {
+    if (vi_pass == 3.0) {
+        gl_FragColor = texture2D(source, vec2(scan.x, 1.0 - scan.y));
+        return;
+    }
     if (vi_pass == 1.0) {
         vec2 p = floor(scan * image_info.xy);
         vi_center = floor(p / image_info.z);
         gl_FragColor = vi_filter_tap(p);
         return;
     }
-    vec2 field = vec2(640.0, timing.w),
-         start = vec2(active_scan.x - timing.x, (active_scan.z - timing.y) * 0.5);
-    vec2 local = scan * field - start,
-         span = vec2(active_scan.y - active_scan.x, (active_scan.w - active_scan.z) * 0.5);
+    vec2 field = vec2(640.0, timing.w), raster = scan * field;
+    if (field_state.x > 0.5) {
+        float row = floor(raster.y * 2.0);
+        if (field_state.z > 0.5 && mod(row, 2.0) != field_state.y)
+            discard;
+        raster.y = floor(row * 0.5) + 0.5;
+    }
+    float start_y = (active_scan.z - timing.y) * 0.5;
+    start_y = start_y < 0.0 ? ceil(start_y) : floor(start_y);
+    vec2 start = vec2(active_scan.x - timing.x, start_y);
+    vec2 local = raster - start,
+         span = vec2(active_scan.y - active_scan.x, floor((active_scan.w - active_scan.z) * 0.5));
     if (local.x < (start.x < 0.0 ? 0.0 : 8.0) ||
         local.x >= span.x - (start.x + span.x > 640.0 ? 0.0 : 7.0) || local.y < 0.0 ||
         local.y >= span.y) {

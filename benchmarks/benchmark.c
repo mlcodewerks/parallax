@@ -35,6 +35,8 @@ static const char* dlerror(void)
 
 static const char *g_directory = ".";
 static uint64_t g_vi_count;
+static void (*g_debug_vi)(uint32_t[14]);
+static FILE *g_vi_trace;
 
 static double benchmark_seconds(void)
 {
@@ -155,6 +157,13 @@ static void video_callback(const void *data, unsigned width, unsigned height, si
     size_t count;
     unsigned x, y;
     ++g_vi_count;
+    if (g_vi_trace && g_debug_vi) {
+        uint32_t regs[14];
+        g_debug_vi(regs);
+        fprintf(g_vi_trace, "%llu", (unsigned long long)g_vi_count);
+        for (unsigned i=0; i<14; ++i) fprintf(g_vi_trace, ",%08x", regs[i]);
+        fputc('\n', g_vi_trace);
+    }
     if (!g_capture) return;
     /* A NULL callback repeats the displayed image; some cores report zero
      * dimensions on that callback. Keep the preceding display dimensions. */
@@ -422,6 +431,12 @@ int main(int argc, char **argv)
     LOAD_SYMBOL(retro_get_memory_data);
     LOAD_SYMBOL(retro_get_memory_size);
     LOAD_SYMBOL(retro_debug_timing);
+    if (getenv("M64P_BENCH_VI_TRACE")) {
+        g_debug_vi = (void (*)(uint32_t[14]))dlsym(core, "retro_debug_vi");
+        g_vi_trace = fopen(getenv("M64P_BENCH_VI_TRACE"), "w");
+        if (!g_debug_vi || !g_vi_trace) { fprintf(stderr, "VI trace unavailable\n"); return 4; }
+        fputs("vi,status,origin,width,intr,current,burst,vsync,hsync,leap,hstart,vstart,vburst,xscale,yscale\n", g_vi_trace);
+    }
     if(state_vi) {
         LOAD_SYMBOL(retro_serialize_size);
         LOAD_SYMBOL(retro_serialize);
@@ -523,6 +538,7 @@ int main(int argc, char **argv)
     }
 
     if (frame_times) fclose(frame_times);
+    if (g_vi_trace) { fclose(g_vi_trace); g_vi_trace = NULL; }
     fprintf(stderr, "done vis=%llu audio=%llu\n", (unsigned long long)g_vi_count,
             (unsigned long long)g_audio_frames);
 

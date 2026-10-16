@@ -14,6 +14,7 @@ struct GLRDPConfig {
     bool vi_filter;
     bool texture_filter;
     bool accurate_texcoords, texture_lod, color_dither, alpha_dither;
+    bool vi_bob;
 };
 // Frontend defaults preserve the former Fast preset. Low-level renderers use
 // full emulation by default for reference clients that supply no configuration.
@@ -32,7 +33,8 @@ static inline struct GLRDPConfig glrdp_default_config(void) {
                                  true,
                                  true,
                                  true,
-                                 true};
+                                 true,
+                                 false};
     return config;
 }
 static inline struct GLRDPConfig glrdp_reference_config(void) {
@@ -50,7 +52,8 @@ static inline struct GLRDPConfig glrdp_reference_config(void) {
                                  true,
                                  true,
                                  true,
-                                 true};
+                                 true,
+                                 false};
     return config;
 }
 static inline struct GLRDPConfig glrdp_validate_config(struct GLRDPConfig config) {

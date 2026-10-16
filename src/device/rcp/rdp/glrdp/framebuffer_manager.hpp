@@ -33,7 +33,7 @@ class FramebufferManager {
                                     int internal_scale);
     int drawing_height(const RDPImage &, int scissor_height) const;
     GLFramebuffer *find(std::uint32_t);
-    GLFramebuffer *find_containing(std::uint32_t);
+    GLFramebuffer *find_containing(std::uint32_t, std::uint32_t span = 1);
     GLFramebuffer *find_overlapping(std::uint32_t, std::uint32_t);
     void upload_from_rdram(GLFramebuffer &, const N64Memory &);
     void download_to_rdram(GLFramebuffer &, N64Memory &);

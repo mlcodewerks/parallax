@@ -270,18 +270,29 @@ GLFramebuffer *FramebufferManager::find_overlapping(std::uint32_t address, std::
     return best;
 }
 
-GLFramebuffer *FramebufferManager::find_containing(std::uint32_t address) {
+GLFramebuffer *FramebufferManager::find_containing(std::uint32_t address, std::uint32_t span) {
     // VI can initially create a CPU image at a cropped origin, then RDP draws
     // a larger image starting before it. Select the latest image covering the
     // address rather than retaining that older exact-origin CPU image.
     GLFramebuffer *best = nullptr;
+    std::uint64_t best_coverage = 0;
     for (auto &[_, framebuffer] : buffers_) {
         const auto end = std::uint64_t(framebuffer.address) +
                          framebuffer_byte_count(framebuffer.native_width, framebuffer.native_height,
                                                 framebuffer.size);
         if (framebuffer.fbo && framebuffer.color && address >= framebuffer.address &&
-            address < end && (!best || framebuffer.serial > best->serial))
-            best = &framebuffer;
+            address < end) {
+            // Scissor extents can let adjacent images overlap by a few rows.
+            // WDC's 482-row menu images are 480 rows apart: the newest image
+            // may contain the VI origin only in its tail. Prefer the view
+            // covering the scanout, then recency among equally complete views.
+            const auto coverage = std::min<std::uint64_t>(std::max(span, 1u), end - address);
+            if (!best || coverage > best_coverage ||
+                (coverage == best_coverage && framebuffer.serial > best->serial)) {
+                best = &framebuffer;
+                best_coverage = coverage;
+            }
+        }
     }
     return best;
 }

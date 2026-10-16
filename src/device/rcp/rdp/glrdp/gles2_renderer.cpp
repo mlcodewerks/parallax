@@ -175,6 +175,8 @@ bool GLES2Renderer::initialize(N64Memory *memory, bool force_mediump) {
     present_program_ = link(header, glrdp_es2::present_vertex, glrdp_es2::present_fragment.c_str());
     glGenFramebuffers(1, &vi_fbo_);
     glGenTextures(1, &vi_color_);
+    glGenFramebuffers(1, &field_fbo_);
+    glGenTextures(1, &field_color_);
     glGenBuffers(1, &vbo_);
     glGenTextures(1, &atlas_);
     glGenTextures(1, &metadata_);
@@ -196,6 +198,13 @@ bool GLES2Renderer::initialize(N64Memory *memory, bool force_mediump) {
     return true;
 }
 void GLES2Renderer::shutdown() {
+    field_history_.reset();
+    if (field_color_)
+        glDeleteTextures(1, &field_color_);
+    if (field_fbo_)
+        glDeleteFramebuffers(1, &field_fbo_);
+    field_color_ = field_fbo_ = 0;
+    field_w_ = field_h_ = 0;
     if (vi_color_)
         glDeleteTextures(1, &vi_color_);
     if (vi_fbo_)
@@ -223,6 +232,20 @@ void GLES2Renderer::shutdown() {
     atlas_pixels_.clear();
     metadata_valid_ = false;
     draw_uniforms_.clear();
+}
+bool GLES2Renderer::ensure_field_target(int w, int h) {
+    if (field_w_ == w && field_h_ == h)
+        return true;
+    texture(field_color_, w, h);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glBindFramebuffer(GL_FRAMEBUFFER, field_fbo_);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, field_color_, 0);
+    if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
+        return false;
+    field_w_ = w;
+    field_h_ = h;
+    return true;
 }
 bool GLES2Renderer::ensure_vi_target(int w, int h) {
     if (vi_w_ == w && vi_h_ == h)
@@ -857,10 +880,10 @@ void GLES2Renderer::draw_fill_rectangle(const RDPFillRectangle &r, const RDPStat
 }
 void GLES2Renderer::present(const RDPState &, uint32_t status, uint32_t origin, uint32_t width,
                             uint32_t hstart, uint32_t vstart, uint32_t xscale, uint32_t yscale,
-                            uint32_t vsync) {
+                            uint32_t vsync, uint32_t current) {
     const auto scanout = glrdp_scanout_config(config_);
     ES2Guard guard;
-    auto *source = fb_.find_containing(origin);
+    auto *source = fb_.find_containing(origin, vi_source_byte_count(status, width, vstart, yscale));
     unsigned type = status & 3;
     if (!source && width && (type == 2 || type == 3)) {
         unsigned lines = std::max(1, int(vstart & 1023) - int((vstart >> 16) & 1023)),
@@ -886,7 +909,10 @@ void GLES2Renderer::present(const RDPState &, uint32_t status, uint32_t origin, 
     glBindFramebuffer(GL_FRAMEBUFFER, output_fbo_);
     glViewport(0, 0, output_w_, output_h_);
     glDisable(GL_SCISSOR_TEST);
-    if (!source || !source->color || !type) {
+    glDisable(GL_BLEND);
+    glDisable(GL_DEPTH_TEST);
+    if (!source || !source->color || !(type & 2)) {
+        field_history_.reset();
         glClearColor(0, 0, 0, 1);
         glClear(GL_COLOR_BUFFER_BIT);
         return;
@@ -909,6 +935,27 @@ void GLES2Renderer::present(const RDPState &, uint32_t status, uint32_t origin, 
     glUniform4f(uniform(present_program_, "layout_info"), stride / native_width,
                 stride % native_width, offset % native_width, offset / native_width);
     bool pal = (vsync & 1023) > 550;
+    const bool interlaced = (status & 64) != 0;
+    bool preserve_field = field_history_.update(status, width, hstart, vstart, xscale, yscale,
+                                                vsync, current, scanout.vi_bob);
+    const int field_height = pal ? 576 : 480;
+    if (interlaced) {
+        preserve_field &= field_w_ == 640 && field_h_ == field_height;
+        // Texture allocation changes the current binding; restore the source
+        // before either reconstruction or direct scanout samples it.
+        if (!ensure_field_target(640, field_height)) {
+            field_history_.reset();
+            return;
+        }
+        if (!preserve_field) {
+            glBindFramebuffer(GL_FRAMEBUFFER, field_fbo_);
+            glClearColor(0, 0, 0, 1);
+            glClear(GL_COLOR_BUFFER_BIT);
+        }
+        glBindTexture(GL_TEXTURE_2D, source->color);
+    }
+    glUniform4f(uniform(present_program_, "field_state"), interlaced, float(field_history_.lower),
+                preserve_field && !scanout.vi_bob, 0);
     const unsigned aa_mode = glrdp_vi_aa_mode(scanout, status);
     const bool restore = scanout.vi_restore && (status & 0x10000) != 0;
     glUniform2f(uniform(present_program_, "filter_config"), scanout.vi_aa == GLRDP_VI_AA_FULL,
@@ -935,10 +982,17 @@ void GLES2Renderer::present(const RDPState &, uint32_t status, uint32_t origin, 
             precomputed = true;
         }
     }
-    glBindFramebuffer(GL_FRAMEBUFFER, output_fbo_);
-    glViewport(0, 0, output_w_, output_h_);
+    glBindFramebuffer(GL_FRAMEBUFFER, interlaced ? field_fbo_ : output_fbo_);
+    glViewport(0, 0, interlaced ? 640 : output_w_, interlaced ? field_height : output_h_);
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, precomputed ? vi_color_ : source->color);
     glUniform1f(uniform(present_program_, "vi_pass"), precomputed ? 2 : 0);
     quad(-1, -1, 1, 1);
+    if (interlaced) {
+        glBindFramebuffer(GL_FRAMEBUFFER, output_fbo_);
+        glViewport(0, 0, output_w_, output_h_);
+        glBindTexture(GL_TEXTURE_2D, field_color_);
+        glUniform1f(uniform(present_program_, "vi_pass"), 3);
+        quad(-1, -1, 1, 1);
+    }
 }

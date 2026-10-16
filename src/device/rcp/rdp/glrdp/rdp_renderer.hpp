@@ -6,6 +6,7 @@
 #include "rdp_vertex.hpp"
 #include "gpu_depth.hpp"
 #include "rdp_accuracy.h"
+#include "vi_field.hpp"
 #include <array>
 #include <cstdint>
 #include <vector>
@@ -34,7 +35,8 @@ class RDPRenderer {
     void draw_fill_rectangle(const RDPFillRectangle &, const RDPState &);
     void present(const RDPState &, std::uint32_t vi_status, std::uint32_t origin,
                  std::uint32_t width, std::uint32_t hstart, std::uint32_t vstart,
-                 std::uint32_t xscale, std::uint32_t yscale, std::uint32_t vsync = 525);
+                 std::uint32_t xscale, std::uint32_t yscale, std::uint32_t vsync = 525,
+                 std::uint32_t current = UINT32_MAX);
     void fb_read(std::uint32_t);
     void fb_write(std::uint32_t, std::uint32_t);
     void read_screen(void *, int *, int *);
@@ -70,6 +72,7 @@ class RDPRenderer {
     GPUDepthBuffer gpu_depth_;
     GLuint program_ = 0, present_program_ = 0, final_present_program_ = 0, vao_ = 0, vbo_ = 0;
     GLRDPConfig config_ = glrdp_reference_config();
+    VIFieldHistory field_history_;
     GLuint post_fbo_ = 0, post_color_ = 0, post_depth_ = 0;
     GLuint vi_fbo_ = 0, vi_color_ = 0;
     int vi_w_ = 0, vi_h_ = 0;

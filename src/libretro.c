@@ -1077,6 +1077,12 @@ m64p_error angrylionPluginGetVersion(m64p_plugin_type *PluginType, int *PluginVe
     return M64ERR_SUCCESS;
 }
 #if defined(M64P_HEADLESS_BENCHMARK)
+/* Sample at the video callback, before the next field changes VI registers. */
+EXPORT void retro_debug_vi(uint32_t out[14])
+{
+    memcpy(out, g_dev.vi.regs, sizeof(g_dev.vi.regs));
+}
+
 /* Read-only timing snapshot used by benchmarks/headless/benchmark.c. */
 EXPORT void retro_debug_timing(uint32_t out[12])
 {

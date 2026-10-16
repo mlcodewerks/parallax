@@ -23,6 +23,9 @@ gameplay_benchmark_interval: benchmark.c gl_context.h input_script.h ../deps/lib
 gameplay_benchmark_frametime: benchmark.c gl_context.h input_script.h ../deps/libretro-common/include/libretro.h
 	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ benchmark.c $(LDLIBS)
 
+gameplay_benchmark_vi: benchmark.c gl_context.h input_script.h ../deps/libretro-common/include/libretro.h
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ benchmark.c $(LDLIBS)
+
 benchmark: benchmark.c gl_context.h input_script.h ../deps/libretro-common/include/libretro.h
 	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ benchmark.c $(LDLIBS)
 

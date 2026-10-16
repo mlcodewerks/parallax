@@ -1679,6 +1679,7 @@ uniform bool gammaEnable;
 uniform bool gammaDitherEnable;
 uniform float internalScale;
 uniform int viPass;
+uniform vec4 fieldState; // interlaced, lower field, retain sibling field
 vec2 vi_center;
 
 float vi_noise(ivec2 p) {
@@ -1751,10 +1752,16 @@ void main() {
     // the whole output. The NTSC/PAL timing origins match Angrylion's VI.
     vec2 scan = gl_FragCoord.xy * fieldSize / outputSize;
     scan.y = fieldSize.y - scan.y;
-    vec2 activeStart = vec2(hStart - timingOrigin.x, (vStart - timingOrigin.y) * 0.5);
+    if (fieldState.x > 0.5) {
+        float row = floor(scan.y * 2.0);
+        if (fieldState.z > 0.5 && mod(row, 2.0) != fieldState.y)
+            discard;
+        scan.y = floor(row * 0.5) + 0.5;
+    }
+    vec2 activeStart = vec2(hStart - timingOrigin.x, trunc((vStart - timingOrigin.y) * 0.5));
     vec2 local = scan - activeStart;
     float activeW = hEnd - hStart;
-    float activeH = (vEnd - vStart) * 0.5;
+    float activeH = floor((vEnd - vStart) * 0.5);
     float leftGuard = activeStart.x < 0.0 ? 0.0 : 8.0;
     float rightGuard = activeStart.x + activeW > fieldSize.x ? 0.0 : 7.0;
     if (local.x < leftGuard || local.x >= activeW - rightGuard || local.y < 0.0 ||
@@ -1873,6 +1880,7 @@ void RDPRenderer::initialize_samplers(GLuint program) {
     glUniform1i(uniform(program, "depth_acceptance_mask"), 5);
 }
 void RDPRenderer::shutdown() {
+    field_history_.reset();
     uniforms_.clear();
     combiner_values_.clear();
     configuration_values_.clear();
@@ -1918,6 +1926,7 @@ void RDPRenderer::shutdown() {
     gpu_depth_.clear();
 }
 void RDPRenderer::reset() {
+    field_history_.reset();
     gpu_depth_.clear();
     fb_.clear();
     tile_signature_.fill(~0ull);
@@ -2724,7 +2733,8 @@ void RDPRenderer::draw_fill_rectangle(const RDPFillRectangle &r, const RDPState 
 }
 void RDPRenderer::present(const RDPState &state, std::uint32_t vi_status, std::uint32_t origin,
                           std::uint32_t width, std::uint32_t hstart, std::uint32_t vstart,
-                          std::uint32_t xscale, std::uint32_t yscale, std::uint32_t vsync) {
+                          std::uint32_t xscale, std::uint32_t yscale, std::uint32_t vsync,
+                          std::uint32_t current) {
     const auto scanout = glrdp_scanout_config(config_);
     glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
     glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
@@ -2735,7 +2745,8 @@ void RDPRenderer::present(const RDPState &state, std::uint32_t vi_status, std::u
 
     // VI pixel type zero is blank. Clear the host backbuffer even if no RDP
     // color image has been produced for this frame.
-    if ((vi_status & 0x3u) == 0) {
+    if (!(vi_status & 2u)) {
+        field_history_.reset();
         glBindFramebuffer(GL_FRAMEBUFFER, output_fbo_);
         glDisable(GL_SCISSOR_TEST);
         glViewport(0, 0, output_w_, output_h_);
@@ -2744,7 +2755,8 @@ void RDPRenderer::present(const RDPState &state, std::uint32_t vi_status, std::u
         return;
     }
 
-    GLFramebuffer *source = fb_.find_containing(origin);
+    GLFramebuffer *source =
+        fb_.find_containing(origin, vi_source_byte_count(vi_status, width, vstart, yscale));
     const unsigned vi_type = vi_status & 3u;
     if (!source && memory_ && width && (vi_type == 2 || vi_type == 3)) {
         const int lines = std::max(1, int(vstart & 0x3ff) - int((vstart >> 16) & 0x3ff));
@@ -2773,6 +2785,7 @@ void RDPRenderer::present(const RDPState &state, std::uint32_t vi_status, std::u
         fb_.upload_from_rdram(*source, *memory_);
     }
     if (!source || !source->fbo || !source->color) {
+        field_history_.reset();
         glBindFramebuffer(GL_FRAMEBUFFER, output_fbo_);
         glDisable(GL_SCISSOR_TEST);
         glViewport(0, 0, output_w_, output_h_);
@@ -2781,18 +2794,14 @@ void RDPRenderer::present(const RDPState &state, std::uint32_t vi_status, std::u
         return;
     }
 
-    const int active_w = std::max(1, int(hstart & 0x3ffu) - int((hstart >> 16) & 0x3ffu));
-    const int active_v_lines = std::max(1, int(vstart & 0x3ffu) - int((vstart >> 16) & 0x3ffu));
-    const float vi_x_scale = std::max(float(xscale & 0xfffu) / 1024.0f, 1.0f / 1024.0f);
-    const float vi_y_scale = std::max(float(yscale & 0xfffu) / 1024.0f, 1.0f / 1024.0f);
-
-    // VI_V_START is expressed in half-lines. Use the full display-line count
-    // for presentation aspect, while the half-line count above remains the
-    // source-sampling span. This keeps normal NTSC/PAL modes close to 4:3
-    // instead of incorrectly treating ~640x240 timing as a 2.67:1 picture.
-    content_aspect_ = float(active_w) / float(active_v_lines);
-    if (!(content_aspect_ > 0.25f && content_aspect_ < 4.0f))
-        content_aspect_ = 4.0f / 3.0f;
+    // The shader already places the active scan inside the complete TV
+    // raster, including borders. Its active window is not the canvas aspect:
+    // WDC's 640x119 field must not be letterboxed a second time here.
+    content_aspect_ = 4.0f / 3.0f;
+    const bool pal = (vsync & 0x3ff) > 550;
+    const bool interlaced = (vi_status & 64) != 0;
+    bool preserve_field = field_history_.update(vi_status, width, hstart, vstart, xscale, yscale,
+                                                vsync, current, scanout.vi_bob);
 
     const int canvas_w = display_w_ > 0 ? display_w_ : output_w_;
     const int canvas_h = display_h_ > 0 ? display_h_ : output_h_;
@@ -2809,11 +2818,17 @@ void RDPRenderer::present(const RDPState &state, std::uint32_t vi_status, std::u
     int content_x = 0, content_y = 0, content_w = fitted_canvas_w, content_h = fitted_canvas_h;
     fit_aspect(fitted_canvas_w, fitted_canvas_h, content_aspect_, content_x, content_y, content_w,
                content_h);
-    if (!ensure_post_target(content_w, content_h))
+    if (interlaced) {
+        // Store whole VI scanlines independently of frontend size, so a resize
+        // or a non-integer output scale cannot mix the two fields in history.
+        content_w = 640;
+        content_h = pal ? 576 : 480;
+    }
+    preserve_field &= post_w_ == content_w && post_h_ == content_h;
+    if (!ensure_post_target(content_w, content_h)) {
+        field_history_.reset();
         return;
-
-    (void)vi_x_scale;
-    (void)vi_y_scale;
+    }
 
     // Stage 1: VI reconstruction into an aspect-correct offscreen target.
     glBindFramebuffer(GL_FRAMEBUFFER, post_fbo_);
@@ -2824,8 +2839,16 @@ void RDPRenderer::present(const RDPState &state, std::uint32_t vi_status, std::u
     glDepthMask(GL_FALSE);
     glDisable(GL_BLEND);
     glDisable(GL_SCISSOR_TEST);
+    if (interlaced && !preserve_field) {
+        glClearColor(0, 0, 0, 1);
+        glClear(GL_COLOR_BUFFER_BIT);
+    }
 
     glUseProgram(present_program_);
+    // Seed a newly entered mode from the first field; subsequent fields weave
+    // into the persistent target. Bob explicitly refreshes both sibling rows.
+    glUniform4f(uniform(present_program_, "fieldState"), interlaced, float(field_history_.lower),
+                preserve_field && !scanout.vi_bob, 0);
 
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, source->color);
@@ -2838,7 +2861,6 @@ void RDPRenderer::present(const RDPState &state, std::uint32_t vi_status, std::u
     glUniform2f(uniform(present_program_, "sourceSize"), float(source->width),
                 float(source->height));
     glUniform1f(uniform(present_program_, "internalScale"), float(source->internal_scale));
-    const bool pal = (vsync & 0x3ff) > 550;
     glUniform2f(uniform(present_program_, "fieldSize"), 640.0f, pal ? 288.0f : 240.0f);
     glUniform2f(uniform(present_program_, "timingOrigin"), pal ? 128.0f : 108.0f,
                 pal ? 44.0f : 34.0f);

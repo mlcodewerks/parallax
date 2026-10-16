@@ -2,6 +2,7 @@
 #include "framebuffer_manager.hpp"
 #include "rdp_tmem.hpp"
 #include "rdp_accuracy.h"
+#include "vi_field.hpp"
 #include <array>
 #include <algorithm>
 #include <string>
@@ -33,7 +34,7 @@ class GLES2Renderer {
     void draw_texture_rectangle(const RDPTextureRectangle &, const RDPState &);
     void draw_fill_rectangle(const RDPFillRectangle &, const RDPState &);
     void present(const RDPState &, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t,
-                 uint32_t, uint32_t = 525);
+                 uint32_t, uint32_t = 525, uint32_t = UINT32_MAX);
     void fb_read(uint32_t);
     void fb_write(uint32_t, uint32_t);
     FramebufferManager &framebuffers() {
@@ -76,6 +77,9 @@ class GLES2Renderer {
     std::unordered_map<GLuint, std::unordered_map<std::string, GLint>> uniforms_;
     std::unordered_map<GLuint, std::unordered_map<GLint, std::array<float, 4>>> draw_uniforms_;
     GLRDPConfig config_ = glrdp_reference_config();
+    VIFieldHistory field_history_;
+    GLuint field_fbo_ = 0, field_color_ = 0;
+    int field_w_ = 0, field_h_ = 0;
     GLuint program_ = 0, present_program_ = 0, vbo_ = 0, atlas_ = 0, metadata_ = 0, feedback_ = 0,
            output_fbo_ = 0;
     GLuint vi_fbo_ = 0, vi_color_ = 0;
@@ -95,6 +99,7 @@ class GLES2Renderer {
     void uniform4(const char *, const std::array<float, 4> &);
     void quad(float, float, float, float);
     bool ensure_vi_target(int, int);
+    bool ensure_field_target(int, int);
     void atlas(const RDPState &, unsigned, unsigned);
     void draw(const RDPState &, const Planes &, float, float, float, float);
     Depth &depth(uint32_t, int, int);

@@ -234,10 +234,11 @@ void glrdp_present() {
         ContextGuard guard;
         auto present = [&](auto &gpu) {
             gpu.set_output_framebuffer(GLuint(hw.get_current_framebuffer()));
-            gpu.present(
-                parser->state(), *gfx_info.VI_STATUS_REG, *gfx_info.VI_ORIGIN_REG & 0xffffff,
-                *gfx_info.VI_WIDTH_REG, *gfx_info.VI_H_START_REG, *gfx_info.VI_V_START_REG,
-                *gfx_info.VI_X_SCALE_REG, *gfx_info.VI_Y_SCALE_REG, *gfx_info.VI_V_SYNC_REG);
+            gpu.present(parser->state(), *gfx_info.VI_STATUS_REG,
+                        *gfx_info.VI_ORIGIN_REG & 0xffffff, *gfx_info.VI_WIDTH_REG,
+                        *gfx_info.VI_H_START_REG, *gfx_info.VI_V_START_REG,
+                        *gfx_info.VI_X_SCALE_REG, *gfx_info.VI_Y_SCALE_REG, *gfx_info.VI_V_SYNC_REG,
+                        *gfx_info.VI_V_CURRENT_LINE_REG);
         };
         if (es2)
             present(*es_renderer);

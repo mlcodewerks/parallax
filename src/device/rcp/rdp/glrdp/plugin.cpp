@@ -319,7 +319,8 @@ PJ64_EXPORT void PJ64_CALL UpdateScreen(void) {
         g_renderer->present(g_parser->state(), reg(g_info.VI_STATUS_REG),
                             reg(g_info.VI_ORIGIN_REG) & 0x00ffffffu, reg(g_info.VI_WIDTH_REG),
                             reg(g_info.VI_H_START_REG), reg(g_info.VI_V_START_REG),
-                            reg(g_info.VI_X_SCALE_REG), reg(g_info.VI_Y_SCALE_REG));
+                            reg(g_info.VI_X_SCALE_REG), reg(g_info.VI_Y_SCALE_REG),
+                            reg(g_info.VI_V_SYNC_REG), reg(g_info.VI_V_CURRENT_LINE_REG));
         if (g_render_callback)
             g_render_callback(1);
         g_gl.swap();
