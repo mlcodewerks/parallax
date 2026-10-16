@@ -38,16 +38,24 @@
 
 static const uint32_t *hle_words;
 static uint32_t hle_base, hle_bytes;
+static uint32_t hle_rsp_cycles;
+static int hle_submission;
 const uint32_t *rdp_hle_command_buffer(uint32_t address)
 {
     return hle_words && address >= hle_base && address - hle_base < hle_bytes
         ? hle_words + ((address - hle_base) >> 2) : NULL;
 }
 #ifdef __LIBRETRO__
-void rdp_submit_hle(struct rdp_core *dp, const uint32_t *words, uint32_t base, uint32_t bytes)
+void rdp_submit_hle(struct rdp_core *dp, const uint32_t *words, uint32_t base, uint32_t bytes, uint32_t rsp_cycles)
 {
     if (!bytes || (dp->dpc_regs[DPC_STATUS_REG] & DPC_STATUS_FREEZE)) return;
     hle_words = words; hle_base = base; hle_bytes = bytes;
+    /* The CPU has not advanced while the synchronous HLE walker runs. Feed
+     * the producer's elapsed work to the same DP timeline used by native
+     * RSP writes; a zero offset can deliver DP-done before SP even produced
+     * its FullSync (Conker's opening scheduler then stops submitting frames). */
+    hle_submission = 1;
+    hle_rsp_cycles = dp->instruction_timing ? rsp_cycles : 0;
     n64video_set_hle_cmd_buffer(words, base, bytes);
     /* Generated commands use a host FIFO, leaving guest RDRAM intact. */
     write_rsp_dpc_regs(dp, DPC_STATUS_REG * 4, DPC_CLR_XBUS_DMEM_DMA, ~0u);
@@ -55,10 +63,15 @@ void rdp_submit_hle(struct rdp_core *dp, const uint32_t *words, uint32_t base, u
     write_rsp_dpc_regs(dp, DPC_END_REG * 4, base + bytes, ~0u);
     n64video_set_hle_cmd_buffer(NULL, 0, 0);
     hle_words = NULL; hle_bytes = 0;
+    hle_submission = 0;
 }
 #endif
 #if defined(HAVE_PARALLEL_RSP)
 #include "device/rcp/rsp/p_rsp/dpc_bridge.h"
+static uint32_t rsp_submission_cycles(void)
+{
+    return hle_submission ? hle_rsp_cycles : parallelRSPExecutedCycles();
+}
 #endif
 
 
@@ -85,7 +98,7 @@ static uint32_t dpc_clock_now(struct rdp_core* dp, int from_rsp)
     uint32_t clock = rdp_dpc_clock_value(dp, cp0_regs[CP0_COUNT_REG]);
 #if defined(HAVE_PARALLEL_RSP)
     /* The synchronous RSP slice has not reached CPU COUNT yet. */
-    if (from_rsp) clock += parallelRSPExecutedCycles();
+    if (from_rsp) clock += rsp_submission_cycles();
 #else
     (void)from_rsp;
 #endif
@@ -131,7 +144,7 @@ static void process_dpc_commands(struct rdp_core* dp, int from_rsp)
     if (dp->vi_regs && dp->instruction_timing) {
         int64_t submitted = dp->mi->r4300->cp0.count_clock;
 #if defined(HAVE_PARALLEL_RSP)
-        if (from_rsp) submitted += ((uint64_t)parallelRSPExecutedCycles() * 3 + 3) / 4;
+        if (from_rsp) submitted += ((uint64_t)rsp_submission_cycles() * 3 + 3) / 4;
 #endif
         uint32_t begin = dp->dpc_regs[DPC_CURRENT_REG] & 0xfffff8;
         uint32_t end = dp->dpc_regs[DPC_END_REG] & 0xfffff8;
@@ -191,7 +204,7 @@ static void process_dpc_commands(struct rdp_core* dp, int from_rsp)
                 uint32_t delay = rdp_sync_full_delay(dp);
 #if defined(HAVE_PARALLEL_RSP)
                 if (from_rsp)
-                    delay += (uint32_t)(((uint64_t)parallelRSPExecutedCycles() * 3 + 3) / 4);
+                    delay += (uint32_t)(((uint64_t)rsp_submission_cycles() * 3 + 3) / 4);
 #endif
                 /* Work after the first FullSync belongs to the next fence.
                  * Keep a fallback for backends that raise DP without a

@@ -162,16 +162,6 @@ void hle_execute(struct hle_t* hle)
     hle_timing_ucode(sum_bytes(hle->dram + uc_start,
         min(*dmem_u32(hle, TASK_UCODE_SIZE) ? *dmem_u32(hle, TASK_UCODE_SIZE) : 0xf80, 0xf80) >> 1));
 
-    /* Rogue Squadron runs a fog/geometry setup overlay (ucode text word0
-     * 0x40065800) immediately before its graphics task. That overlay's
-     * ucode_data pointer is the RDRAM fog block the graphics task's terrain
-     * needs; publish it to the angrylion RS walker so rs_seed_fog_row can read
-     * the coefficients from fog_block + 0x160. Without this the graphics task
-     * seeds fog from its own (zeroed) DMEM row and every terrain vertex renders
-     * with alpha 0 -- the blown-out sand cells. */
-    if ((*dram_u32(hle, uc_start) & 0xffffffffu) == 0x40065800u)
-        rs_set_fog_block(uc_dstart);
-
     bool match = false;
     struct cached_ucodes_t * cached_ucodes = &hle->cached_ucodes;
     struct ucode_info_t *info = NULL;
@@ -391,10 +381,9 @@ static void zboss_gfx_task(struct hle_t* hle)
 
 /* Rogue Squadron (Factor 5 custom microcode): one persistent graphics
  * task per frame whose display-list page ring the CPU extends while the
- * microcode walks it -- the terminating command is provisional until
- * the CPU stops appending. The walker suspends at the live tail and
- * the task is re-dispatched through the incomplete-return protocol
- * until the end survives a slice. */
+ * microcode walks it. Missing page links and execution budgets suspend
+ * the cursor through the incomplete-return protocol; a top-level EndDL
+ * completes immediately, as in the resident instruction sequence. */
 int angrylion_naboo_dlist(int resume, int emit);
 /* Naboo-era Factor 5 streaming server (Battle for Naboo, Indiana
  * Jones): same libultra yield protocol as Rogue Squadron; the walker
@@ -404,6 +393,9 @@ static void naboo_gfx_task(struct hle_t* hle)
 {
     int resume;
     int r;
+    if(l_naboo_gfx_running && (*hle->sp_status&SP_STATUS_SIG0)){
+        rsp_break(hle,SP_STATUS_SIG1);return;
+    }
 
     resume = l_naboo_gfx_running
           || ((*dmem_u32(hle, TASK_FLAGS) & 1) != 0);
@@ -439,6 +431,9 @@ static void rs_gfx_task(struct hle_t* hle)
 {
     int resume;
     int r;
+    if(l_rs_gfx_running && (*hle->sp_status&SP_STATUS_SIG0)){
+        rsp_break(hle,SP_STATUS_SIG1);return;
+    }
 
     /* a relaunch with OS_TASK_YIELDED set resumes a yielded walk */
     resume = l_rs_gfx_running

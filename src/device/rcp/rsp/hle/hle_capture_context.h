@@ -7,6 +7,31 @@
 #define HLE_CAPTURE_VCO_MAGIC 0x56434f31u
 #define HLE_CAPTURE_T6_MAGIC 0x46355436u
 #define HLE_CAPTURE_F5_MAGIC 0x46355600u
+#define HLE_CAPTURE_RSP_MAGIC 0x52535031u
+static inline int hle_capture_rsp(FILE *file, uint32_t *words, unsigned capacity)
+{
+    long position = ftell(file);
+    uint32_t count, span[2], pair[2];
+    unsigned k;
+    int found = 0;
+    if (position < 0) return 0;
+    if (fread(&count, 4, 1, file) != 1 || count > 512) goto finish_rsp;
+    for (k = 0; k < count; k++) {
+        if (fread(span, 8, 1, file) != 1 || span[0] >= 0x800000u ||
+            span[1] > 0x800000u - span[0] || fseek(file, (long)span[1], SEEK_CUR)) goto finish_rsp;
+    }
+    for (k = 0; k < 10; k++) {
+        if (fread(pair, 8, 1, file) != 1) break;
+        if (pair[0] == HLE_CAPTURE_RSP_MAGIC) {
+            if (pair[1] == capacity && fread(words, capacity * 4, 1, file) == 1) found = 1;
+            break;
+        }
+        if (pair[0] != HLE_CAPTURE_VCO_MAGIC && pair[0] != HLE_CAPTURE_T6_MAGIC &&
+            (pair[0] < HLE_CAPTURE_F5_MAGIC || pair[0] >= HLE_CAPTURE_F5_MAGIC + 7u)) break;
+    }
+finish_rsp:
+    clearerr(file); fseek(file, position, SEEK_SET); return found;
+}
 static inline uint32_t hle_capture_value(FILE *file,uint32_t magic)
 {
     long position=ftell(file);

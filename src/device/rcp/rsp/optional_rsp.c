@@ -10,6 +10,7 @@
 #include "device/rcp/rdp/angrylion/rdp_emit_hle.h"
 #include "device/rcp/rdp/angrylion/rdp_emit_zsort.h"
 #include "device/rcp/rdp/angrylion/rdp_emit_naboo.h"
+#include "device/rcp/rdp/angrylion/rdp_emit_rsp.h"
 #include "device/rcp/rdp/angrylion/n64video.h"
 #include <stddef.h>
 #include <stdio.h>
@@ -20,6 +21,7 @@
 #include "hle/musyx_validation.h"
 #include "hle/hle_external.h"
 #include "hle/hle_timing.h"
+#include "p_rsp/dpc_bridge.h"
 
 extern unsigned int parallelRSPDoRspCycles(unsigned int);
 extern void parallelRSPResetExecutedCycles(void);
@@ -34,6 +36,9 @@ static RSP_INFO info;
 static unsigned int forwarded_cycles;
 static unsigned int start_status;
 static int forwarded;
+static unsigned int graphics_checksum;
+static const char *graphics_capture_prefix;
+static unsigned int graphics_capture_started, graphics_capture_count;
 static unsigned long long graphics_tasks, audio_tasks, other_tasks, boot_tasks, lle_tasks;
 static int timing_probe_active, timing_probe_failed;
 static uint32_t timing_probe_t6;
@@ -48,7 +53,31 @@ static unsigned char *get_dmem(void) { return info.DMEM; }
 static unsigned int get_rdram_size(void) { return 0x800000; }
 static void submit(const unsigned char *storage, unsigned int base, unsigned int bytes)
 {
-    rdp_submit_hle(&g_dev.dp, (const uint32_t *)storage, base, bytes);
+    const uint32_t *task=(const uint32_t*)(info.DMEM+0xfc0);
+    const struct hle_timing_work work=hle_timing_get();
+    uint32_t first=task[10]&0xffffffu,last=task[11]&0xffffffu;
+    uint32_t cursor=*info.DPC_CURRENT_REG,start=*info.DPC_START_REG;
+    int factor5=work.family && (!strcmp(work.family,"rs_gfx_task") || !strcmp(work.family,"naboo_gfx_task"));
+    rdp_submit_hle(&g_dev.dp, (const uint32_t *)storage, base, bytes, hle_timing_cycles());
+    if(factor5 && first<last && last<=0x800000u){
+        const uint32_t *words=(const uint32_t*)storage;
+        unsigned int at=0;
+        if(cursor<first || cursor>last)cursor=last;
+        while(at<bytes/4u){
+            static const unsigned int triangle_words[8]={8,12,24,28,24,28,40,44};
+            unsigned int op=(words[at]>>24)&63u;
+            unsigned int count=op>=8 && op<=15?triangle_words[op-8]:op==0x24 || op==0x25?4u:2u;
+            if(count>bytes/4u-at)count=bytes/4u-at;
+            if(count*4u>last-first)break;
+            if(cursor+count*4u>last){cursor=first;start=first;}
+            cursor+=count*4u;at+=count;
+        }
+        /* The host FIFO is only command storage. Factor 5's CPU producer
+         * polls the guest output ring; exposing the synthetic 7e0000 range
+         * makes its ring-space arithmetic consume unrelated memory. */
+        *info.DPC_START_REG=start;
+        *info.DPC_CURRENT_REG=*info.DPC_END_REG=cursor;
+    }
 }
 static const RdpEmitBackend backend = {get_rdram, get_rdram_size, get_dmem, submit};
 
@@ -61,6 +90,8 @@ void optional_rsp_init(RSP_INFO rsp_info)
     if (!timing_capture_stride) timing_capture_stride = 1u;
     timing_capture_started = timing_capture_count = timing_capture_elapsed = 0;
     info = rsp_info;
+    graphics_capture_prefix = getenv("HLE_GRAPHICS_CAPTURE");
+    graphics_capture_started = graphics_capture_count = 0;
     memset(&hle, 0, sizeof(hle));
     graphics_tasks = audio_tasks = other_tasks = boot_tasks = lle_tasks = 0;
     hle_init(&hle, info.RDRAM, info.DMEM, info.IMEM, info.MI_INTR_REG,
@@ -81,6 +112,7 @@ void optional_rsp_init(RSP_INFO rsp_info)
 static int graphics_supported(const uint32_t *task)
 {
     unsigned int sum = 0, i;
+    graphics_checksum=0;
 
     if (zsort_ucode_match(info.RDRAM, 0x800000, task[6], task[7]))
     {
@@ -107,6 +139,7 @@ static int graphics_supported(const uint32_t *task)
 
     for (i = 0; i < (task[5] < 0xf80 ? task[5] : 0xf80) / 2; i++)
         sum += info.RDRAM[task[4] + i];
+    graphics_checksum=sum;
     if (sum == 0x28b9e || sum == 0x2095b || sum == 0x1f7bb ||
         sum == 0x25c16 || sum == 0x25c53)
         return !(task[1] & 1) || hle_stream_can_resume(sum);
@@ -125,6 +158,56 @@ static int audio_supported(const uint32_t *task)
     } else if (data[4] == 1)
         return musyx_v1_supported(info.RDRAM, task[12], task[13]);
     return 1;
+}
+
+/* Standalone input snapshots for the private ROM-instruction replay harness.
+ * Capture only task starts: a streaming continuation needs the walker's private
+ * state and cannot be replayed as a fresh OSTask. No ROM bytes enter reports. */
+static void graphics_capture_begin(const uint32_t *task)
+{
+    unsigned int i, sum = 0, skip, stride, limit;
+    uint32_t header[4] = {0x484c5431u, 0, 0, 0x47465849u}, context[7], zero = 0;
+    char path[1024];
+    FILE *file;
+    if (!graphics_capture_prefix || (task[1] & 1u)) return;
+    if (getenv("HLE_GRAPHICS_CAPTURE_CLOCK") &&
+        g_dev.r4300.cp0.count_clock < (int64_t)strtoull(getenv("HLE_GRAPHICS_CAPTURE_CLOCK"), NULL, 0)) return;
+    for (i = 0; i < (task[5] < 0xf80 ? task[5] : 0xf80) / 2; i++)
+        sum += info.RDRAM[task[4] + i];
+    if (hle_stream_can_resume(sum)) return;
+    skip = getenv("HLE_GRAPHICS_CAPTURE_SKIP") ? strtoul(getenv("HLE_GRAPHICS_CAPTURE_SKIP"), NULL, 0) : 0;
+    stride = getenv("HLE_GRAPHICS_CAPTURE_STRIDE") ? strtoul(getenv("HLE_GRAPHICS_CAPTURE_STRIDE"), NULL, 0) : 13;
+    limit = getenv("HLE_GRAPHICS_CAPTURE_LIMIT") ? strtoul(getenv("HLE_GRAPHICS_CAPTURE_LIMIT"), NULL, 0) : 24;
+    if (!stride) stride = 1;
+    i = graphics_capture_started++;
+    if (i < skip || (i - skip) % stride || graphics_capture_count >= limit) return;
+    snprintf(path, sizeof(path), "%s-%04u.rsp", graphics_capture_prefix, graphics_capture_count++);
+    file = fopen(path, "wb");
+    if (!file) return;
+    header[2] = sum;
+    fwrite(header, sizeof(header), 1, file);
+    fwrite(info.RDRAM, 0x800000, 1, file);
+    fwrite(info.DMEM, 0x1000, 1, file);
+    fwrite(info.IMEM, 0x1000, 1, file);
+    fwrite(&zero, sizeof(zero), 1, file);
+    {
+        uint32_t state[4] = {HLE_CAPTURE_VCO_MAGIC, parallelRSPGetVCO(),
+                            HLE_CAPTURE_T6_MAGIC, parallelRSPGetT6()};
+        fwrite(state, sizeof(state), 1, file);
+    }
+    parallelRSPGetF5Context(context);
+    for (i = 0; i < 7; i++) {
+        uint32_t pair[2] = {HLE_CAPTURE_F5_MAGIC + i, context[i]};
+        fwrite(pair, sizeof(pair), 1, file);
+    }
+    {
+        uint32_t state[PARALLEL_RSP_STATE_WORDS];
+        uint32_t tag[2] = {HLE_CAPTURE_RSP_MAGIC, PARALLEL_RSP_STATE_WORDS};
+        parallelRSPSaveState(state);
+        fwrite(tag, sizeof(tag), 1, file);
+        fwrite(state, sizeof(state), 1, file);
+    }
+    fclose(file);
 }
 
 unsigned int optional_rsp_execute(unsigned int cycles)
@@ -147,18 +230,30 @@ unsigned int optional_rsp_execute(unsigned int cycles)
         (kind == HLE_TASK_AUDIO && ((task[12] & 7) ||
             renderer_settings.lle_audio || !audio_supported(task))))
         goto native;
+    if(kind==HLE_TASK_GRAPHICS && !(task[1]&1u) && !hle_stream_can_resume(graphics_checksum) &&
+        (graphics_checksum==0x2095bu || graphics_checksum==0x25c16u || graphics_checksum==0x25c53u) &&
+        task[10]<task[11] && task[11]<=0x800000u){
+        *info.DPC_START_REG=*info.DPC_CURRENT_REG=*info.DPC_END_REG=task[11];
+    }
     forwarded = 0;
+    hle_timing_set_slice_limit(renderer_settings.per_cycle_timing?32768u:0u);
     start_status = *info.SP_STATUS_REG;
     parallelRSPResetExecutedCycles();
     hle.rsp_vco=parallelRSPGetVCO();hle.rsp_vco_written=0;
     hle.rsp_t6=parallelRSPGetT6();hle.rsp_t6_written=0;naboo_set_phase(hle.rsp_t6);
     parallelRSPGetF5Context(hle.rsp_f5);hle.rsp_f5_written=0;naboo_set_context(hle.rsp_f5);
+    rsp_tri_factor5_seed_fraction(hle.rsp_f5[0]);
+    if (kind == HLE_TASK_GRAPHICS) graphics_capture_begin(task);
     hle_execute(&hle);
     if(!forwarded && hle.rsp_vco_written)parallelRSPSetVCO(hle.rsp_vco);
     if(!forwarded){
         if(kind==HLE_TASK_GRAPHICS)hle.rsp_t6_written=naboo_get_phase(&hle.rsp_t6);
         if(hle.rsp_t6_written)parallelRSPSetT6(hle.rsp_t6);
         if(kind==HLE_TASK_GRAPHICS)hle.rsp_f5_written=naboo_get_context(hle.rsp_f5);
+        if(kind==HLE_TASK_GRAPHICS && graphics_checksum==0x2095bu){
+            uint32_t context[5];rsp_tri_factor5_context(context);
+            hle.rsp_f5[0]=context[0];hle.rsp_f5_written=1u;
+        }
         if(hle.rsp_f5_written)parallelRSPSetF5Context(hle.rsp_f5,hle.rsp_f5_written);
     }
     if (forwarded) lle_tasks++;
@@ -168,6 +263,9 @@ unsigned int optional_rsp_execute(unsigned int cycles)
     else other_tasks++;
     return forwarded ? forwarded_cycles : hle_timing_cycles();
 native:
+    if ((*info.SP_PC_REG & 0xfff) == 0 && task[0] == 1 && task[3] <= 0x1000 &&
+        task[4] <= 0x7ff000 && task[6] <= 0x7ff000)
+        graphics_capture_begin(task);
     timing_capture_begin(task);
     lle_tasks++;
     cycles = parallelRSPDoRspCycles(cycles);
@@ -303,7 +401,7 @@ unsigned int optional_rsp_timing_replay(const char *path, char *family,
     memory = (unsigned char *)malloc(0x802000);
     snapshot = (unsigned char *)malloc(optional_rsp_state_size());
     if (!memory || !snapshot || fread(header, sizeof(header), 1, f) != 1 ||
-        header[0] != 0x484c5431u || !header[1] ||
+        header[0] != 0x484c5431u || (!header[1] && header[3] != 0x47465849u) ||
         fread(memory, 0x802000, 1, f) != 1) goto finish;
     optional_rsp_save(snapshot);
     memset(&probe, 0, sizeof(probe));
@@ -319,13 +417,19 @@ unsigned int optional_rsp_timing_replay(const char *path, char *family,
     probe_ram = memory; probe_dmem = memory + 0x800000;
     rdp_emit_set_backend(&probe_backend);
     rdp_emit_hle_reset(); rdp_emit_stream_load(NULL); hle_stream_state_load(NULL);
+    rsp_tri_factor5_seed_fraction(probe.rsp_f5[0]);
     timing_probe_active = 1; timing_probe_failed = 0;
+    uint32_t saved_limit=hle_timing_slice_limit();hle_timing_set_slice_limit(0);
     hle_execute(&probe);
+    hle_timing_set_slice_limit(saved_limit);
     timing_probe_t6=probe.rsp_t6;
     memcpy(timing_probe_f5,probe.rsp_f5,sizeof(timing_probe_f5));
     if(hle_get_task_kind(&probe)==HLE_TASK_GRAPHICS)naboo_get_phase(&timing_probe_t6);
     if(hle_get_task_kind(&probe)==HLE_TASK_GRAPHICS)naboo_get_context(timing_probe_f5);
     work = hle_timing_get();
+    if(work.family && !strcmp(work.family,"rs_gfx_task")){
+        uint32_t context[5];rsp_tri_factor5_context(context);timing_probe_f5[0]=context[0];
+    }
     if (!timing_probe_failed) {
         snprintf(family, 64, "%s", work.family);
         memcpy(units, work.units, sizeof(work.units));

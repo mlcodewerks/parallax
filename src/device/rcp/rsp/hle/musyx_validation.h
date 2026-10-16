@@ -49,17 +49,15 @@ static inline int musyx_voice_supported(const unsigned char *ram, uint32_t v)
             !musyx_cat_supported(ram, v + 0x24, 320, 1) ||
             (frames2 && !musyx_cat_supported(ram, v + 0x30, 320, 1))) return 0;
         count = frames * 32; count2 = frames2 * 32; skip &= 31;
-        /* Check frame extents after the two rounded, aligned DMAs. The full
-         * four-bit predictor is defined, including DMEM-wrapped books. */
+        /* Short DMAs leave the rest of the encoded DMEM window intact.
+         * The decoder preloads that complete image, so a frame may consume
+         * retained bytes after the newly transferred source. Bound reads
+         * against the represented window rather than the latest DMA length. */
         for (unsigned seg = 0; seg < (frames2 ? 2u : 1u); ++seg) {
-            uint32_t cat = v + 0x24 + seg * 12;
             unsigned n = seg ? frames2 : frames, gap = musyx_byte(ram, v + 0x3e + seg) >= 32;
             unsigned offset = 8 + (gap ? 16 : 0);
-            unsigned len1 = musyx_half(ram, cat + 8), len2=musyx_half(ram, cat+10);
-            unsigned len=(len1+7u)&~7u;
-            if(len2 && ((len1&~7u)+((len2+7u)&~7u))>len)len=(len1&~7u)+((len2+7u)&~7u);
             for (unsigned i = 0; i < n; ++i) {
-                if (offset + 16 > len) return 0;
+                if (offset + 16 > 320) return 0;
                 offset += gap ? 24 : 16; gap = !gap;
             }
         }
@@ -68,7 +66,10 @@ static inline int musyx_voice_supported(const unsigned char *ram, uint32_t v)
         count2 = musyx_half(ram, v + 0x42);
         if (!count || count > 512 || count2 > 512 ||
             !musyx_cat_supported(ram, v + 0x24, count * 2, 2) ||
-            (count2 && !musyx_cat_supported(ram, v + 0x30, count2 * 2, 2))) return 0;
+            /* The second PCM count enables a DMA to the start of the
+             * retained 512-sample bank; it does not bound its descriptor.
+             * Rogue uses count 65 with a rounded 68-sample transfer. */
+            (count2 && !musyx_cat_supported(ram, v + 0x30, 512 * 2, 2))) return 0;
         count = (musyx_half(ram, v + 0x40) + skip + 3) & ~3u;
         count2 = count2 ? (musyx_half(ram, v + 0x38) + musyx_half(ram, v + 0x3a)) / 2 : 0;
     }

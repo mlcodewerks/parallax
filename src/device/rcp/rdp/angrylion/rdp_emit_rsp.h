@@ -6,6 +6,8 @@
 int32_t rsp_rcp32(int32_t in32);
 int32_t rsp_rcp32_dp(int32_t in32);
 int32_t rsp_rcp16(int32_t in16);
+int32_t rsp_rs_billboard_size(int32_t size, int32_t invw, int32_t norm, int32_t viewport, int32_t projection);
+int32_t rsp_rs_billboard_step(int32_t size, int32_t extent, uint16_t fraction);
 int32_t rsp_rsq32(int32_t in32);
 void rsp_light_dir_xfrm_one(const int32_t mv[4][4],
                             const int32_t dir[3], int32_t out[3]);
@@ -16,6 +18,7 @@ void rsp_set_clip_lerp_204h(int on);
 void rsp_set_vtx_invw_2rd(int on);
 void rsp_set_tri_attr_rs(int on);
 void rsp_tri_factor5_context(uint32_t values[5]);
+void rsp_tri_factor5_seed_fraction(uint32_t value);
 void rsp_set_vtx_invw_raw(int on);
 void rsp_set_vtx_y_round(int on);
 void rsp_set_vtx_x_round(int on);

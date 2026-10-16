@@ -10,8 +10,8 @@
  * The display-list grammar is a compacted GBI 1 derivative, decoded from the
  * live IMEM of the running task (cxd4 LLE):
  *
- *   - the low opcodes 0x08..0x13 alias the classic GBI 1 handlers at
- *     0xBF..0xB4 through the same jump table (negated index), and opcodes
+ *   - the low opcodes 0x08..0x14 alias the classic GBI 1 handlers at
+ *     0xBF..0xB3 through the same jump table (negated index), and opcodes
  *     0xC0..0xFF pass through to the RDP verbatim (G_TEXRECT carries its two
  *     extra words inline);
  *   - every display list, top-level or called, begins with an 8-byte header
@@ -113,8 +113,7 @@ static unsigned int s_rs_geom;
 static int32_t s_rs_fog_mi, s_rs_fog_mf, s_rs_fog_oi, s_rs_fog_of;
 static int32_t s_rs_fog_k = 0xff;
 
-/* RDRAM base of the fog block published by Rogue Squadron's fog-setup task
- * (see rs_set_fog_block / rdp_emit_rs.h). 0 when no setup task has run. */
+/* Legacy serialized field. Fog is now seeded from the graphics boot data. */
 static unsigned int s_rs_fog_block;
 
 void rs_set_fog_block(unsigned int rdram_addr)
@@ -122,12 +121,8 @@ void rs_set_fog_block(unsigned int rdram_addr)
     s_rs_fog_block = rdram_addr & 0x00ffffffu;
 }
 
-/* Streaming state: Rogue Squadron launches one persistent graphics task
- * whose display-list ring the CPU keeps appending to while the microcode
- * walks it -- the terminating 0xb8 is provisional and overwritten by each
- * append until the CPU stops writing. The streaming walker suspends at a
- * depth-0 end command and resumes on the next dispatch slice; the task
- * completes once the end survives a slice with the CPU running. */
+/* Streaming state: preserve the command cursor across execution budgets and
+ * missing next-page links. A depth-zero EndDL completes immediately. */
 void rs_run_dl(GSPState *gsp, RdpFifo *fifo, unsigned int dl_addr);
 static int s_rs_streaming;
 static int s_rs_stream_active;
@@ -159,27 +154,24 @@ void rs_seed_fog_row(const unsigned char *dmem)
 {
     if (dmem == 0)
         return;
-    /* The fog coefficient row lives at DMEM 0x160, but the graphics task's own
-     * DMEM has it zero at seed time -- the microcode DMAs it in later. The row
-     * really comes from the RDRAM fog block published by the fog-setup task
-     * that runs immediately before this one (its ucode_data pointer, captured
-     * via rs_set_fog_block). Coefficients sit at fog_block + 0x160 as three
-     * big-endian 32-bit words (mi|mf, oi|of, k|--), read through rs_read_u32
-     * (the walker's RDRAM accessor, so the byte swizzle matches). Verified
-     * against the cxd4 LLE oracle: block 0x0a4e00 -> mi=0xf330 mf=0xd0fe
-     * oi=0x7cff of=0xc750 k=0x0d2f. Fall back to the DMEM row when no setup
-     * task has published a block. */
-    if (s_rs_fog_block != 0u && s_rs_fog_block + 0x16au <= s_rdram_size)
+    /* A fresh boot DMAs this task's data before the init overlay presets
+     * the fog clamp to ff. MusyX starts with the same MFC0 instruction as
+     * several loaders; its data pointer is not a graphics fog descriptor. */
+    unsigned int data=0,bytes=0,i;
+    for(i=0;i<4;i++){
+        data=(data<<8)|dmem[(0xfd8u+i)^3u];
+        bytes=(bytes<<8)|dmem[(0xfdcu+i)^3u];
+    }
+    data&=0xffffffu;
+    if (bytes>=0x168u && data<=s_rdram_size && bytes<=s_rdram_size-data)
     {
-        unsigned int c = s_rs_fog_block + 0x160u;
+        unsigned int c = data + 0x160u;
         unsigned int w0 = rs_read_u32(c + 0u);
         unsigned int w1 = rs_read_u32(c + 4u);
-        unsigned int w2 = rs_read_u32(c + 8u);
         s_rs_fog_mi = (int32_t)((w0 >> 16) & 0xffffu);
         s_rs_fog_mf = (int32_t)(w0 & 0xffffu);
         s_rs_fog_oi = (int32_t)((w1 >> 16) & 0xffffu);
         s_rs_fog_of = (int32_t)(w1 & 0xffffu);
-        s_rs_fog_k  = (int32_t)((w2 >> 16) & 0xffffu);
     }
     else
     {
@@ -187,10 +179,8 @@ void rs_seed_fog_row(const unsigned char *dmem)
         s_rs_fog_mf = (int32_t)((dmem[0x162u ^ 3u] << 8) | dmem[0x163u ^ 3u]);
         s_rs_fog_oi = (int32_t)((dmem[0x164u ^ 3u] << 8) | dmem[0x165u ^ 3u]);
         s_rs_fog_of = (int32_t)((dmem[0x166u ^ 3u] << 8) | dmem[0x167u ^ 3u]);
-        s_rs_fog_k  = (int32_t)((dmem[0x168u ^ 3u] << 8) | dmem[0x169u ^ 3u]);
     }
-    if (s_rs_fog_k == 0)
-        s_rs_fog_k = 0xff;
+    s_rs_fog_k = 0xff;
 }
 
 /* Patch the colour's alpha with the vertex's fog factor when fog is
@@ -261,7 +251,7 @@ static int rs_zbuffered(void)
 }
 
 /* Map the Rogue Squadron geometry word onto the frontend's F3DEX2-valued
- * geometry mode: bit 0 is the fog enable (the microcode's vertex loop keys
+ * geometry mode: bit 16 is the fog enable (the microcode's vertex loop keys
  * its fog-alpha block on it; the 0x2000 winding cull is applied by
  * rs_cull before the shared triangle path), and 0x1000 disables the
  * z-buffered triangle variant (the LLE stream flips between the Z and
@@ -269,7 +259,9 @@ static int rs_zbuffered(void)
  * the menu's render modes never touch the othermode z bits). */
 static void rs_sync_geom(GSPState *gsp)
 {
-    unsigned int m = 0x00200004u;      /* shade + smooth: always on */
+    unsigned int m = 0x00000004u;      /* shade */
+    if (s_rs_geom & 0x200u)
+        m |= 0x00200000u;              /* resident b18: smooth colors */
     if (s_rs_geom & 0x00010000u)
         m |= 0x00010000u;              /* G_FOG */
     if (!(s_rs_geom & 0x1000u))
@@ -306,6 +298,10 @@ static void rs_vertex_at(GSPState *gsp, unsigned int addr, int slot, int n)
         rs_stage_put8(dst + 15u, 0xffu);
     }
     gsp_vertex(gsp, s_rs_stage, 0u, n, slot);
+    /* The transform writes the record's fog/alpha byte even before a
+     * triangle supplies its color. Indexed billboards can read it here. */
+    for(i=0;i<n;i++)gsp->vtx[slot+i].a=(int32_t)(rs_fog_color_always(gsp,slot+i,0)&255u)<<16;
+    rsp_tri_factor5_seed_fraction((uint16_t)gsp->combined[0][0]|((uint32_t)(uint16_t)gsp->combined[0][1]<<16));
 }
 
 static void rs_vertex(GSPState *gsp, unsigned int addr, int n)
@@ -469,13 +465,16 @@ void rs_run_dl(GSPState *gsp, RdpFifo *fifo, unsigned int dl_addr)
     unsigned int pend;
     int guard = 0;
 
-    s_rs_om_h = 0x2fu << 24;
-    s_rs_om_l = 0u;
-    s_rs_colors = 0u;
-    s_rs_geom = 0u;
-    s_rs_tex_on = 0;
-    s_rs_tsc_s = 0x10000;
-    s_rs_tsc_t = 0x10000;
+    if (!(s_rs_streaming && s_rs_stream_active)) {
+        s_rs_om_h = 0x2fu << 24;
+        s_rs_om_l = 0u;
+        s_rs_colors = 0u;
+        s_rs_geom = 0u;
+        s_rs_tex_on = 0;
+        s_rs_tsc_s = 0x10000;
+        s_rs_tsc_t = 0x10000;
+        gsp->viewport.rs_model = 0;
+    }
 
     gsp->clip_near_z = 1;
     gsp->clip_ratio = 2;
@@ -488,7 +487,6 @@ void rs_run_dl(GSPState *gsp, RdpFifo *fifo, unsigned int dl_addr)
     gsp->rs_fog_k  = s_rs_fog_k;
     gsp->clip_fan_first = 3;
     gsp->mvp_trans_last = 1;
-    gsp->viewport.rs_model = 0;
     /* Triangle-writer constants from the live IMEM (0x1928..0x19c8):
      * edge dX scaled by v30[4] == 0x1000 with the y reciprocal scaled by
      * v31[4] == 0x20, and the slope fraction masked to v31[1] == 0xfff8
@@ -549,13 +547,28 @@ void rs_run_dl(GSPState *gsp, RdpFifo *fifo, unsigned int dl_addr)
             s_rs_stream_result = 1;
             return;
         }
+        if(s_rs_streaming && guard>1 && hle_timing_slice_limit() &&
+            hle_timing_cycles()>=hle_timing_slice_limit()){
+            int k;s_rs_stream_pc=pc;s_rs_stream_page=page;s_rs_stream_sp=sp;
+            for(k=0;k<sp*2;k++)s_rs_stream_stack[k]=stack[k];
+            s_rs_stream_active=1;s_rs_stream_result=1;
+            return;
+        }
 
         if (pc >= pend)
         {
             /* ran off the page: follow the header's next-page link */
-            page = rs_read_u32(page) & 0xfffffful;
-            if (page == 0u)
+            unsigned int next = rs_read_u32(page) & 0xfffffful;
+            if (next == 0u) {
+                if (s_rs_streaming) {
+                    int k;
+                    s_rs_stream_pc=pc;s_rs_stream_page=page;s_rs_stream_sp=sp;
+                    for(k=0;k<sp*2;k++)s_rs_stream_stack[k]=stack[k];
+                    s_rs_stream_active=1;s_rs_stream_result=1;
+                }
                 return;
+            }
+            page = next;
             pc = page + 8u;
             pend = page + 0x108u;
         }
@@ -564,6 +577,11 @@ void rs_run_dl(GSPState *gsp, RdpFifo *fifo, unsigned int dl_addr)
         w1 = rs_read_u32(pc + 4u);
         hle_timing_add(HLE_WORK_COMMAND, 1);
         op = w0 >> 24;
+        /* Resident b4..d4 indexes the same DMEM dispatch entries for
+         * these compact opcodes and their negated high-byte aliases.
+         * In particular 0a loads the billboard overlay; treating it as
+         * a no-op also misreads its inline payload as later commands. */
+        if (op >= 0x08u && op <= 0x14u) op = 0xc7u - op;
 
         if (op >= 0xc0u)
         {
@@ -583,8 +601,6 @@ void rs_run_dl(GSPState *gsp, RdpFifo *fifo, unsigned int dl_addr)
                 nw = 4;
                 size = 16u;
             }
-            if (op == 0xdfu || op == 0xe9u)
-                rdp_fifo_fullsync_note();
             if (op == 0xf2u)
             {
                 /* SETTILESIZE: remember the tile texel extent for the
@@ -600,101 +616,56 @@ void rs_run_dl(GSPState *gsp, RdpFifo *fifo, unsigned int dl_addr)
         switch (op)
         {
         case 0x00u:
-        case 0x0au:                    /* microcode overlay load */
             break;
 
-        case 0xbdu:                    /* star / glow billboard */
+        case 0xbdu:                    /* indexed star / glow billboard */
         {
-            /* 24-byte command: [w0 flags] [w1 prim colour] [w2 fog colour]
-             * [w3 world half-size duplicated 16-bit] [w4 05000540] [w5 0].
-             * The live overlay handler (entry 0xdb0 under overlay 0x2c)
-             * projects the origin of the current combined matrix through
-             * the viewport and emits SET_PRIM_DEPTH, SET_PRIM_COLOR (w1
-             * verbatim), SET_FOG_COLOR (w2 verbatim, gated by a mode
-             * flag), then a TEXRECT (or TEXRECT_FLIP when w0 bit 0) of
-             * perspective-scaled half-size around the projected centre.
-             * Verified against the cxd4 RDP stream: the staged record's
-             * depth word >> 11 equals the SET_PRIM_DEPTH payload, and
-             * the rect centres equal the record centre exactly. */
-            unsigned int fogc = rs_read_u32(pc + 8u);
-            unsigned int hsz = rs_read_u32(pc + 12u) & 0xffffu;
-            int32_t sx, sy, sz, iwv;
-            size = 24u;
-            if (!(gsp->viewport.rs_model && hsz != 0u
-                  && rsp_vtx_screen_rs(gsp->combined[3][0],
-                                       gsp->combined[3][1],
-                                       gsp->combined[3][2],
-                                       gsp->combined[3][3],
-                                       (int32_t)(gsp->viewport.persp_norm
-                                                 & 0xffffu),
-                                       gsp->viewport.rs_vs,
-                                       gsp->viewport.rs_vt,
-                                       &sx, &sy, &sz, &iwv)))
-                hsz = 0u;
-            if (hsz != 0u)
-            {
-                int32_t words[4];
-                int32_t hw, hh, xl, yl, xh, yh;
-                int32_t ss, tt, ds, dt, wq, hq;
-                unsigned int rop = 0xe4u | (w0 & 1u);
-
-                hw = (int32_t)(((int64_t)hsz * iwv * 129) >> 24);
-                hh = (int32_t)(((int64_t)hsz * iwv * 97) >> 24);
-                if (hw > 0x200 || hh > 0x200)
-                    hw = 0;
-                if (hw > 0 && hh > 0)
-                {
-                    xl = sx + hw; yl = sy + hh;
-                    xh = sx - hw; yh = sy - hh;
-                    if (xl > 0 && yl > 0 && xh < 0xa00 && yh < 0x800)
-                    {
-                        if (xh < 0) xh = 0;
-                        if (yh < 0) yh = 0;
-                        if (xl > 0xfff) xl = 0xfff;
-                        if (yl > 0xfff) yl = 0xfff;
-
-                        words[0] = (int32_t)0xee000000;
-                        words[1] = (int32_t)(((uint32_t)((sz >> 11) + 562)
-                                              & 0xffffu) << 16);
-                        rdp_fifo_append(fifo, words, 2);
-                        words[0] = (int32_t)0xfa000000;
-                        words[1] = (int32_t)w1;
-                        rdp_fifo_append(fifo, words, 2);
-                        words[0] = (int32_t)0xf8000000;
-                        words[1] = (int32_t)fogc;
-                        rdp_fifo_append(fifo, words, 2);
-
-                        /* S/T anchors at the half-texel corners, step
-                         * (texels << 12) / span, mirrored per w0 bits
-                         * 8/9 (the twinkle rotation nibble). */
-                        wq = xl - xh; hq = yl - yh;
-                        if (wq < 4) wq = 4;
-                        if (hq < 4) hq = 4;
-                        ds = (int32_t)((s_rs_tile_w << 12) / wq);
-                        dt = (int32_t)((s_rs_tile_h << 12) / hq);
-                        ss = -16; tt = -16;
-                        if ((w0 >> 8) & 1u)
-                        {
-                            ss = s_rs_tile_w * 32 - 16;
-                            ds = -ds;
-                        }
-                        if ((w0 >> 9) & 1u)
-                        {
-                            tt = s_rs_tile_h * 32 - 16;
-                            dt = -dt;
-                        }
-                        words[0] = (int32_t)((rop << 24)
-                                   | (((uint32_t)xl & 0xfffu) << 12)
-                                   | ((uint32_t)yl & 0xfffu));
-                        words[1] = (int32_t)((((uint32_t)xh & 0xfffu) << 12)
-                                   | ((uint32_t)yh & 0xfffu));
-                        words[2] = (int32_t)((((uint32_t)ss & 0xffffu) << 16)
-                                   | ((uint32_t)tt & 0xffffu));
-                        words[3] = (int32_t)((((uint32_t)ds & 0xffffu) << 16)
-                                   | ((uint32_t)dt & 0xffffu));
-                        rdp_fifo_append(fifo, words, 4);
-                    }
-                }
+            unsigned int slot=((w0>>5)&0x7f8u)/40u;
+            unsigned int dimensions=rs_read_u32(pc+12u),extent=rs_read_u32(pc+16u);
+            int32_t half[2],step[2],lo[2],hi[2],anchor[2]={0,0},words[4];
+            uint32_t context[5],fraction=0;
+            unsigned int lane;
+            size=24u;
+            if(slot>=32u || !gsp->viewport.rs_model ||
+               (gsp->vtx[slot].rs_outcode&0x4343u))break;
+            for(lane=0;lane<2;lane++){
+                int input=(int16_t)(dimensions>>((1u-lane)*16u));
+                if(w0&1u)input=(int16_t)(dimensions>>(lane*16u));
+                half[lane]=rsp_rs_billboard_size(input,gsp->vtx[slot].rsp_invw,
+                    gsp->viewport.persp_norm,gsp->viewport.rs_vs[lane],
+                    gsp->projection[lane][lane]);
+                int center=(lane?gsp->vtx[slot].scr_y:gsp->vtx[slot].scr_x)>>14;
+                lo[lane]=(int16_t)(center-half[lane]);
+                hi[lane]=(int16_t)(center+half[lane]);
+            }
+            rsp_tri_factor5_context(context);
+            for(lane=0;lane<2;lane++){
+                int dimension=half[(w0&1u)?1u-lane:lane];
+                int texels=(int16_t)(extent>>((1u-lane)*16u));
+                step[lane]=rsp_rs_billboard_step(dimension,texels,(uint16_t)(context[0]>>(lane*16)));
+                if(w0&(2u<<lane)){step[lane]=-step[lane];anchor[lane]=(uint16_t)texels;}
+                int clipped=lo[(w0&1u)?1u-lane:lane];
+                if(clipped>0)clipped=0;
+                anchor[lane]+=((int64_t)(-step[lane]*64)*clipped>>16)*8;
+                fraction|=(uint32_t)(uint16_t)((int64_t)(-step[lane]*64)*clipped)<<(lane*16);
+                anchor[lane]-=16;
+            }
+            rsp_tri_factor5_seed_fraction(fraction);
+            words[0]=0x2e000000;words[1]=(int32_t)(((uint32_t)(gsp->vtx[slot].scr_z>>11)&0xffffu)<<16);
+            rdp_fifo_append(fifo,words,2);
+            words[0]=0x3a000000;words[1]=(int32_t)w1;rdp_fifo_append(fifo,words,2);
+            if(s_rs_geom&0x10000u){
+                words[0]=0x38000000;
+                words[1]=(int32_t)((rs_read_u32(pc+8u)&0xffffff00u)|(gsp->vtx[slot].a>>16&255));
+                rdp_fifo_append(fifo,words,2);
+            }
+            for(lane=0;lane<2;lane++){if(lo[lane]<0)lo[lane]=0;if(hi[lane]<0)hi[lane]=0;}
+            if(hi[0]>lo[0]&&hi[1]>lo[1]){
+                words[0]=(int32_t)(((0x24u|(w0&1u))<<24)|((uint32_t)hi[0]<<12)|(uint32_t)hi[1]);
+                words[1]=(int32_t)(((gsp->tex_tile&7u)<<24)|((uint32_t)lo[0]<<12)|(uint32_t)lo[1]);
+                words[2]=(int32_t)(((uint32_t)(uint16_t)anchor[0]<<16)|(uint16_t)anchor[1]);
+                words[3]=(int32_t)(((uint32_t)(uint16_t)step[0]<<16)|(uint16_t)step[1]);
+                rdp_fifo_append(fifo,words,4);
             }
             break;
         }
@@ -745,6 +716,7 @@ void rs_run_dl(GSPState *gsp, RdpFifo *fifo, unsigned int dl_addr)
                     rs_stage_put8(dst + 15u, 0xffu);
                 }
                 gsp_vertex(gsp, s_rs_stage, 0u, 4, 0);
+                rsp_tri_factor5_seed_fraction((uint16_t)gsp->combined[0][0]|((uint32_t)(uint16_t)gsp->combined[0][1]<<16));
                 /* Corner texture coordinates: bytes +28..+31 of the
                  * command carry the cell's texel range as two record-
                  * domain shorts (low, high; 0000/07e0 on the attract
@@ -1122,6 +1094,7 @@ void rs_run_dl(GSPState *gsp, RdpFifo *fifo, unsigned int dl_addr)
                             idx++;
                         }
                     gsp_vertex(gsp, s_rs_stage, 0u, n * n, 0);
+                    rsp_tri_factor5_seed_fraction((uint16_t)gsp->combined[0][0]|((uint32_t)(uint16_t)gsp->combined[0][1]<<16));
                     for (xi = 0; xi < n; xi++)
                         for (zi = 0; zi < n; zi++)
                         {
@@ -1292,6 +1265,10 @@ void rs_run_dl(GSPState *gsp, RdpFifo *fifo, unsigned int dl_addr)
                                         | rs_read_u8(pc + 13u));
                 s_rs_fog_of = (int32_t)((rs_read_u8(pc + 14u) << 8)
                                         | rs_read_u8(pc + 15u));
+                /* The clipper reprojects generated records later in this
+                 * same slice and must see the newly written fog row. */
+                gsp->rs_fog_mi=s_rs_fog_mi;gsp->rs_fog_mf=s_rs_fog_mf;
+                gsp->rs_fog_oi=s_rs_fog_oi;gsp->rs_fog_of=s_rs_fog_of;
             }
             else if (param == 0x82u)
             {
@@ -1497,25 +1474,10 @@ void rs_run_dl(GSPState *gsp, RdpFifo *fifo, unsigned int dl_addr)
             }
             if (s_rs_streaming)
             {
-                /* Depth-0 end: with the CPU still extending the ring
-                 * this command is a provisional terminator, so suspend
-                 * here and re-read it next slice. It becomes the real
-                 * end once it survives a slice unchanged. */
-                if (s_rs_stream_active
-                    && pc == s_rs_stream_pc
-                    && ++s_rs_stream_stall >= 64)
-                {
-                    s_rs_stream_active = 0;
-                    return;
-                }
-                if (!(s_rs_stream_active && pc == s_rs_stream_pc))
-                    s_rs_stream_stall = 0;
-                s_rs_stream_pc = pc;
-                s_rs_stream_page = page;
-                s_rs_stream_sp = 0;
-                s_rs_stream_active = 1;
-                s_rs_stream_result = 1;
-                return;
+                /* Resident 2c4..2d0 branches straight to SET_SIG2/BREAK
+                 * when the call stack is empty. Only a missing page link
+                 * waits for the CPU; EndDL has no confirmation timeout. */
+                s_rs_stream_active = 0;
             }
             return;
 

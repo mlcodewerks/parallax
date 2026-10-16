@@ -293,6 +293,31 @@ static RspAcc p_udm(int32_t a, int32_t b) { return (RspAcc)((int64_t)S16(a) * (i
 static RspAcc p_udn(int32_t a, int32_t b) { return (RspAcc)((int64_t)U16(a) * (int64_t)S16(b)); }
 static RspAcc p_udh(int32_t a, int32_t b) { return ((RspAcc)((int64_t)S16(a) * (int64_t)S16(b))) << 16; }
 
+/* Rogue's billboard overlay projects each world-space half extent through
+ * the indexed vertex's reciprocal, viewport and projection diagonal. Keep
+ * the intermediate latches: the first product deliberately keeps its mid
+ * slice as the fraction input to perspective normalization. */
+int32_t rsp_rs_billboard_size(int32_t size,int32_t invw,int32_t norm,int32_t viewport,int32_t projection)
+{
+    RspAcc a=p_udm(size,invw);int32_t f=acc_clamp_mid(a),i;
+    a+=p_udh(size,(uint32_t)invw>>16);i=acc_clamp_mid(a);
+    a=p_udl(f,norm)+p_udm(i,norm);i=acc_clamp_mid(a);f=acc_clamp_low(a);
+    viewport=acc_clamp_mid(p_udm(viewport,0x8000));
+    a=p_udn(f,viewport);f=acc_clamp_low(a);
+    a+=p_udh(i,viewport);i=acc_clamp_mid(a);
+    a=p_udl(f,projection)+p_udm(i,projection);f=acc_clamp_mid(a);
+    a+=p_udn(f,(uint32_t)projection>>16);
+    a+=p_udh(i,(uint32_t)projection>>16);return S16(acc_clamp_mid(a));
+}
+int32_t rsp_rs_billboard_step(int32_t size,int32_t extent,uint16_t fraction)
+{
+    int32_t r=rsp_rcp16(size),i,f;RspAcc a;
+    a=p_udl(r,128)+p_udm((uint32_t)r>>16,128);i=acc_clamp_mid(a);f=acc_clamp_low(a);
+    a=p_udl(fraction,f)+p_udm(extent,f);fraction=(uint16_t)acc_clamp_mid(a);
+    a+=p_udn(fraction,i)+p_udh(extent,i);
+    return S16(acc_clamp_mid(a));
+}
+
 /* 32-bit (int:frac lane pair) helpers. */
 typedef struct { int32_t i, f; } Rsp32;
 
@@ -1745,7 +1770,7 @@ static Rsp32 addv32(Rsp32 a, Rsp32 b)
  * two latch points: N[lane] = in * P and D[lane] = in * P - out * P;
  * both fold to lane sums with the vaddc/vadd quarter/half adds. The
  * divide is a range reduction: a coarse doubled reciprocal of D
- * (negated when D >= 0, fraction saturated when the integer part is
+ * (negated when D < 0, fraction saturated when the integer part is
  * nonzero) normalizes D, the shared 0x179c routine forms the refined
  * doubled reciprocal of that product with one Newton step against the
  * DMEM 2.0 row, and t recombines N * refined * coarse over a small
@@ -1774,13 +1799,13 @@ void rsp_clip_weights_rs(const int32_t in4[4], const int32_t out4[4],
     N = addv32(addv32(n32[3], n32[2]), addv32(n32[1], n32[0]));
     D = addv32(addv32(d32[3], d32[2]), addv32(d32[1], d32[0]));
     dneg = (S16(D.i) < 0);
-    r0 = mk32(rsp_rcp32((int32_t)(((uint32_t)U16(D.i) << 16)
+    r0 = mk32(rsp_rcp32_dp((int32_t)(((uint32_t)U16(D.i) << 16)
                                   | (uint32_t)U16(D.f))));
     acc = p_udn(r0.f, 2);
     acc += p_udh(r0.i, 2);
     r0.i = acc_clamp_mid(acc);
     r0.f = acc_clamp_low(acc);
-    if (!dneg)
+    if (dneg)
     {
         acc = p_udn(r0.f, -1);
         acc += p_udh(r0.i, -1);
@@ -1794,7 +1819,7 @@ void rsp_clip_weights_rs(const int32_t in4[4], const int32_t out4[4],
     xp.i = acc_clamp_mid(acc);
     xp.f = acc_clamp_low(acc);
     /* shared 0x179c: refined doubled reciprocal of the normalized D */
-    rr = mk32(rsp_rcp32((int32_t)(((uint32_t)U16(xp.i) << 16)
+    rr = mk32(rsp_rcp32_dp((int32_t)(((uint32_t)U16(xp.i) << 16)
                                   | (uint32_t)U16(xp.f))));
     acc = p_udn(rr.f, 2);
     acc += p_udh(rr.i, 2);
@@ -2337,6 +2362,7 @@ void rsp_tri_set_d64_sort(int on)
  * the shared native register snapshot rather than this arithmetic scratch. */
 static uint32_t s_factor5_context[5];
 void rsp_tri_factor5_context(uint32_t values[5]){memcpy(values,s_factor5_context,sizeof(s_factor5_context));}
+void rsp_tri_factor5_seed_fraction(uint32_t value){s_factor5_context[0]=value;}
 int rsp_tri_write(int32_t *ew,
                   const RspTriVtx *v1c, const RspTriVtx *v2c,
                   const RspTriVtx *v3c,
@@ -3219,7 +3245,7 @@ int rsp_tri_write(int32_t *ew,
     pre_z_dAdX  = dAdX[7];
     pre_z_dAdE  = dAdE[7];
     pre_z_dAdY  = dAdY[7];
-    if(s_tri_attr_rs==2){
+    if(s_tri_attr_rs){
         Rsp32 y[8],edge[8];
         memcpy(y,dAdY,sizeof(y));memcpy(edge,dAdE,sizeof(edge));
         if(z_buffered)for(k=0;k<8;k++){
@@ -3235,9 +3261,9 @@ int rsp_tri_write(int32_t *ew,
         }
     }
 
-    if (textured && s_tri_attr_rs == 2)
+    if (textured && s_tri_attr_rs)
     {
-        /* The later Factor 5 writer normalizes the texture coefficient
+        /* Both Factor 5 writers normalize the texture coefficient
          * block as a whole, even without depth output. Its bound includes
          * absolute integer X/Y gradients and the largest vertex S/T/W
          * pair. Keep the intermediate low slices and the native 1.0 cap. */

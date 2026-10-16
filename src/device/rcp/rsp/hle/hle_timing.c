@@ -3,6 +3,9 @@
 #include <limits.h>
 
 static struct hle_timing_work work;
+static uint32_t slice_limit;
+void hle_timing_set_slice_limit(uint32_t cycles){slice_limit=cycles;}
+uint32_t hle_timing_slice_limit(void){return slice_limit;}
 
 void hle_timing_begin(void)
 {

@@ -28,6 +28,8 @@ void hle_timing_graphics_family(const char *family);
 void hle_timing_add(enum hle_work_kind kind, uint32_t units);
 void hle_timing_override(uint32_t cycles);
 uint32_t hle_timing_cycles(void);
+void hle_timing_set_slice_limit(uint32_t cycles);
+uint32_t hle_timing_slice_limit(void);
 struct hle_timing_work hle_timing_get(void);
 void hle_timing_restore(struct hle_timing_work saved);
 #ifdef __cplusplus

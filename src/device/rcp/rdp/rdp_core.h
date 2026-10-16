@@ -119,7 +119,7 @@ void init_rdp(struct rdp_core* dp,
 
 void poweron_rdp(struct rdp_core* dp);
 const uint32_t *rdp_hle_command_buffer(uint32_t address);
-void rdp_submit_hle(struct rdp_core *dp, const uint32_t *words, uint32_t base, uint32_t bytes);
+void rdp_submit_hle(struct rdp_core *dp, const uint32_t *words, uint32_t base, uint32_t bytes, uint32_t rsp_cycles);
 uint32_t rdp_dpc_clock_value(const struct rdp_core* dp, uint32_t count);
 void rdp_restore_dpc_clock(struct rdp_core* dp, uint32_t count);
 uint32_t rdp_sync_full_delay(const struct rdp_core* dp);

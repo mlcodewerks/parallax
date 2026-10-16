@@ -2528,8 +2528,10 @@ static int nb_tri_gate(unsigned int ra, unsigned int rb, unsigned int rc)
     int32_t d1x, d1y, d2x, d2y;
     int64_t cross;
 
-    if (oa & ob & oc & 0x7070u)
+    if (oa & ob & oc & 0x7070u) {
+        nb_dmem_w8(0x58au,0);
         return 1;                       /* trivial reject */
+    }
     if ((oa | ob | oc) & 0x4343u)
         return -1;                      /* clip overlay: fall back */
 
@@ -2549,8 +2551,10 @@ static int nb_tri_gate(unsigned int ra, unsigned int rb, unsigned int rc)
     if (d2y > 32767)  d2y = 32767;
     if (d2y < -32768) d2y = -32768;
     cross = (int64_t)d2x * d1y - (int64_t)d1x * d2y;
-    if (cross == 0)
+    if (cross == 0) {
+        nb_dmem_w8(0x58au,0);
         return 1;                       /* degenerate */
+    }
     if (cross < 0 && (nb.geom & 0x2000u))
         return 1;                       /* winding cull */
     return 0;
@@ -2576,8 +2580,8 @@ static int nb_emit_tri(RdpFifo *fifo, unsigned int ra, unsigned int rb,
     {
         static int t = -1;
         if (t < 0) t = getenv("NB_EMIT_TRACE") != NULL;
-        if (t) fprintf(stderr, "[EV] a=(%d,%d) b=(%d,%d) c=(%d,%d)\n",
-                       va.x, va.y, vb.x, vb.y, vc.x, vc.y);
+        if (t) fprintf(stderr, "[NE] geom=%x %03x:(%d,%d) %03x:(%d,%d) %03x:(%d,%d)\n",
+                       nb.geom,ra,va.x,va.y,rb,vb.x,vb.y,rc,vc.x,vc.y);
     }
 
     tilebyte = (int)nb.dmem[0x14au ^ 3u];
@@ -2620,6 +2624,9 @@ static int nb_emit_tri(RdpFifo *fifo, unsigned int ra, unsigned int rb,
         }
         rdp_fifo_append(fifo, ew, nw);
     }
+    /* Resident return 744/748 clears the batch rejection countdown.
+     * Winding-cull returns bypass this store and retain the countdown. */
+    nb_dmem_w8(0x58au,0);
     return 0;
 }
 
@@ -2921,7 +2928,7 @@ static int nb_attribute_callback(RdpFifo *fifo)
 static int nb_morph_draw(RdpFifo *fifo, const unsigned int records[3])
 {
     int gate=nb_tri_gate(records[0],records[1],records[2]);
-    if(gate>0){nb_dmem_w8(0x58au,0);return 0;}
+    if(gate>0)return 0;
     if(gate<0){
         int result;
         if(nb_clip(fifo,records[0],records[1],records[2])<0)return -1;
@@ -2934,7 +2941,6 @@ static int nb_morph_draw(RdpFifo *fifo, const unsigned int records[3])
     }
     if((nb_dmem_s16(0x152u)&0xfffu)!=0xcc8u && nb_call_splice(fifo)<0)return -1;
     gate=nb_emit_tri(fifo,records[0],records[1],records[2]);
-    nb_dmem_w8(0x58au,0);
     return gate;
 }
 
@@ -2969,13 +2975,21 @@ static int nb_morph_quad(RdpFifo *fifo)
     return 0;
 }
 
-static int nb_morph_tail(RdpFifo *fifo)
+static int nb_morph_tail_from(RdpFifo *fifo, int resume)
 {
-    unsigned int iterations=0;
+    unsigned int iterations=0,first=0;
+    if(resume){
+        /* BE supplies S/T for the quad at which a negative mask suspended
+         * the overlay. Its jump rejoins the draw calls, then continues the
+         * existing mask scan. DB2 identifies which bank was suspended. */
+        if(nb_morph_quad(fifo)<0)return -1;
+        first=(nb_dmem_r32(0xdb2u)&0x80000000u)?1u:2u;
+        nb_dmem_w16(0xdb2u,0);
+    }
     for(;;){
         unsigned int masks[2]={0xdacu,0xdaeu},bank;
-        nb_dmem_w16(0xdb2u,0xfff0u);
-        for(bank=0;bank<2;bank++){
+        if(first==0)nb_dmem_w16(0xdb2u,0xfff0u);
+        for(bank=first;bank<2;bank++){
             int value=nb_dmem_s16(masks[bank]);
             nb_dmem_w16(masks[bank],(unsigned int)value*2u);
             if(value&0x80){
@@ -2987,8 +3001,10 @@ static int nb_morph_tail(RdpFifo *fifo)
         nb_dmem_w8(0xda1u, (unsigned int)((signed char)nb.dmem[0xda1u^3u]+(signed char)nb.dmem[0xda5u^3u]));
         if(!(nb.dmem[0xdadu^3u]|nb.dmem[0xdafu^3u]))return 0;
         if(++iterations>16u)return -1;
+        first=0;
     }
 }
+static int nb_morph_tail(RdpFifo *fifo){return nb_morph_tail_from(fifo,0);}
 
 static int nb_ovl09(RdpFifo *fifo,unsigned int w0,unsigned int w1,int colored)
 {
@@ -3029,6 +3045,8 @@ static int nb_walk(RdpFifo *fifo, unsigned int stop_depth, int nested)
             nb.active = 0;
             return NABOO_R_FALLBACK;
         }
+        if(!nested && guard>1 && hle_timing_slice_limit() &&
+            hle_timing_cycles()>=hle_timing_slice_limit())return 1;
         unsigned int w0 = nb_read_u32(nb.dl);
         unsigned int w1 = nb_read_u32(nb.dl + 4);
         hle_timing_add(HLE_WORK_COMMAND, 1);
@@ -3092,7 +3110,7 @@ static int nb_walk(RdpFifo *fifo, unsigned int stop_depth, int nested)
             continue;
         case 0x15:                              /* overlay-12 per-triangle S/T */
             nb_pertri_st(w0, w1);
-            if(nb_morph_quad(fifo)<0)return NABOO_R_FALLBACK;
+            if(nb_morph_tail_from(fifo,1)<0)return NABOO_R_FALLBACK;
             nb_dl_step(8u);
             continue;
         case 0x05:                              /* load+run overlay */

@@ -1176,19 +1176,13 @@ int angrylion_rs_dlist(int resume)
 
     rs_set_rdram(rdram);
     rs_set_rdram_size(rdram_size);
-    rs_seed_fog_row(dmem);
+    if (!resume) rs_seed_fog_row(dmem);
     f3dex2_set_rdram(rdram);
     f3dex2_set_rdram_size(rdram_size);
     r = rs_run_dl_streaming(&s_gsp, &s_fifo, dl_addr, resume);
 
-    if (r == 0 && rdp_fifo_fullsync_seen())
-    {
-        int32_t sync[2];
-        sync[0] = (int32_t)0x29000000u;
-        sync[1] = 0;
-        rdp_fifo_append(&s_fifo, sync, 2);
-    }
-
+    /* Rogue forwards the original RDP FullSync in place. Task completion
+     * must not add a second DP fence. */
     /* submit everything generated in this slice */
     fifo_flush_to_rdp(&s_fifo);
 
