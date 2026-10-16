@@ -2,6 +2,7 @@
 #include <cstdio>
 #include <cstring>
 GLRDPPrecisionQuery glrdp_precision_query = nullptr;
+GLRDPTextureBarrier glrdp_texture_barrier = nullptr;
 decltype(glad_glActiveTexture) glad_glActiveTexture = nullptr;
 decltype(glad_glAttachShader) glad_glAttachShader = nullptr;
 decltype(glad_glBindAttribLocation) glad_glBindAttribLocation = nullptr;
@@ -156,6 +157,23 @@ bool load_gl33(retro_hw_get_proc_address_t resolver, bool gles2) {
     if (gles2 && !glrdp_precision_query)
         return false;
     if (!gles2) {
+        // Optional on GL3.3. A non-null procedure alone does not imply support.
+        glrdp_texture_barrier = nullptr;
+        auto get_string = reinterpret_cast<PFNGLGETSTRINGIPROC>(resolver("glGetStringi"));
+        GLint count = 0;
+        glGetIntegerv(GL_NUM_EXTENSIONS, &count);
+        for (GLint i = 0; get_string && i < count; ++i) {
+            const auto *extension = reinterpret_cast<const char *>(get_string(GL_EXTENSIONS, i));
+            const char *procedure =
+                !std::strcmp(extension, "GL_ARB_texture_barrier")  ? "glTextureBarrier"
+                : !std::strcmp(extension, "GL_NV_texture_barrier") ? "glTextureBarrierNV"
+                                                                   : nullptr;
+            if (procedure) {
+                glrdp_texture_barrier = reinterpret_cast<GLRDPTextureBarrier>(resolver(procedure));
+                if (glrdp_texture_barrier)
+                    break;
+            }
+        }
         LOAD(glBindSampler);
         LOAD(glBindVertexArray);
         LOAD(glBlendColor);
@@ -174,7 +192,8 @@ bool load_gl33(retro_hw_get_proc_address_t resolver, bool gles2) {
         LOAD(glReadBuffer);
         LOAD(glUniform1ui);
         LOAD(glUniform4i);
-    }
+    } else
+        glrdp_texture_barrier = nullptr;
     return true;
 }
 #undef LOAD

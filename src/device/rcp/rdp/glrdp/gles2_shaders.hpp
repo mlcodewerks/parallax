@@ -29,6 +29,7 @@ uniform sampler2D atlas_image, metadata, color_memory, depth_memory;
 uniform vec4 primitive, environment, fog, blend, key_center, key_scale, settings;
 uniform vec2 atlas_size;
 uniform float depth_pass;
+uniform vec4 accuracy_config;
 uniform vec4 edge_y, edge_x, edge_slope;
 varying P vec4 vQ, vQdx, vQdy;
 varying P vec4 vShade, vShadeDx, vShadeDy, vZ, vPixel;
@@ -315,10 +316,10 @@ void lod(vec3 q, float flags, out float first, out float second, out float fract
 float noise() {
     return floor(fract(sin(dot(floor(vPixel.xy), vec2(12.9898, 78.233))) * 4375.8545) * 255.0);
 }
-vec2 dither_values(vec2 modes) {
+vec2 dither_values(vec3 modes) {
     vec2 p = mod(floor(vPixel.xy), 4.0);
     vec4 row;
-    if (modes.x == 1.0 || modes.x == 3.0) {
+    if (modes.z == 1.0 || modes.z == 3.0) {
         row = p.y < 1.0   ? vec4(0, 4, 1, 5)
               : p.y < 2.0 ? vec4(4, 0, 5, 1)
               : p.y < 3.0 ? vec4(3, 7, 2, 6)
@@ -417,13 +418,20 @@ vec4 combine(float cycle, vec4 c, vec4 t0, vec4 t1, vec4 shade, float fraction) 
             f = vec3(settings.y);
         if (m.z == 15.0)
             f = vec3(number(116.0));
-        f = mod(f + 256.0, 512.0) - 256.0;
-        colour = (a - b) * (f / 256.0) + d;
+        if (accuracy_config.z > 0.5)
+            colour = (a - b) * (f / 255.0) + d;
+        else {
+            f = mod(f + 256.0, 512.0) - 256.0;
+            colour = (a - b) * (f / 256.0) + d;
+        }
     }
     float aa = alpha(n.x, c, t0, t1, shade), ab = alpha(n.y, c, t0, t1, shade),
           ad = alpha(n.w, c, t0, t1, shade);
     float ac = n.z == 0.0 ? fraction : (n.z == 6.0 ? settings.y : alpha(n.z, c, t0, t1, shade));
-    ac = mod(ac + 256.0, 512.0) - 256.0;
+    if (accuracy_config.z < 0.5)
+        ac = mod(ac + 256.0, 512.0) - 256.0;
+    if (accuracy_config.z > 0.5)
+        return clamp(floor(vec4(colour, (aa - ab) * ac / 255.0 + ad) + 0.5), 0.0, 255.0);
     vec4 value = mod(floor(vec4(colour, (aa - ab) * (ac / 256.0) + ad) + 0.5), 512.0);
     return min(value, 255.0) * (1.0 - step(vec4(384.0), value));
 }
@@ -471,6 +479,8 @@ vec4 blend_cycle(float cycle, vec4 p, vec4 m, vec4 shade, bool force, bool final
     float divisor =
         force || !final_cycle ? 32.0 : max(floor(a / 4.0) * 4.0 + floor(b / 4.0) * 4.0 + 4.0, 1.0);
     vec3 numerator = x * a + y * (b + 1.0);
+    if (accuracy_config.y > 0.5)
+        return vec4(clamp(floor(numerator / divisor), 0.0, 255.0), p.a);
 #if PRECISE_Z
     vec3 rgb = force || !final_cycle ? mod(floor(numerator / 32.0), 256.0)
                                      : vec3(blender_divide(numerator.r, divisor),
@@ -481,7 +491,7 @@ vec4 blend_cycle(float cycle, vec4 p, vec4 m, vec4 shade, bool force, bool final
 #endif
     return vec4(rgb, p.a);
 }
-#if GLRDP_FAST_COVERAGE
+
 vec2 fast_triangle_span(float y) {
     float major = edge_x.x + edge_slope.x * (y - floor(edge_y.x / 4.0) * 4.0);
     float minor = y < edge_y.y ? edge_x.y + edge_slope.y * (y - floor(edge_y.x / 4.0) * 4.0)
@@ -516,91 +526,92 @@ bool fast_triangle_pixel(vec2 pixel, bool first_sample_only) {
     }
     return width < 1.0 && right > left && pixel.x < right && pixel.x + 1.0 > left;
 }
-#endif
+
 float coverage(out vec2 offset, out bool coverage_bit, bool aa) {
     vec2 pixel = floor(vPixel.xy);
-#if GLRDP_FAST_COVERAGE
-    coverage_bit = true;
-    offset = pixel - vPixel.xy;
-    return fast_triangle_pixel(pixel, !aa && RDP_CYCLE < 2.0) ? 8.0 : 0.0;
-#else
-    float count = 0.0;
-    bool found = false;
-    coverage_bit = false;
-    float yh = edge_y.x, ym = edge_y.y, yl = edge_y.z, major_side = edge_y.w;
-    float xh = edge_x.x, xm = edge_x.y, xl = edge_x.z, dh = edge_slope.x, dm = edge_slope.y,
-          dl = edge_slope.z;
-    for (int row = 0; row < 4; ++row) {
-        float y = pixel.y * 4.0 + float(row);
-        if (y >= yh && y < yl) {
-            float major = xh + dh * (y - floor(yh / 4.0) * 4.0);
-            float minor = y < ym ? xm + dm * (y - floor(yh / 4.0) * 4.0) : xl + dl * (y - ym);
-            float left = major_side > 0.0 ? major : minor, right = major_side > 0.0 ? minor : major;
-            for (int col = 0; col < 2; ++col) {
-#if GLRDP_REDUCED_COVERAGE
-                if (col != ((row == 1 || row == 2) ? 1 : 0))
-                    continue;
-#endif
-                float quarter = mod(float(row), 2.0) + float(col) * 2.0,
-                      x = pixel.x + quarter * 0.25;
-                if (x >= left && x < right) {
-#if GLRDP_REDUCED_COVERAGE
-                    count += 2.0;
-#else
-                    count += 1.0;
-#endif
-                    if (row == 0 && col == 0)
-                        coverage_bit = true;
-                    if (!found) {
-                        offset = pixel + vec2(quarter, float(row)) * 0.25 - vPixel.xy;
-                        found = true;
+    if (accuracy_config.x == 0.0) {
+        coverage_bit = true;
+        offset = pixel - vPixel.xy;
+        return fast_triangle_pixel(pixel, !aa && data(6.0).x < 2.0) ? 8.0 : 0.0;
+    } else {
+        float count = 0.0;
+        bool found = false;
+        coverage_bit = false;
+        float yh = edge_y.x, ym = edge_y.y, yl = edge_y.z, major_side = edge_y.w;
+        float xh = edge_x.x, xm = edge_x.y, xl = edge_x.z, dh = edge_slope.x, dm = edge_slope.y,
+              dl = edge_slope.z;
+        for (int row = 0; row < 4; ++row) {
+            float y = pixel.y * 4.0 + float(row);
+            if (y >= yh && y < yl) {
+                float major = xh + dh * (y - floor(yh / 4.0) * 4.0);
+                float minor = y < ym ? xm + dm * (y - floor(yh / 4.0) * 4.0) : xl + dl * (y - ym);
+                float left = major_side > 0.0 ? major : minor,
+                      right = major_side > 0.0 ? minor : major;
+                for (int col = 0; col < 2; ++col) {
+                    if (accuracy_config.x == 1.0) {
+                        if (col != ((row == 1 || row == 2) ? 1 : 0))
+                            continue;
+                    }
+                    float quarter = mod(float(row), 2.0) + float(col) * 2.0,
+                          x = pixel.x + quarter * 0.25;
+                    if (x >= left && x < right) {
+                        if (accuracy_config.x == 1.0) {
+                            count += 2.0;
+                        } else {
+                            count += 1.0;
+                        }
+                        if (row == 0 && col == 0)
+                            coverage_bit = true;
+                        if (!found) {
+                            offset = pixel + vec2(quarter, float(row)) * 0.25 - vPixel.xy;
+                            found = true;
+                        }
                     }
                 }
             }
         }
+        return count;
     }
-    return count;
-#endif
 }
 float rectangle_coverage(out vec2 offset, out bool coverage_bit, bool aa) {
     vec2 pixel = floor(vPixel.xy);
     vec4 bounds = vec4(number(86.0), number(87.0), number(88.0), number(89.0));
-#if GLRDP_FAST_COVERAGE
-    bool inside =
-        aa ? pixel.x < bounds.z && pixel.x + 1.0 > bounds.x && pixel.y < bounds.w &&
-                 pixel.y + 1.0 > bounds.y
-           : pixel.x >= bounds.x && pixel.x < bounds.z && pixel.y >= bounds.y && pixel.y < bounds.w;
-    coverage_bit = true;
-    offset = pixel - vPixel.xy;
-    return inside ? 8.0 : 0.0;
-#else
-    float count = 0.0;
-    bool found = false;
-    coverage_bit = false;
-    for (int row = 0; row < 4; ++row)
-        for (int col = 0; col < 2; ++col) {
-#if GLRDP_REDUCED_COVERAGE
-            if (col != ((row == 1 || row == 2) ? 1 : 0))
-                continue;
-#endif
-            float quarter = mod(float(row), 2.0) + float(col) * 2.0;
-            vec2 p = pixel + vec2(quarter, float(row)) * 0.25;
-            if (p.x >= bounds.x && p.x < bounds.z && p.y >= bounds.y && p.y < bounds.w) {
-#if GLRDP_REDUCED_COVERAGE
-                count += 2.0;
-#else
-                count += 1.0;
-#endif
-                if (row == 0 && col == 0)
-                    coverage_bit = true;
-                if (!found) {
-                    offset = p - vPixel.xy;
-                    found = true;
+    if (accuracy_config.x == 0.0) {
+        bool inside = aa ? pixel.x < bounds.z && pixel.x + 1.0 > bounds.x && pixel.y < bounds.w &&
+                               pixel.y + 1.0 > bounds.y
+                         : pixel.x >= bounds.x && pixel.x < bounds.z && pixel.y >= bounds.y &&
+                               pixel.y < bounds.w;
+        coverage_bit = true;
+        offset = pixel - vPixel.xy;
+        return inside ? 8.0 : 0.0;
+    } else {
+        float count = 0.0;
+        bool found = false;
+        coverage_bit = false;
+        for (int row = 0; row < 4; ++row)
+            for (int col = 0; col < 2; ++col) {
+                if (accuracy_config.x == 1.0) {
+                    if (col != ((row == 1 || row == 2) ? 1 : 0))
+                        continue;
+                }
+                float quarter = mod(float(row), 2.0) + float(col) * 2.0;
+                vec2 p = pixel + vec2(quarter, float(row)) * 0.25;
+                if (p.x >= bounds.x && p.x < bounds.z && p.y >= bounds.y && p.y < bounds.w) {
+                    if (accuracy_config.x == 1.0) {
+                        count += 2.0;
+                    } else {
+                        count += 1.0;
+                    }
+                    if (row == 0 && col == 0)
+                        coverage_bit = true;
+                    if (!found) {
+                        offset = p - vPixel.xy;
+                        found = true;
+                    }
                 }
             }
-        }
-    return count;
-#endif
+        return count;
+    }
 }
 float unpack_z(vec4 b) {
     if (b.a >= 128.0) {
@@ -684,46 +695,48 @@ float alpha_coverage_at(vec2 pixel, out vec2 first) {
     bool triangle = flag(data(7.0).y, 2.0);
     vec4 bounds =
         triangle ? vec4(0.0) : vec4(number(86.0), number(87.0), number(88.0), number(89.0));
-#if GLRDP_FAST_COVERAGE
-    if (triangle)
-        return fast_triangle_pixel(pixel, false) ? 8.0 : 0.0;
-    return pixel.x < bounds.z && pixel.x + 1.0 > bounds.x && pixel.y < bounds.w &&
-                   pixel.y + 1.0 > bounds.y
-               ? 8.0
-               : 0.0;
-#else
-    for (int row = 0; row < 4; ++row)
-        for (int col = 0; col < 2; ++col) {
-#if GLRDP_REDUCED_COVERAGE
-            if (col != ((row == 1 || row == 2) ? 1 : 0))
-                continue;
-#endif
-            float quarter = mod(float(row), 2.0) + float(col) * 2.0, y = pixel.y * 4.0 + float(row);
-            bool inside;
-            if (triangle) {
-                float major = edge_x.x + edge_slope.x * (y - floor(edge_y.x / 4.0) * 4.0);
-                float minor = y < edge_y.y
-                                  ? edge_x.y + edge_slope.y * (y - floor(edge_y.x / 4.0) * 4.0)
-                                  : edge_x.z + edge_slope.z * (y - edge_y.y);
-                float left = edge_y.w > 0.5 ? major : minor, right = edge_y.w > 0.5 ? minor : major;
-                float x = pixel.x + quarter * 0.25;
-                inside = y >= edge_y.x && y < edge_y.z && x >= left && x < right;
-            } else {
-                vec2 p = pixel + vec2(quarter, float(row)) * 0.25;
-                inside = p.x >= bounds.x && p.x < bounds.z && p.y >= bounds.y && p.y < bounds.w;
+    if (accuracy_config.x == 0.0) {
+        if (triangle)
+            return fast_triangle_pixel(pixel, false) ? 8.0 : 0.0;
+        return pixel.x < bounds.z && pixel.x + 1.0 > bounds.x && pixel.y < bounds.w &&
+                       pixel.y + 1.0 > bounds.y
+                   ? 8.0
+                   : 0.0;
+    } else {
+        for (int row = 0; row < 4; ++row)
+            for (int col = 0; col < 2; ++col) {
+                if (accuracy_config.x == 1.0) {
+                    if (col != ((row == 1 || row == 2) ? 1 : 0))
+                        continue;
+                }
+                float quarter = mod(float(row), 2.0) + float(col) * 2.0,
+                      y = pixel.y * 4.0 + float(row);
+                bool inside;
+                if (triangle) {
+                    float major = edge_x.x + edge_slope.x * (y - floor(edge_y.x / 4.0) * 4.0);
+                    float minor = y < edge_y.y
+                                      ? edge_x.y + edge_slope.y * (y - floor(edge_y.x / 4.0) * 4.0)
+                                      : edge_x.z + edge_slope.z * (y - edge_y.y);
+                    float left = edge_y.w > 0.5 ? major : minor,
+                          right = edge_y.w > 0.5 ? minor : major;
+                    float x = pixel.x + quarter * 0.25;
+                    inside = y >= edge_y.x && y < edge_y.z && x >= left && x < right;
+                } else {
+                    vec2 p = pixel + vec2(quarter, float(row)) * 0.25;
+                    inside = p.x >= bounds.x && p.x < bounds.z && p.y >= bounds.y && p.y < bounds.w;
+                }
+                if (inside) {
+                    if (count == 0.0)
+                        first = vec2(quarter, float(row));
+                    if (accuracy_config.x == 1.0) {
+                        count += 2.0;
+                    } else {
+                        count += 1.0;
+                    }
+                }
             }
-            if (inside) {
-                if (count == 0.0)
-                    first = vec2(quarter, float(row));
-#if GLRDP_REDUCED_COVERAGE
-                count += 2.0;
-#else
-                count += 1.0;
-#endif
-            }
-        }
-    return count;
-#endif
+        return count;
+    }
 }
 // With alpha supplied directly by geometric coverage, alpha compare and key
 // disabled, Z survival has no texture/shade/combiner dependency. Keep the
@@ -830,7 +843,7 @@ void depth_only(vec4 mode, vec4 features, vec4 extra, float cycle, float cvg, fl
 }
 void main() {
     vec4 mode = data(6.0), features = data(7.0), extra = data(8.0);
-    const float cycle = RDP_CYCLE;
+    float cycle = mode.x;
     float cvg = 8.0;
     vec2 offset = vec2(0.0);
     bool coverage_bit = true;
@@ -843,13 +856,11 @@ void main() {
         discard;
     if (cycle < 2.0 && !flag(features.z, 2.0) && !coverage_bit)
         discard;
-#if GLRDP_FAST_COVERAGE
-    cvg = 8.0;
-    geometric_cvg = 8.0;
-    const bool fast_coverage = true;
-#else
-    const bool fast_coverage = false;
-#endif
+    bool fast_coverage = accuracy_config.x == 0.0;
+    if (fast_coverage) {
+        cvg = 8.0;
+        geometric_cvg = 8.0;
+    }
     if (depth_pass > 0.5 && cycle < 2.0 && (fast_coverage || flag(features.z, 16.0)) &&
         !flag(features.z, 8.0) && mode.z == 0.0 && !flag(features.x, 8.0)) {
         depth_only(mode, features, extra, cycle, cvg, geometric_cvg, offset);
@@ -881,14 +892,15 @@ void main() {
         if (cycle == 2.0)
             q -= dx * copy_lane;
     }
-    float first = 0.0, second = 1.0, fraction = settings.y;
+    float first = 0.0, second = 1.0, fraction = flag(features.x, 64.0) ? 0.0 : settings.y;
     if (cycle < 2.0 && flag(features.y, 1.0) && (flag(features.x, 1.0) || flag(features.x, 32.0)))
         lod(q, features.x, first, second, fraction);
     vec4 t0 = vec4(255.0), t1 = vec4(255.0), p;
     float compare_alpha = -1.0, compare_coverage = 0.0;
     vec2 coordinates = divide(q);
 #if PRECISE_Z
-    if (flag(features.y, 1.0) && flag(features.y, 2.0) && vPixel.z == 1.0)
+    if (accuracy_config.w > 0.5 && flag(features.y, 1.0) && flag(features.y, 2.0) &&
+        vPixel.z == 1.0)
         coordinates = tc_coordinates(floor(vPixel.xy), flag(data(121.0).w, 2.0));
 #endif
     if (flag(features.y, 1.0)) {
@@ -917,7 +929,8 @@ void main() {
             vec3 nq = q + vQdx.xyz * direction;
             vec2 nc = divide(nq);
 #if PRECISE_Z
-            if (flag(features.y, 1.0) && flag(features.y, 2.0) && vPixel.z == 1.0)
+            if (accuracy_config.w > 0.5 && flag(features.y, 1.0) && flag(features.y, 2.0) &&
+                vPixel.z == 1.0)
                 nc = tc_coordinates(floor(vPixel.xy) + vec2(direction, 0.0),
                                     flag(data(121.0).w, 2.0));
 #endif
@@ -950,7 +963,8 @@ void main() {
         if (flag(features.z, 16.0))
             p.a = min(flag(features.z, 8.0) ? product : cvg * 32.0, 255.0);
     }
-    vec2 dither_modes = data(122.0).xy, dith = dither_values(dither_modes);
+    vec3 dither_modes = data(122.0).xyz;
+    vec2 dith = dither_values(dither_modes);
     if (compare_alpha >= 0.0) {
         float a = compare_alpha == 255.0 ? 256.0 : compare_alpha;
         if (!flag(features.z, 16.0))

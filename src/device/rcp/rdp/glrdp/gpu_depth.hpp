@@ -21,6 +21,7 @@ class GPUDepthBuffer {
         int changed_x = 0, changed_y = 0, changed_w = 0, changed_h = 0;
         bool initialized = false;
         bool gpu_dirty = false;
+        bool in_place = false;
         std::vector<std::uint32_t> visible_state;
         std::vector<std::uint16_t> visible_words;
     };
@@ -37,7 +38,7 @@ class GPUDepthBuffer {
     bool has_pending_read(std::uint32_t address) const;
     bool flush_range(std::uint32_t address, std::uint32_t size, N64Memory &memory);
 
-    bool begin_pass(Surface &surface, int x, int y, int width, int height);
+    bool begin_pass(Surface &surface, int x, int y, int width, int height, bool in_place = false);
     void finish_pass(Surface &surface, bool writes_z = true);
 
     GLuint source_state_texture(const Surface &surface) const;

@@ -19,6 +19,7 @@ benchmarks/.optimization-baseline/
 benchmarks/*.exe
 benchmarks/*.log
 benchmarks/__pycache__/
+benchmarks/results/glrdp-hle-performance/
 
 # User-ROM audit listings, captures and local emulator saves.
 benchmarks/zboss-audit/*

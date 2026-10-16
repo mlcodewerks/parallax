@@ -238,10 +238,30 @@ const GPUDepthBuffer::Surface *GPUDepthBuffer::find(std::uint32_t address) const
     return it == surfaces_.end() ? nullptr : &it->second;
 }
 
-bool GPUDepthBuffer::begin_pass(Surface &surface, int x, int y, int width, int height) {
+bool GPUDepthBuffer::begin_pass(Surface &surface, int x, int y, int width, int height,
+                                bool in_place) {
     if (!surface.initialized || !surface.fbo[0] || !surface.fbo[1])
         return false;
     const int src = surface.active;
+    surface.in_place = in_place && glrdp_texture_barrier;
+    if (surface.in_place) {
+        glrdp_texture_barrier();
+        glBindFramebuffer(GL_FRAMEBUFFER, surface.fbo[src]);
+        // The inactive image can lag behind several in-place draws. Keep their
+        // union so a later upscaled/separate pass restores the ping-pong invariant.
+        const int x0 = surface.changed_w ? std::min(x, surface.changed_x) : x;
+        const int y0 = surface.changed_h ? std::min(y, surface.changed_y) : y;
+        const int x1 = std::max(x + width, surface.changed_x + surface.changed_w);
+        const int y1 = std::max(y + height, surface.changed_y + surface.changed_h);
+        surface.changed_x = x0;
+        surface.changed_y = y0;
+        surface.changed_w = x1 - x0;
+        surface.changed_h = y1 - y0;
+        const GLenum shader_buffers[4] = {GL_NONE, GL_NONE, GL_COLOR_ATTACHMENT0,
+                                          GL_COLOR_ATTACHMENT1};
+        glDrawBuffers(4, shader_buffers);
+        return true;
+    }
     const int dst = src ^ 1;
 
     glDisable(GL_SCISSOR_TEST);
@@ -274,7 +294,8 @@ bool GPUDepthBuffer::begin_pass(Surface &surface, int x, int y, int width, int h
 }
 
 void GPUDepthBuffer::finish_pass(Surface &surface, bool writes_z) {
-    surface.active ^= 1;
+    if (!surface.in_place)
+        surface.active ^= 1;
     // Acceptance/coverage can change during a compare-only pass, but those
     // changes are not CPU-visible Z/DZ writes and need no RDRAM readback.
     surface.gpu_dirty |= writes_z;

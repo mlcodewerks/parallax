@@ -17,11 +17,6 @@ std::int64_t floor_div(std::int64_t n, std::int64_t d) {
 std::int64_t edge(std::int32_t x, std::int32_t dx, std::int32_t y, std::int32_t y0) {
     return std::int64_t(x) + floor_div(std::int64_t(dx) * (std::int64_t(y) - y0), 4);
 }
-std::int64_t attr(std::int32_t v, std::int32_t dx, std::int32_t dy, std::int64_t x, std::int32_t y,
-                  std::int32_t bx, std::int32_t by) {
-    return std::int64_t(v) + floor_div(std::int64_t(dx) * (x - bx), 1ll << 16) +
-           floor_div(std::int64_t(dy) * (std::int64_t(y) - by), 4);
-}
 GLuint compile(GLenum type, const char *src) {
     GLuint s = glCreateShader(type);
     glShaderSource(s, 1, &src, nullptr);
@@ -45,28 +40,6 @@ GLuint link(const char *vs, const char *fs) {
     glAttachShader(p, f);
     glLinkProgram(p);
     glDeleteShader(v);
-    glDeleteShader(f);
-    GLint ok = 0;
-    glGetProgramiv(p, GL_LINK_STATUS, &ok);
-    if (!ok) {
-        GLint n = 0;
-        glGetProgramiv(p, GL_INFO_LOG_LENGTH, &n);
-        std::string log(std::max(n, 1), '\0');
-        glGetProgramInfoLog(p, n, nullptr, log.data());
-        glDeleteProgram(p);
-        throw std::runtime_error(log);
-    }
-    return p;
-}
-GLuint link_geometry(const char *vs, const char *gs, const char *fs) {
-    GLuint v = compile(GL_VERTEX_SHADER, vs), g = compile(GL_GEOMETRY_SHADER, gs),
-           f = compile(GL_FRAGMENT_SHADER, fs), p = glCreateProgram();
-    glAttachShader(p, v);
-    glAttachShader(p, g);
-    glAttachShader(p, f);
-    glLinkProgram(p);
-    glDeleteShader(v);
-    glDeleteShader(g);
     glDeleteShader(f);
     GLint ok = 0;
     glGetProgramiv(p, GL_LINK_STATUS, &ok);
@@ -176,135 +149,6 @@ void main() {
     shade = color;
 }
 )";
-    const char *triangle_vs = R"(#version 330 core
-layout(location = 0) in vec3 p;
-layout(location = 1) in vec2 uv;
-layout(location = 3) in float inverse_w;
-layout(location = 2) in vec4 color;
-uniform vec2 viewport;
-out VS_TRI {
-    vec2 pixel;
-    vec3 uv;
-    vec4 shade;
-    float depth;
-}
-v;
-void main() {
-    vec2 q = vec2(p.x / viewport.x * 2.0 - 1.0, 1.0 - p.y / viewport.y * 2.0);
-    gl_Position = vec4(q, p.z, 1.0);
-    v.pixel = p.xy;
-    v.uv = vec3(uv * inverse_w, inverse_w);
-    v.shade = color;
-    v.depth = p.z;
-}
-)";
-    const char *triangle_gs = R"(#version 330 core
-layout(triangles) in;
-layout(triangle_strip, max_vertices = 4) out;
-in VS_TRI {
-    vec2 pixel;
-    vec3 uv;
-    vec4 shade;
-    float depth;
-}
-v[];
-out vec3 fuvq;
-out vec4 shade;
-uniform vec2 viewport;
-
-float cross2(vec2 a, vec2 b) {
-    return a.x * b.y - a.y * b.x;
-}
-
-vec3 barycentric(vec2 p, vec2 a, vec2 b, vec2 c) {
-    float d = cross2(b - a, c - a);
-    if (abs(d) < 1e-8)
-        return vec3(1.0, 0.0, 0.0);
-    float wb = cross2(p - a, c - a) / d;
-    float wc = cross2(b - a, p - a) / d;
-    return vec3(1.0 - wb - wc, wb, wc);
-}
-
-void emit_snapped(vec2 p, vec2 original0, vec2 original1, vec2 original2) {
-    // Interpolate the original attribute plane over the conservative box.
-    // The fragment coverage mask owns the actual RDP edge tests.
-    vec3 w = barycentric(p, original0, original1, original2);
-    fuvq = v[0].uv * w.x + v[1].uv * w.y + v[2].uv * w.z;
-    shade = v[0].shade * w.x + v[1].shade * w.y + v[2].shade * w.z;
-    float z = v[0].depth * w.x + v[1].depth * w.y + v[2].depth * w.z;
-    vec2 q = vec2(p.x / viewport.x * 2.0 - 1.0, 1.0 - p.y / viewport.y * 2.0);
-    // RDP Z is evaluated in the fragment shader. GL clipping must preserve
-    // the conservative box even when its extrapolated Z leaves the GL range.
-    gl_Position = vec4(q, 0.0, 1.0);
-    EmitVertex();
-}
-
-void main() {
-    vec2 o0 = v[0].pixel, o1 = v[1].pixel, o2 = v[2].pixel;
-    if (abs(cross2(o1 - o0, o2 - o0)) < 1e-8)
-        return;
-    // Rasterize a conservative pixel box. The fragment shader evaluates the
-    // console's eight coverage positions rather than the driver's MSAA grid.
-    // Snapping vertices first can erase a narrow polygon that still covers
-    // an RDP sample, or shrink a box past a covered pixel on a shared edge.
-    vec2 lo = max(floor(min(o0, min(o1, o2))), vec2(0.0));
-    vec2 hi = min(ceil(max(o0, max(o1, o2))), viewport);
-    emit_snapped(lo, o0, o1, o2);
-    emit_snapped(vec2(hi.x, lo.y), o0, o1, o2);
-    emit_snapped(vec2(lo.x, hi.y), o0, o1, o2);
-    emit_snapped(hi, o0, o1, o2);
-    EndPrimitive();
-}
-)";
-    const char *rectangle_vs = R"(#version 330 core
-layout(location = 0) in vec3 p;
-layout(location = 1) in vec2 uv;
-layout(location = 3) in float inverse_w;
-layout(location = 2) in vec4 color;
-uniform vec2 viewport;
-out VS_RECT {
-    vec3 uv;
-    vec4 shade;
-}
-v;
-void main() {
-    vec2 q = vec2(p.x / viewport.x * 2.0 - 1.0, 1.0 - p.y / viewport.y * 2.0);
-    gl_Position = vec4(q, p.z, 1.0);
-    v.uv = vec3(uv * inverse_w, inverse_w);
-    v.shade = color;
-}
-)";
-    const char *rectangle_gs = R"(#version 330 core
-layout(lines_adjacency) in;
-layout(triangle_strip, max_vertices = 4) out;
-uniform vec2 viewport;
-uniform vec4 rectangle_bounds;
-in VS_RECT {
-    vec3 uv;
-    vec4 shade;
-}
-v[];
-out vec3 fuvq;
-out vec4 shade;
-void emit_corner(int i) {
-    vec2 p = vec2(i == 0 || i == 3 ? floor(rectangle_bounds.x) : ceil(rectangle_bounds.z),
-                  i < 2 ? floor(rectangle_bounds.y) : ceil(rectangle_bounds.w));
-    gl_Position = vec4(p.x / viewport.x * 2.0 - 1.0, 1.0 - p.y / viewport.y * 2.0,
-                       gl_in[i].gl_Position.z, 1.0);
-    fuvq = v[i].uv;
-    shade = v[i].shade;
-    EmitVertex();
-}
-void main() {
-    // Input order is top-left, top-right, bottom-right, bottom-left.
-    // Emit one strip with no internal diagonal ownership ambiguity.
-    emit_corner(0);
-    emit_corner(1);
-    emit_corner(3);
-    emit_corner(2);
-    EndPrimitive();
-}
-)";
     const char *fs = R"(#version 330 core
 in vec3 fuvq;
 vec2 fuv;
@@ -368,6 +212,9 @@ uniform vec2 triangle_origin;
 vec2 raster_offset = vec2(0.0);
 float primitive_coverage = 1.0;
 uniform int cycle_type;
+uniform int coverage_mode;
+uniform bool fast_blending, fast_combiner;
+uniform bool accurate_texcoords;
 uniform float copy_start_x;
 float copy_lane = 0.0;
 uniform int alpha_compare_mode;
@@ -748,6 +595,17 @@ ivec4 combine_cycle_fixed(ivec4 rgb_mux, ivec4 alpha_mux, ivec4 combined, ivec4 
                           primitive_lod8);
     ivec3 d = rgb_d_fixed(rgb_mux.w, combined, t0, t1, primitive, shade8, environment);
 
+    if (fast_combiner) {
+        // Normalized eight-bit factors and saturating arithmetic, both cycles retained.
+        ivec3 rgb = ivec3(clamp(floor(vec3(a - b) * vec3(c) / 255.0 + vec3(d) + 0.5), 0.0, 255.0));
+        int aa = alpha_abd_fixed(alpha_mux.x, combined, t0, t1, primitive, shade8, environment);
+        int ab = alpha_abd_fixed(alpha_mux.y, combined, t0, t1, primitive, shade8, environment);
+        int ac = alpha_c_fixed(alpha_mux.z, combined, t0, t1, primitive, shade8, environment, lod8,
+                               primitive_lod8);
+        int ad = alpha_abd_fixed(alpha_mux.w, combined, t0, t1, primitive, shade8, environment);
+        return ivec4(rgb, int(clamp(floor(float(aa - ab) * float(ac) / 255.0 + float(ad) + 0.5),
+                                    0.0, 255.0)));
+    }
     // C is signed 9-bit: sharpening sets its high bit to extrapolate.
     c = ((c & ivec3(511)) ^ ivec3(256)) - ivec3(256);
     // Signed 9-bit A-B. The +128 implements the
@@ -801,6 +659,7 @@ int blender_alpha_b_fixed(int mux, int a, ivec4 memory) {
 
 uint dz_compress_gpu(uint value);
 uint normalize_dzpix_gpu(uint sum);
+uint framebuffer_depth;
 
 int blender_divide_gpu(int numerator, int divisor) {
     // The RDP divider is a restoring eight-step circuit, not integer division.
@@ -832,7 +691,7 @@ ivec4 blend_cycle_fixed(ivec4 mux, ivec4 pixel, ivec4 memory, ivec4 blend8, ivec
         int incoming_exp = int(dz_compress_gpu(dz)), stored_exp = 15;
         if (z_compare_enable && (depth_acceptance_enable || combined_depth_color)) {
             ivec2 pixel = ivec2(floor(gl_FragCoord.xy / max(internalScale, 1.0)));
-            stored_exp = int((texelFetch(depth_state_texture, pixel, 0).r >> 18u) & 15u);
+            stored_exp = int((framebuffer_depth >> 18u) & 15u);
         }
         a = (a >> clamp(incoming_exp - stored_exp, 0, 4)) & 60;
         b = (b >> clamp(stored_exp - incoming_exp, 0, 4)) | 3;
@@ -847,6 +706,8 @@ ivec4 blend_cycle_fixed(ivec4 mux, ivec4 pixel, ivec4 memory, ivec4 blend8, ivec
     int divisor = force_blend || !final_cycle ? 32 : max((a & ~3) + (b & ~3) + 4, 1);
     ivec3 numerator = p * a + m * (b + 1);
 
+    if (fast_blending)
+        return ivec4(ivec3(clamp(floor(vec3(numerator) / float(divisor)), 0.0, 255.0)), pixel.a);
     ivec3 rgb = force_blend || !final_cycle ? (numerator >> 5) & ivec3(255)
                                             : ivec3(blender_divide_gpu(numerator.r, divisor),
                                                     blender_divide_gpu(numerator.g, divisor),
@@ -860,7 +721,7 @@ ivec2 dither_values() {
     ivec2 pixel = ivec2(floor(gl_FragCoord.xy / max(internalScale, 1.0)));
     pixel.y = int(viewport.y) - 1 - pixel.y;
     int index = ((pixel.y & 3) << 2) | (pixel.x & 3);
-    int matrix = dither_modes.x == 1 || dither_modes.x == 3 ? bayer[index] : magic[index];
+    int matrix = dither_modes.z == 1 || dither_modes.z == 3 ? bayer[index] : magic[index];
     int rgb = dither_modes.x == 2 ? int(noise_byte()) : dither_modes.x == 3 ? 7 : matrix;
     int alpha = dither_modes.y == 3   ? 0
                 : dither_modes.y == 2 ? int(noise_byte() & 7u)
@@ -1020,7 +881,7 @@ uint update_coverage_gpu(uint stored, uint incoming, int destination, bool farth
 int stepped_edge(int x, int slope, int steps) {
     return int(uint(x & ~1) + uint((slope >> 2) & ~1) * uint(steps));
 }
-#if GLRDP_FAST_COVERAGE
+
 ivec2 fast_triangle_span(int y) {
     int major = stepped_edge(edge_x.x, edge_slope.x, y - (edge_y.x & ~3));
     int minor = y < edge_y.y ? stepped_edge(edge_x.y, edge_slope.y, y - (edge_y.x & ~3))
@@ -1058,59 +919,59 @@ bool fast_triangle_pixel(ivec2 pixel, bool first_sample_only) {
     }
     return width < 65536 && right > left && x < right && x + 65536 > left;
 }
-#endif
+
 float rdp_triangle_coverage() {
     ivec2 pixel = ivec2(floor(gl_FragCoord.xy / max(internalScale, 1.0)));
     pixel.y = int(viewport.y) - 1 - pixel.y;
-#if GLRDP_FAST_COVERAGE
-    raster_offset =
-        vec2(pixel.x, viewport.y - float(pixel.y)) * max(internalScale, 1.0) - gl_FragCoord.xy;
-    return fast_triangle_pixel(pixel, cycle_type < 2 && !antialias_enable) ? 1.0 : 0.0;
-#else
-    int covered = 0;
-    ivec2 first = ivec2(0);
-    bool found = false;
-    bool coverage_bit = false;
-    for (int row = 0; row < 4; ++row) {
-        int y = pixel.y * 4 + row;
-        if (y < edge_y.x || y >= edge_y.z)
-            continue;
-        int major = stepped_edge(edge_x.x, edge_slope.x, y - (edge_y.x & ~3));
-        int minor = y < edge_y.y ? stepped_edge(edge_x.y, edge_slope.y, y - (edge_y.x & ~3))
-                                 : stepped_edge(edge_x.z, edge_slope.z, y - edge_y.y);
-        int left = edge_y.w != 0 ? major : minor, right = edge_y.w != 0 ? minor : major;
-        for (int col = 0; col < 2; ++col) {
-#if GLRDP_REDUCED_COVERAGE
-            if (col != ((row == 1 || row == 2) ? 1 : 0))
+    if (coverage_mode == 0) {
+        raster_offset =
+            vec2(pixel.x, viewport.y - float(pixel.y)) * max(internalScale, 1.0) - gl_FragCoord.xy;
+        return fast_triangle_pixel(pixel, cycle_type < 2 && !antialias_enable) ? 1.0 : 0.0;
+    } else {
+        int covered = 0;
+        ivec2 first = ivec2(0);
+        bool found = false;
+        bool coverage_bit = false;
+        for (int row = 0; row < 4; ++row) {
+            int y = pixel.y * 4 + row;
+            if (y < edge_y.x || y >= edge_y.z)
                 continue;
-#endif
-            int quarter = (row & 1) + col * 2;
-            int x = (pixel.x << 16) + (quarter << 14);
-            if (x >= left && x < right) {
-#if GLRDP_REDUCED_COVERAGE
-                covered += 2;
-#else
-                ++covered;
-#endif
-                if (row == 0 && col == 0)
-                    coverage_bit = true;
-                if (!found) {
-                    first = ivec2(quarter, row);
-                    found = true;
+            int major = stepped_edge(edge_x.x, edge_slope.x, y - (edge_y.x & ~3));
+            int minor = y < edge_y.y ? stepped_edge(edge_x.y, edge_slope.y, y - (edge_y.x & ~3))
+                                     : stepped_edge(edge_x.z, edge_slope.z, y - edge_y.y);
+            int left = edge_y.w != 0 ? major : minor, right = edge_y.w != 0 ? minor : major;
+            for (int col = 0; col < 2; ++col) {
+                if (coverage_mode == 1) {
+                    if (col != ((row == 1 || row == 2) ? 1 : 0))
+                        continue;
+                }
+                int quarter = (row & 1) + col * 2;
+                int x = (pixel.x << 16) + (quarter << 14);
+                if (x >= left && x < right) {
+                    if (coverage_mode == 1) {
+                        covered += 2;
+                    } else {
+                        ++covered;
+                    }
+                    if (row == 0 && col == 0)
+                        coverage_bit = true;
+                    if (!found) {
+                        first = ivec2(quarter, row);
+                        found = true;
+                    }
                 }
             }
         }
+        vec2 anchor = vec2(float(pixel.x) + float(first.x) * 0.25,
+                           viewport.y - float(pixel.y) - float(first.y) * 0.25);
+        raster_offset = anchor * max(internalScale, 1.0) - gl_FragCoord.xy;
+        // Without AA the blender's write enable is coverage-mask bit 7,
+        // the first sample, rather than any nonzero sample count. Z writes
+        // use the same enable as color writes.
+        if (cycle_type < 2 && !antialias_enable && !coverage_bit)
+            discard;
+        return float(covered) * 0.125;
     }
-    vec2 anchor = vec2(float(pixel.x) + float(first.x) * 0.25,
-                       viewport.y - float(pixel.y) - float(first.y) * 0.25);
-    raster_offset = anchor * max(internalScale, 1.0) - gl_FragCoord.xy;
-    // Without AA the blender's write enable is coverage-mask bit 7,
-    // the first sample, rather than any nonzero sample count. Z writes
-    // use the same enable as color writes.
-    if (cycle_type < 2 && !antialias_enable && !coverage_bit)
-        discard;
-    return float(covered) * 0.125;
-#endif
 }
 
 const int tc_norm_point[64] =
@@ -1155,48 +1016,49 @@ int tc_axis_gpu(int coordinate, int reciprocal, int shift, bool carry) {
 float rdp_rectangle_coverage() {
     ivec2 pixel = ivec2(floor(gl_FragCoord.xy / max(internalScale, 1.0)));
     pixel.y = int(viewport.y) - 1 - pixel.y;
-#if GLRDP_FAST_COVERAGE
-    vec2 p = vec2(pixel);
-    bool inside = antialias_enable ? p.x < rectangle_bounds.z && p.x + 1.0 > rectangle_bounds.x &&
-                                         p.y < rectangle_bounds.w && p.y + 1.0 > rectangle_bounds.y
-                                   : p.x >= rectangle_bounds.x && p.x < rectangle_bounds.z &&
-                                         p.y >= rectangle_bounds.y && p.y < rectangle_bounds.w;
-    raster_offset = vec2(p.x, viewport.y - p.y) * max(internalScale, 1.0) - gl_FragCoord.xy;
-    return inside ? 1.0 : 0.0;
-#else
-    int covered = 0;
-    bool first_bit = false, found = false;
-    ivec2 first = ivec2(0);
-    for (int row = 0; row < 4; ++row)
-        for (int col = 0; col < 2; ++col) {
-#if GLRDP_REDUCED_COVERAGE
-            if (col != ((row == 1 || row == 2) ? 1 : 0))
-                continue;
-#endif
-            int quarter = (row & 1) + col * 2;
-            vec2 p = vec2(pixel) + vec2(quarter, row) * 0.25;
-            if (p.x >= rectangle_bounds.x && p.x < rectangle_bounds.z &&
-                p.y >= rectangle_bounds.y && p.y < rectangle_bounds.w) {
-#if GLRDP_REDUCED_COVERAGE
-                covered += 2;
-#else
-                ++covered;
-#endif
-                if (row == 0 && col == 0)
-                    first_bit = true;
-                if (!found) {
-                    first = ivec2(quarter, row);
-                    found = true;
+    if (coverage_mode == 0) {
+        vec2 p = vec2(pixel);
+        bool inside = antialias_enable
+                          ? p.x < rectangle_bounds.z && p.x + 1.0 > rectangle_bounds.x &&
+                                p.y < rectangle_bounds.w && p.y + 1.0 > rectangle_bounds.y
+                          : p.x >= rectangle_bounds.x && p.x < rectangle_bounds.z &&
+                                p.y >= rectangle_bounds.y && p.y < rectangle_bounds.w;
+        raster_offset = vec2(p.x, viewport.y - p.y) * max(internalScale, 1.0) - gl_FragCoord.xy;
+        return inside ? 1.0 : 0.0;
+    } else {
+        int covered = 0;
+        bool first_bit = false, found = false;
+        ivec2 first = ivec2(0);
+        for (int row = 0; row < 4; ++row)
+            for (int col = 0; col < 2; ++col) {
+                if (coverage_mode == 1) {
+                    if (col != ((row == 1 || row == 2) ? 1 : 0))
+                        continue;
+                }
+                int quarter = (row & 1) + col * 2;
+                vec2 p = vec2(pixel) + vec2(quarter, row) * 0.25;
+                if (p.x >= rectangle_bounds.x && p.x < rectangle_bounds.z &&
+                    p.y >= rectangle_bounds.y && p.y < rectangle_bounds.w) {
+                    if (coverage_mode == 1) {
+                        covered += 2;
+                    } else {
+                        ++covered;
+                    }
+                    if (row == 0 && col == 0)
+                        first_bit = true;
+                    if (!found) {
+                        first = ivec2(quarter, row);
+                        found = true;
+                    }
                 }
             }
-        }
-    if (!antialias_enable && !first_bit)
-        discard;
-    vec2 anchor = vec2(float(pixel.x) + float(first.x) * 0.25,
-                       viewport.y - float(pixel.y) - float(first.y) * 0.25);
-    raster_offset = anchor * max(internalScale, 1.0) - gl_FragCoord.xy;
-    return float(covered) * 0.125;
-#endif
+        if (!antialias_enable && !first_bit)
+            discard;
+        vec2 anchor = vec2(float(pixel.x) + float(first.x) * 0.25,
+                           viewport.y - float(pixel.y) - float(first.y) * 0.25);
+        raster_offset = anchor * max(internalScale, 1.0) - gl_FragCoord.xy;
+        return float(covered) * 0.125;
+    }
 }
 int alpha_coverage_at(ivec2 pixel, out ivec2 first) {
     first = ivec2(0);
@@ -1204,48 +1066,49 @@ int alpha_coverage_at(ivec2 pixel, out ivec2 first) {
     if (pixel.x < alpha_scissor_pixels.x || pixel.y < alpha_scissor_pixels.y ||
         pixel.x >= alpha_scissor_pixels.z || pixel.y >= alpha_scissor_pixels.w)
         return 0;
-#if GLRDP_FAST_COVERAGE
-    if (triangle_coverage)
-        return fast_triangle_pixel(pixel, false) ? 8 : 0;
-    vec2 p = vec2(pixel);
-    return p.x < rectangle_bounds.z && p.x + 1.0 > rectangle_bounds.x && p.y < rectangle_bounds.w &&
-                   p.y + 1.0 > rectangle_bounds.y
-               ? 8
-               : 0;
-#else
-    for (int row = 0; row < 4; ++row)
-        for (int col = 0; col < 2; ++col) {
-#if GLRDP_REDUCED_COVERAGE
-            if (col != ((row == 1 || row == 2) ? 1 : 0))
-                continue;
-#endif
-            int quarter = (row & 1) + col * 2;
-            bool inside;
-            if (triangle_coverage) {
-                int y = pixel.y * 4 + row;
-                int major = stepped_edge(edge_x.x, edge_slope.x, y - (edge_y.x & ~3));
-                int minor = y < edge_y.y ? stepped_edge(edge_x.y, edge_slope.y, y - (edge_y.x & ~3))
-                                         : stepped_edge(edge_x.z, edge_slope.z, y - edge_y.y);
-                int left = edge_y.w != 0 ? major : minor, right = edge_y.w != 0 ? minor : major;
-                int x = (pixel.x << 16) + (quarter << 14);
-                inside = y >= edge_y.x && y < edge_y.z && x >= left && x < right;
-            } else {
-                vec2 p = vec2(pixel) + vec2(quarter, row) * 0.25;
-                inside = p.x >= rectangle_bounds.x && p.x < rectangle_bounds.z &&
-                         p.y >= rectangle_bounds.y && p.y < rectangle_bounds.w;
+    if (coverage_mode == 0) {
+        if (triangle_coverage)
+            return fast_triangle_pixel(pixel, false) ? 8 : 0;
+        vec2 p = vec2(pixel);
+        return p.x < rectangle_bounds.z && p.x + 1.0 > rectangle_bounds.x &&
+                       p.y < rectangle_bounds.w && p.y + 1.0 > rectangle_bounds.y
+                   ? 8
+                   : 0;
+    } else {
+        for (int row = 0; row < 4; ++row)
+            for (int col = 0; col < 2; ++col) {
+                if (coverage_mode == 1) {
+                    if (col != ((row == 1 || row == 2) ? 1 : 0))
+                        continue;
+                }
+                int quarter = (row & 1) + col * 2;
+                bool inside;
+                if (triangle_coverage) {
+                    int y = pixel.y * 4 + row;
+                    int major = stepped_edge(edge_x.x, edge_slope.x, y - (edge_y.x & ~3));
+                    int minor = y < edge_y.y
+                                    ? stepped_edge(edge_x.y, edge_slope.y, y - (edge_y.x & ~3))
+                                    : stepped_edge(edge_x.z, edge_slope.z, y - edge_y.y);
+                    int left = edge_y.w != 0 ? major : minor, right = edge_y.w != 0 ? minor : major;
+                    int x = (pixel.x << 16) + (quarter << 14);
+                    inside = y >= edge_y.x && y < edge_y.z && x >= left && x < right;
+                } else {
+                    vec2 p = vec2(pixel) + vec2(quarter, row) * 0.25;
+                    inside = p.x >= rectangle_bounds.x && p.x < rectangle_bounds.z &&
+                             p.y >= rectangle_bounds.y && p.y < rectangle_bounds.w;
+                }
+                if (inside) {
+                    if (count == 0)
+                        first = ivec2(quarter, row);
+                    if (coverage_mode == 1) {
+                        count += 2;
+                    } else {
+                        ++count;
+                    }
+                }
             }
-            if (inside) {
-                if (count == 0)
-                    first = ivec2(quarter, row);
-#if GLRDP_REDUCED_COVERAGE
-                count += 2;
-#else
-                ++count;
-#endif
-            }
-        }
-    return count;
-#endif
+        return count;
+    }
 }
 int tc_span_gpu(ivec4 c, ivec2 pixel);
 int shade_span_gpu(ivec4 c, ivec2 pixel, ivec2 first, int coverage) {
@@ -1346,21 +1209,21 @@ int framebuffer_coverage_fixed(ivec4 value) {
 }
 bool depth_compare_farther;
 uint depth_compare_coverage;
+ivec4 framebuffer_memory;
 void run_depth_state_pass(uint incoming_mask) {
     ivec2 pixel = ivec2(gl_FragCoord.xy);
     if (incoming_mask == 0u)
         discard;
     uint incoming_coverage = min(incoming_mask & 15u, 8u);
 
-    uint packed_state = texelFetch(depth_state_texture, pixel, 0).r;
+    uint packed_state = framebuffer_depth;
     uint stored_z = packed_state & RDP_MAX_Z;
     uint stored_dz = (packed_state >> 18u) & 15u;
     // Coverage belongs to the destination color image, even when another
     // color image shares this Z surface. With image reads disabled the RDP
     // supplies full memory coverage. Feedback was captured before this pass;
     // normalized coordinates also select the right pixel in upscaled targets.
-    uint memory_coverage =
-        uint(framebuffer_coverage_fixed(to_fixed8(texture(fbtex, gl_FragCoord.xy / viewport))));
+    uint memory_coverage = uint(framebuffer_coverage_fixed(framebuffer_memory));
 
     if (raw_z_fill) {
         int n64_y = int(viewport.y) - 1 - pixel.y;
@@ -1452,16 +1315,24 @@ void main() {
         if (primitive_coverage == 0.0)
             discard;
     }
-#if GLRDP_FAST_COVERAGE
-    // Surviving pixels have full coverage in this mode. Make it explicit so
-    // the compiler removes fractional shade/Z correction and coverage arithmetic.
-    primitive_coverage = 1.0;
-    if (depth_state_pass && !combined_depth_color && cycle_type < 2 && !coverage_times_alpha &&
-        alpha_compare_mode == 0 && !color_key_enable) {
-        run_depth_state_pass(8u);
-        return;
+    // A single nearest texel read permits texture-barrier read/modify/write.
+    framebuffer_memory =
+        to_fixed8(texture(fbtex, gl_FragCoord.xy / (viewport * max(internalScale, 1.0))));
+    framebuffer_depth = (depth_state_pass || depth_acceptance_enable)
+                            ? texelFetch(depth_state_texture,
+                                         ivec2(floor(gl_FragCoord.xy / max(internalScale, 1.0))), 0)
+                                  .r
+                            : 0u;
+    if (coverage_mode == 0) {
+        // Surviving pixels have full coverage in this mode; skip fractional
+        // shade/Z correction and coverage arithmetic.
+        primitive_coverage = 1.0;
+        if (depth_state_pass && !combined_depth_color && cycle_type < 2 && !coverage_times_alpha &&
+            alpha_compare_mode == 0 && !color_key_enable) {
+            run_depth_state_pass(8u);
+            return;
+        }
     }
-#endif
     if (depth_state_pass && raw_z_fill) {
         uint mask = uint(clamp(int(floor(primitive_coverage * 8.0 + 0.5)), 1, 8));
         run_depth_state_pass(mask);
@@ -1489,13 +1360,13 @@ void main() {
         // The original texture plane retains the RDP scanline origin; mixing
         // interpolated UVs with its derivatives can make T slightly negative
         // and wrap a copy fetch to an unrelated TMEM row.
-        q = (triangle_coverage ? fuvq : texture_plane) + qdx * (pixel.x * scale - gl_FragCoord.x) +
+        q = texture_plane + qdx * (pixel.x * scale - gl_FragCoord.x) +
             qdy * (pixel.y * scale - gl_FragCoord.y);
         copy_lane = mod(pixel.x - copy_start_x, 4.0);
         q -= qdx * (copy_lane * scale);
     }
     vec2 st = q.xy / max(q.z, 1e-8);
-    if (texture_enable && triangle_coverage && internalScale == 1.0) {
+    if (accurate_texcoords && texture_enable && triangle_coverage && internalScale == 1.0) {
         ivec2 pixel = ivec2(floor(gl_FragCoord.xy));
         pixel.y = int(viewport.y) - 1 - pixel.y;
         ivec3 raw = ivec3(tc_span_gpu(triangle_texture_fixed[0], pixel),
@@ -1598,7 +1469,8 @@ void main() {
                 compare_coverage = alpha_coverage_at(np, nfirst);
                 vec3 nq = q + qdx * lodDerivativeScale * float(direction);
                 vec2 nst = nq.xy / max(nq.z, 1e-8);
-                if (texture_enable && triangle_coverage && internalScale == 1.0) {
+                if (accurate_texcoords && texture_enable && triangle_coverage &&
+                    internalScale == 1.0) {
                     ivec3 raw = ivec3(tc_span_gpu(triangle_texture_fixed[0], np),
                                       tc_span_gpu(triangle_texture_fixed[1], np),
                                       tc_span_gpu(triangle_texture_fixed[2], np));
@@ -1691,8 +1563,7 @@ void main() {
             discard;
     }
 
-    vec2 framebuffer_uv = gl_FragCoord.xy / (viewport * max(internalScale, 1.0));
-    ivec4 memory_fixed = to_fixed8(texture(fbtex, framebuffer_uv));
+    ivec4 memory_fixed = framebuffer_memory;
     if (framebuffer_rgba16)
         memory_fixed.rgb &= ivec3(248);
 
@@ -1934,28 +1805,10 @@ void main() {
     outColor = texture(postColor, uv);
 }
 )";
-    shader_sources_ = {vs, triangle_vs, triangle_gs, rectangle_vs, rectangle_gs, fs};
-    std::string one_cycle = fs;
-    one_cycle.insert(one_cycle.find('\n') + 1,
-                     std::string("#define GLRDP_FAST_COVERAGE ") +
-                         (config_.coverage == GLRDP_COVERAGE_OFF ? "1\n" : "0\n") +
-                         "#define GLRDP_REDUCED_COVERAGE " +
-                         (config_.coverage == GLRDP_COVERAGE_REDUCED ? "1\n" : "0\n"));
-    const auto mode = one_cycle.find("uniform int cycle_type;");
-    one_cycle.replace(mode, std::string("uniform int cycle_type;").size(),
-                      "const int cycle_type=0;");
-    program_ = link(vs, one_cycle.c_str());
-    try {
-        triangle_program_ = link_geometry(triangle_vs, triangle_gs, one_cycle.c_str());
-    } catch (const std::exception &) {
-        triangle_program_ = 0;
-    }
-    rectangle_program_ = link_geometry(rectangle_vs, rectangle_gs, one_cycle.c_str());
-    triangle_geometry_supported_ = triangle_program_ != 0;
-    cycle_programs_[config_.coverage][0] = {program_, triangle_program_, rectangle_program_};
-    for (GLuint program : cycle_programs_[config_.coverage][0])
-        if (program)
-            initialize_samplers(program);
+    // All RDP primitives use a conservative quad. Edge, texture, shade and
+    // depth planes are evaluated by the same fragment ubershader.
+    program_ = link(vs, fs);
+    initialize_samplers(program_);
     present_program_ = link(pvs, pfs.c_str());
     final_present_program_ = link(final_vs, final_fs);
     glGenVertexArrays(1, &vao_);
@@ -1999,33 +1852,6 @@ void main() {
                           (void *)offsetof(GLVertex, inverse_w));
     glBindVertexArray(0);
     return true;
-}
-void RDPRenderer::select_cycle(unsigned cycle) {
-    auto &programs = cycle_programs_[config_.coverage][cycle & 3];
-    if (!programs[2]) {
-        std::string fragment = shader_sources_[5];
-        fragment.insert(fragment.find('\n') + 1,
-                        std::string("#define GLRDP_FAST_COVERAGE ") +
-                            (config_.coverage == GLRDP_COVERAGE_OFF ? "1\n" : "0\n") +
-                            "#define GLRDP_REDUCED_COVERAGE " +
-                            (config_.coverage == GLRDP_COVERAGE_REDUCED ? "1\n" : "0\n"));
-        const auto mode = fragment.find("uniform int cycle_type;");
-        fragment.replace(mode, std::string("uniform int cycle_type;").size(),
-                         "const int cycle_type=" + std::to_string(cycle & 3) + ";");
-        if (triangle_geometry_supported_)
-            programs[1] = link_geometry(shader_sources_[1].c_str(), shader_sources_[2].c_str(),
-                                        fragment.c_str());
-        else
-            programs[0] = link(shader_sources_[0].c_str(), fragment.c_str());
-        programs[2] =
-            link_geometry(shader_sources_[3].c_str(), shader_sources_[4].c_str(), fragment.c_str());
-        for (GLuint program : programs)
-            if (program)
-                initialize_samplers(program);
-    }
-    program_ = programs[0];
-    triangle_program_ = programs[1];
-    rectangle_program_ = programs[2];
 }
 GLint RDPRenderer::uniform(GLuint program, const char *name) {
     auto &locations = uniforms_[program];
@@ -2080,21 +1906,13 @@ void RDPRenderer::shutdown() {
     if (vao_)
         glDeleteVertexArrays(1, &vao_);
 
-    for (auto &coverage : cycle_programs_)
-        for (auto &cycle : coverage)
-            for (auto &p : cycle) {
-                if (p)
-                    glDeleteProgram(p);
-                p = 0;
-            }
-    shader_sources_ = {};
-    triangle_geometry_supported_ = false;
+    if (program_)
+        glDeleteProgram(program_);
     if (present_program_)
         glDeleteProgram(present_program_);
     if (final_present_program_)
         glDeleteProgram(final_present_program_);
-    feedback_texture_ = vbo_ = vao_ = program_ = triangle_program_ = rectangle_program_ =
-        present_program_ = final_present_program_ = 0;
+    feedback_texture_ = vbo_ = vao_ = program_ = present_program_ = final_present_program_ = 0;
     post_fbo_ = post_color_ = post_depth_ = 0;
     post_w_ = post_h_ = 0;
     gpu_depth_.clear();
@@ -2284,8 +2102,20 @@ void RDPRenderer::upload_tile(const RDPState &s, std::uint8_t ti, unsigned unit)
     (void)mirror;
     tile_signature_[unit] = sig;
 }
-void RDPRenderer::update_feedback(GLFramebuffer &f, bool copy) {
+void RDPRenderer::update_feedback(GLFramebuffer &f, bool copy, bool defer_barrier) {
+    current_feedback_texture_ = feedback_texture_;
     glActiveTexture(GL_TEXTURE2);
+    if (glrdp_texture_barrier && f.internal_scale == 1 && copy) {
+        // One quad invokes the fragment shader once per destination texel.
+        // Separate native Z passes can read this colour image without writing it.
+        // https://registry.khronos.org/OpenGL/extensions/NV/NV_texture_barrier.txt
+        if (!defer_barrier)
+            glrdp_texture_barrier();
+        current_feedback_texture_ = f.color;
+        glBindTexture(GL_TEXTURE_2D, f.color);
+        glBindFramebuffer(GL_FRAMEBUFFER, f.fbo);
+        return;
+    }
     if (feedback_w_ != f.width || feedback_h_ != f.height) {
         feedback_w_ = f.width;
         feedback_h_ = f.height;
@@ -2329,7 +2159,7 @@ void RDPRenderer::configure_rdp_program(GLuint active_program, const GLFramebuff
                 scissor_valid ? s.scissor_yh >> 2 : 0,
                 scissor_valid ? int((s.scissor_xl + 3) >> 2) : target.native_width,
                 scissor_valid ? int((s.scissor_yl + 3) >> 2) : target.native_height);
-    const std::array<std::uint64_t, 8> configuration = {
+    const std::array<std::uint64_t, 9> configuration = {
         (std::uint64_t(target.native_width) << 32) | unsigned(target.native_height),
         unsigned(target.internal_scale),
         std::uint64_t(fragment_internal_scale),
@@ -2340,7 +2170,11 @@ void RDPRenderer::configure_rdp_program(GLuint active_program, const GLFramebuff
         unsigned(s.primitive_z) | (unsigned(s.primitive_dz) << 16),
         s.fill_color,
         unsigned(s.color_image.size) | (unsigned(s.color_image.format) << 8) |
-            (unsigned(max_mip_level_) << 16) | (std::uint64_t(s.blend.a) << 24)};
+            (unsigned(max_mip_level_) << 16) | (std::uint64_t(s.blend.a) << 24),
+        unsigned(config_.coverage) | (unsigned(config_.blending) << 2) |
+            (unsigned(config_.combiner) << 3) | (unsigned(config_.texture_filter) << 4) |
+            (unsigned(config_.accurate_texcoords) << 5) | (unsigned(config_.texture_lod) << 6) |
+            (unsigned(config_.color_dither) << 7) | (unsigned(config_.alpha_dither) << 8)};
     if (cycle_type == 2)
         glUniform1f(loc("copy_start_x"), float(std::max(bounds_x_, int(s.scissor_xh) >> 2)));
     auto previous = configuration_values_.find(active_program);
@@ -2349,9 +2183,13 @@ void RDPRenderer::configure_rdp_program(GLuint active_program, const GLFramebuff
         return;
     }
     configuration_values_[active_program] = configuration;
+    glUniform1i(loc("coverage_mode"), config_.coverage);
+    glUniform1i(loc("fast_blending"), config_.blending == GLRDP_ARITHMETIC_FAST);
+    glUniform1i(loc("fast_combiner"), config_.combiner == GLRDP_ARITHMETIC_FAST);
+    glUniform1i(loc("accurate_texcoords"), config_.accurate_texcoords);
 
     const int alpha_compare_mode = int(s.other_modes & 3);
-    const int texture_filter_mode = int((s.other_modes >> 44) & 3);
+    const int texture_filter_mode = config_.texture_filter ? int((s.other_modes >> 44) & 3) : 0;
     const int texture_detail_mode = int((s.other_modes >> 49) & 3);
 
     glUniform2f(loc("viewport"), float(target.native_width), float(target.native_height));
@@ -2366,11 +2204,11 @@ void RDPRenderer::configure_rdp_program(GLuint active_program, const GLFramebuff
     glUniform1i(loc("color_on_coverage"), (s.other_modes >> 7) & 1);
     glUniform1i(loc("texture_enable"), textured ? 1 : 0);
     glUniform1i(loc("texture1_enable"), rdp_uses_second_texel(s));
-    glUniform1i(loc("lod_fraction_used"), rdp_uses_lod_fraction(s));
+    glUniform1i(loc("lod_fraction_used"), config_.texture_lod && rdp_uses_lod_fraction(s));
     glUniform1i(loc("tex0_framebuffer"), texture_is_framebuffer ? 1 : 0);
     glUniform1i(loc("tex1_framebuffer"), texture_is_framebuffer ? 1 : 0);
     glUniform1i(loc("max_mip_level"), max_mip_level_);
-    glUniform1i(loc("lod_enable"), ((s.other_modes >> 48) & 1) ? 1 : 0);
+    glUniform1i(loc("lod_enable"), config_.texture_lod && ((s.other_modes >> 48) & 1));
     glUniform1i(loc("texture_sharpen"), (texture_detail_mode & 1) ? 1 : 0);
     glUniform1i(loc("texture_detail"), (texture_detail_mode & 2) ? 1 : 0);
     glUniform1i(loc("framebuffer_rgba16"), s.color_image.size == RDPImageSize::Bits16 &&
@@ -2378,7 +2216,8 @@ void RDPRenderer::configure_rdp_program(GLuint active_program, const GLFramebuff
     glUniform1i(loc("image_read_enable"), ((s.other_modes >> 6) & 1) ? 1 : 0);
     glUniform1i(loc("antialias_enable"), ((s.other_modes >> 3) & 1) ? 1 : 0);
     glUniform1i(loc("force_blend"), ((s.other_modes >> 14) & 1) ? 1 : 0);
-    glUniform4i(loc("dither_modes"), (s.other_modes >> 38) & 3, (s.other_modes >> 36) & 3, 0, 0);
+    glUniform4i(loc("dither_modes"), config_.color_dither ? (s.other_modes >> 38) & 3 : 3,
+                config_.alpha_dither ? (s.other_modes >> 36) & 3 : 3, (s.other_modes >> 38) & 3, 0);
     glUniform1i(loc("color_key_enable"), ((s.other_modes >> 40) & 1) ? 1 : 0);
     glUniform1i(loc("coverage_times_alpha"), ((s.other_modes >> 12) & 1) ? 1 : 0);
     glUniform1i(loc("alpha_coverage_select"), ((s.other_modes >> 13) & 1) ? 1 : 0);
@@ -2408,50 +2247,25 @@ void RDPRenderer::configure_rdp_program(GLuint active_program, const GLFramebuff
     set_combiner_uniforms(s, active_program);
 }
 
-void RDPRenderer::issue_geometry(const std::vector<GLVertex> &vertices, bool rectangle) {
+void RDPRenderer::issue_geometry(const std::vector<GLVertex> &vertices, bool /*rectangle*/) {
     glBindVertexArray(vao_);
     glBindBuffer(GL_ARRAY_BUFFER, vbo_);
-    if (rectangle) {
-        if (vertices.size() < 6)
-            return;
-        // The parser supplies rectangles as two triangles. The GPU rectangle path
-        // uploads the four unique corners and lets the geometry shader emit
-        // one seam-free strip.
-        const GLVertex corners[4] = {vertices[0], vertices[1], vertices[2], vertices[5]};
-        glBufferData(GL_ARRAY_BUFFER, sizeof(corners), corners, GL_STREAM_DRAW);
-        glDrawArrays(GL_LINES_ADJACENCY, 0, 4);
-    } else if (!triangle_program_ && triangle_coverage_ && !vertices.empty()) {
-        // The fallback vertex shader also needs conservative raster bounds.
-        // Texture, shade and Z planes are evaluated from RDP uniforms, so the
-        // box only supplies positions and the constant unshaded attributes.
-        float left = vertices.front().x, right = left;
-        float top = vertices.front().y, bottom = top;
-        for (const auto &vertex : vertices) {
-            left = std::min(left, vertex.x);
-            right = std::max(right, vertex.x);
-            top = std::min(top, vertex.y);
-            bottom = std::max(bottom, vertex.y);
-        }
-        auto corner = [&](float x, float y) {
-            auto vertex = vertices.front();
-            vertex.x = x;
-            vertex.y = y;
-            vertex.z = 0.0f;
-            return vertex;
-        };
-        const GLVertex corners[] = {
-            corner(std::floor(left), std::floor(top)),
-            corner(std::ceil(right), std::floor(top)),
-            corner(std::floor(left), std::ceil(bottom)),
-            corner(std::ceil(right), std::ceil(bottom)),
-        };
-        glBufferData(GL_ARRAY_BUFFER, sizeof(corners), corners, GL_STREAM_DRAW);
-        glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
-    } else {
-        glBufferData(GL_ARRAY_BUFFER, GLsizeiptr(vertices.size() * sizeof(GLVertex)),
-                     vertices.data(), GL_STREAM_DRAW);
-        glDrawArrays(GL_TRIANGLES, 0, GLsizei(vertices.size()));
-    }
+    // One quad per RDP primitive avoids replaying overlapping conservative
+    // boxes for each triangle in its two tessellated trapezoids.
+    if (vertices.empty())
+        return;
+    auto corner = [&](float x, float y) {
+        auto vertex = vertices.front();
+        vertex.x = x;
+        vertex.y = y;
+        vertex.z = 0.0f;
+        return vertex;
+    };
+    const float x0 = float(bounds_x_), x1 = float(bounds_x_ + bounds_w_);
+    const float y0 = float(bounds_y_), y1 = float(bounds_y_ + bounds_h_);
+    const GLVertex corners[] = {corner(x0, y0), corner(x1, y0), corner(x0, y1), corner(x1, y1)};
+    glBufferData(GL_ARRAY_BUFFER, sizeof(corners), corners, GL_STREAM_DRAW);
+    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
 }
 
 bool RDPRenderer::render_gpu_depth(const std::vector<GLVertex> &vertices, bool textured,
@@ -2459,13 +2273,11 @@ bool RDPRenderer::render_gpu_depth(const std::vector<GLVertex> &vertices, bool t
                                    bool texture_is_framebuffer, int cycle_type, bool rectangle,
                                    bool raw_z_fill, std::uint32_t primitive_noise_seed,
                                    GPUDepthBuffer::Surface &surface) {
-    const bool direct = rectangle ? rectangle_program_ != 0 : triangle_program_ != 0;
+    const bool combined =
+        target.internal_scale == 1 && cycle_type < 2 && target.address != s.z_image_address;
     if (!gpu_depth_.begin_pass(surface, bounds_x_, target.native_height - bounds_y_ - bounds_h_,
-                               bounds_w_, bounds_h_))
+                               bounds_w_, bounds_h_, combined))
         return false;
-
-    const bool combined = direct && target.internal_scale == 1 && cycle_type < 2 &&
-                          target.address != s.z_image_address;
     if (combined) {
         // GL3.3 MRT writes physical colour and the ping-pong Z/DZ state in
         // one fragment invocation. All reads use the old feedback/state.
@@ -2483,14 +2295,13 @@ bool RDPRenderer::render_gpu_depth(const std::vector<GLVertex> &vertices, bool t
     glDepthMask(GL_TRUE);
     primitive_scissor(target, s, 1);
 
-    const GLuint active_program =
-        rectangle ? rectangle_program_ : (triangle_program_ ? triangle_program_ : program_);
+    const GLuint active_program = program_;
     configure_rdp_program(active_program, target, s, textured, texture_is_framebuffer, cycle_type,
                           1.0f, true, false, raw_z_fill, primitive_noise_seed, combined);
     glActiveTexture(GL_TEXTURE3);
     glBindTexture(GL_TEXTURE_2D, gpu_depth_.source_state_texture(surface));
     glActiveTexture(GL_TEXTURE2);
-    glBindTexture(GL_TEXTURE_2D, feedback_texture_);
+    glBindTexture(GL_TEXTURE_2D, current_feedback_texture_);
     issue_geometry(vertices, rectangle);
     gpu_depth_.finish_pass(surface, raw_z_fill || (s.other_modes & 0x20u));
     combined_depth_color_ = combined;
@@ -2579,7 +2390,6 @@ void RDPRenderer::draw_vertices(const std::vector<GLVertex> &v, bool textured, c
                                 std::uint8_t ti, bool rectangle) {
     if (v.empty())
         return;
-    select_cycle(unsigned((s.other_modes >> 52) & 3));
     glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
     glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
     glDisable(GL_CULL_FACE);
@@ -2622,6 +2432,12 @@ void RDPRenderer::draw_vertices(const std::vector<GLVertex> &v, bool textured, c
         min_y = std::min(min_y, vertex.y);
         max_y = std::max(max_y, vertex.y);
     }
+    if (s.scissor_xl > s.scissor_xh && s.scissor_yl > s.scissor_yh) {
+        min_x = std::max(min_x, float(s.scissor_xh >> 2));
+        min_y = std::max(min_y, float(s.scissor_yh >> 2));
+        max_x = std::min(max_x, float((s.scissor_xl + 3) >> 2));
+        max_y = std::min(max_y, float((s.scissor_yl + 3) >> 2));
+    }
     bounds_x_ = std::clamp(int(std::floor(min_x)), 0, target.native_width);
     bounds_y_ = std::clamp(int(std::floor(min_y)), 0, target.native_height);
     bounds_w_ = std::clamp(int(std::ceil(max_x)), bounds_x_, target.native_width) - bounds_x_;
@@ -2632,15 +2448,15 @@ void RDPRenderer::draw_vertices(const std::vector<GLVertex> &v, bool textured, c
     const bool texture_is_framebuffer = false;
     triangle_coverage_ = !rectangle;
     const int cycle = int((s.other_modes >> 52) & 3);
-    const bool mipmapped = textured && ((s.other_modes >> 48) & 1) && cycle < 2;
+    const bool mipmapped =
+        config_.texture_lod && textured && ((s.other_modes >> 48) & 1) && cycle < 2;
     const bool detail = ((s.other_modes >> 50) & 1) != 0;
     // Detail mode can consume the tile after the maximum level; level indices
     // wrap through the eight RDP descriptors, including base tiles near 7.
     const unsigned tile_count = mipmapped
                                     ? std::min(8u, unsigned(max_mip_level_) + (detail ? 2u : 1u))
                                     : (cycle == 1 ? 2u : 1u);
-    const GLuint draw_program =
-        rectangle ? rectangle_program_ : (triangle_program_ ? triangle_program_ : program_);
+    const GLuint draw_program = program_;
     glUseProgram(draw_program);
     if (rectangle)
         glUniform4f(uniform(draw_program, "rectangle_bounds"), min_x, min_y, max_x, max_y);
@@ -2691,9 +2507,6 @@ void RDPRenderer::draw_vertices(const std::vector<GLVertex> &v, bool textured, c
             }
         }
 
-    // Only ordinary cycles read destination colour/coverage for blending.
-    update_feedback(target, cycle < 2);
-
     const std::uint32_t depth_surface_id =
         s.z_image_address ? s.z_image_address : (target.address ^ 0x80000000u);
     const int cycle_type = int((s.other_modes >> 52) & 3);
@@ -2721,6 +2534,10 @@ void RDPRenderer::draw_vertices(const std::vector<GLVertex> &v, bool textured, c
         needs_depth ? gpu_depth_.ensure(depth_surface_id, target.native_width, target.native_height,
                                         memory_, s.z_image_address != 0)
                     : nullptr;
+    // The in-place depth barrier also makes prior colour writes visible.
+    const bool combined = depth_surface && target.internal_scale == 1 && cycle_type < 2 &&
+                          target.address != s.z_image_address;
+    update_feedback(target, rdp_reads_color_memory(s), combined);
     combined_depth_color_ = false;
     const bool gpu_depth_active =
         depth_surface &&
@@ -2743,14 +2560,13 @@ void RDPRenderer::draw_vertices(const std::vector<GLVertex> &v, bool textured, c
         glDisable(GL_DEPTH_TEST);
         glDepthMask(GL_FALSE);
 
-        const GLuint active_program =
-            rectangle ? rectangle_program_ : (triangle_program_ ? triangle_program_ : program_);
+        const GLuint active_program = program_;
         configure_rdp_program(active_program, target, s, textured, texture_is_framebuffer,
                               cycle_type, float(target.internal_scale), false, gpu_depth_active,
                               false, primitive_noise_seed);
 
         glActiveTexture(GL_TEXTURE2);
-        glBindTexture(GL_TEXTURE_2D, feedback_texture_);
+        glBindTexture(GL_TEXTURE_2D, current_feedback_texture_);
         if (gpu_depth_active) {
             glActiveTexture(GL_TEXTURE5);
             glBindTexture(GL_TEXTURE_2D, current_depth_acceptance_texture_);
@@ -2771,7 +2587,6 @@ void RDPRenderer::draw_triangle(const RDPTriangle &t, const RDPState &s) {
     max_mip_level_ = e.level;
     if (e.yh >= e.yl)
         return;
-    select_cycle(unsigned((s.other_modes >> 52) & 3));
     std::vector<GLVertex> v;
     v.reserve(12);
     auto span = [&](int y) {
@@ -2780,52 +2595,12 @@ void RDPRenderer::draw_triangle(const RDPTriangle &t, const RDPState &s) {
         return e.right_major ? std::pair{ma, mi} : std::pair{mi, ma};
     };
     auto make = [&](std::int64_t x, int y) {
-        GLVertex o{};
-        o.x = f16(x);
-        o.y = fy(y);
-        o.r = o.g = o.b = o.a = 1;
-        if (t.shade_enabled) {
-            auto c = [&](int i) {
-                return float(double(attr(t.shade.value[i], t.shade.dx[i], t.shade.dy[i], x, y, e.xh,
-                                         e.yh & ~3)) /
-                             (65536.0 * 255.0));
-            };
-            o.r = c(0);
-            o.g = c(1);
-            o.b = c(2);
-            o.a = c(3);
-        }
-        if (t.texture_enabled) {
-            double S = double(attr(t.texture.value[0], t.texture.dx[0], t.texture.dy[0], x, y, e.xh,
-                                   e.yh & ~3)),
-                   T = double(attr(t.texture.value[1], t.texture.dx[1], t.texture.dy[1], x, y, e.xh,
-                                   e.yh & ~3)),
-                   W = double(attr(t.texture.value[2], t.texture.dx[2], t.texture.dy[2], x, y, e.xh,
-                                   e.yh & ~3));
-            if (((s.other_modes >> 51) & 1) && W != 0) {
-                // Perspective division emits S10.5 from S/W * 32768.
-                o.inverse_w = float(W / 65536.0);
-                S = S * 1024.0 / W;
-                T = T * 1024.0 / W;
-            } else {
-                S /= (65536.0 * 32.0);
-                T /= (65536.0 * 32.0);
-            }
-            o.u = float(S);
-            o.v = float(T);
-        }
-        double zn =
-            ((s.other_modes >> 2) & 1)
-                ? double(s.primitive_z & 0x7fff) * 8.0 / 262143.0
-                : (t.z_enabled ? double(std::uint32_t(attr(t.depth.z, t.depth.dzdx, t.depth.dzdy, x,
-                                                           y, e.xh, e.yh & ~3))) /
-                                     2147475456.0
-                               : 0.0);
-        o.z = float(std::clamp(zn * 2.0 - 1.0, -1.0, 1.0));
-        return o;
+        GLVertex vertex;
+        vertex.x = f16(x);
+        vertex.y = fy(y);
+        return vertex;
     };
-    // Each RDP edge and attribute plane is linear on either side of YM.
-    // Two trapezoids reproduce the edges without thousands of quarter-row strips.
+    // Bound both linear edge segments; attributes come from fragment uniforms.
     const int split = std::clamp(e.ym, e.yh, e.yl);
     const int boundaries[] = {e.yh, split, e.yl};
     for (int i = 0; i < 2; ++i) {
@@ -2844,7 +2619,7 @@ void RDPRenderer::draw_triangle(const RDPTriangle &t, const RDPState &s) {
         auto a = make(l0, y), b = make(r0, y), c = make(r1, y1), d = make(l1, y1);
         v.insert(v.end(), {a, b, c, a, c, d});
     }
-    const GLuint shader = triangle_program_ ? triangle_program_ : program_;
+    const GLuint shader = program_;
     glUseProgram(shader);
     glUniform4i(uniform(shader, "edge_y"), e.yh, e.ym, e.yl, e.right_major);
     glUniform4i(uniform(shader, "edge_x"), e.xh, e.xm, e.xl, 0);
@@ -2895,7 +2670,6 @@ void RDPRenderer::draw_triangle(const RDPTriangle &t, const RDPState &s) {
 void RDPRenderer::draw_texture_rectangle(const RDPTextureRectangle &r, const RDPState &s) {
     max_mip_level_ = 0;
     const int cycle = int((s.other_modes >> 52) & 3);
-    select_cycle(unsigned(cycle));
     float x0 = float(r.xh) / 4.0f, y0 = float(r.yh) / 4.0f;
     float x1 = float(r.xl) / 4.0f, y1 = float(r.yl) / 4.0f;
     if (cycle == 2) {
@@ -2918,14 +2692,14 @@ void RDPRenderer::draw_texture_rectangle(const RDPTextureRectangle &r, const RDP
         d.u = u1;
         d.v = v0;
     }
-    glUseProgram(rectangle_program_);
-    glUniform2f(uniform(rectangle_program_, "triangle_origin"), cycle == 2 ? std::floor(x0) : x0,
+    glUseProgram(program_);
+    glUniform2f(uniform(program_, "triangle_origin"), cycle == 2 ? std::floor(x0) : x0,
                 std::floor(y0));
-    glUniform4f(uniform(rectangle_program_, "triangle_texture_plane[0]"), u0, r.flipped ? 0 : ds,
+    glUniform4f(uniform(program_, "triangle_texture_plane[0]"), u0, r.flipped ? 0 : ds,
                 r.flipped ? ds : 0, 0);
-    glUniform4f(uniform(rectangle_program_, "triangle_texture_plane[1]"), v0, r.flipped ? dt : 0,
+    glUniform4f(uniform(program_, "triangle_texture_plane[1]"), v0, r.flipped ? dt : 0,
                 r.flipped ? 0 : dt, 0);
-    glUniform4f(uniform(rectangle_program_, "triangle_texture_plane[2]"), 1, 0, 0, 0);
+    glUniform4f(uniform(program_, "triangle_texture_plane[2]"), 1, 0, 0, 0);
     draw_vertices({a, b, c, a, c, d}, true, s, r.tile, true);
 }
 void RDPRenderer::draw_fill_rectangle(const RDPFillRectangle &r, const RDPState &s) {
@@ -2951,6 +2725,7 @@ void RDPRenderer::draw_fill_rectangle(const RDPFillRectangle &r, const RDPState 
 void RDPRenderer::present(const RDPState &state, std::uint32_t vi_status, std::uint32_t origin,
                           std::uint32_t width, std::uint32_t hstart, std::uint32_t vstart,
                           std::uint32_t xscale, std::uint32_t yscale, std::uint32_t vsync) {
+    const auto scanout = glrdp_scanout_config(config_);
     glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
     glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
     glDisable(GL_CULL_FACE);
@@ -3097,19 +2872,19 @@ void RDPRenderer::present(const RDPState &state, std::uint32_t vi_status, std::u
     glUniform1f(uniform(present_program_, "yScale"), float(yscale & 0xfff) / 1024.0f);
     glUniform1f(uniform(present_program_, "yOffset"), float((yscale >> 16) & 0xfff) / 1024.0f);
 
-    const int vi_aa_mode = int(glrdp_vi_aa_mode(config_, vi_status));
-    const bool restore = config_.vi_restore && (vi_status & 0x10000u) != 0;
-    glUniform1i(uniform(present_program_, "aaFull"), config_.vi_aa == GLRDP_VI_AA_FULL);
-    glUniform1i(uniform(present_program_, "resampleEnable"), config_.vi_resample);
+    const int vi_aa_mode = int(glrdp_vi_aa_mode(scanout, vi_status));
+    const bool restore = scanout.vi_restore && (vi_status & 0x10000u) != 0;
+    glUniform1i(uniform(present_program_, "aaFull"), scanout.vi_aa == GLRDP_VI_AA_FULL);
+    glUniform1i(uniform(present_program_, "resampleEnable"), scanout.vi_resample);
     glUniform1i(uniform(present_program_, "aaMode"), vi_aa_mode);
     glUniform1i(uniform(present_program_, "blankOutput"), vi_type == 0 ? 1 : 0);
     glUniform1i(uniform(present_program_, "divotEnable"),
-                config_.vi_divot && (vi_status & 0x10u) != 0);
+                scanout.vi_divot && (vi_status & 0x10u) != 0);
     glUniform1i(uniform(present_program_, "restoreEnable"), restore);
     glUniform1i(uniform(present_program_, "gammaEnable"),
-                config_.vi_gamma && (vi_status & 0x08u) != 0);
+                scanout.vi_gamma && (vi_status & 0x08u) != 0);
     glUniform1i(uniform(present_program_, "gammaDitherEnable"),
-                config_.vi_gamma_dither && (vi_status & 0x04u) != 0);
+                scanout.vi_gamma_dither && (vi_status & 0x04u) != 0);
 
     // Reconstruct once at source resolution rather than repeating six/eight
     // neighbour reads for every resampling and divot tap at display resolution.

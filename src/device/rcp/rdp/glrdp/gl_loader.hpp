@@ -5,3 +5,5 @@
 bool load_gl33(retro_hw_get_proc_address_t resolver, bool gles2);
 using GLRDPPrecisionQuery = void(APIENTRY *)(GLenum, GLenum, GLint *, GLint *);
 extern GLRDPPrecisionQuery glrdp_precision_query;
+using GLRDPTextureBarrier = void(APIENTRY *)(void);
+extern GLRDPTextureBarrier glrdp_texture_barrier;

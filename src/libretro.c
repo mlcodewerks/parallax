@@ -712,7 +712,7 @@ void update_variables(bool startup)
         CountPerScanlineOverride = 0;
 #if defined(M64P_HEADLESS_BENCH_PURE)
         r4300_emumode = EMUMODE_PURE_INTERPRETER;
-#elif defined(M64P_HEADLESS_BENCHMARK)
+#elif defined(M64P_HEADLESS_BENCHMARK) && !defined(M64P_BENCH_RUNTIME_CPU)
         r4300_emumode = EMUMODE_INTERPRETER;
 #else
         r4300_emumode = renderer_settings.cpu_core == CPU_CORE_PURE ? EMUMODE_PURE_INTERPRETER : EMUMODE_INTERPRETER;

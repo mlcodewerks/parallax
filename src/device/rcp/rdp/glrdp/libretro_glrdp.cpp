@@ -83,10 +83,21 @@ bool glrdp_context_reset(const retro_hw_render_callback *callback, bool gles2) {
             "GLRDP filters = coverage=%s aa=%s restore=%u divot=%u resample=%u gamma=%u gamma_dither=%u.\n",
             levels[c.coverage], levels[c.vi_aa], unsigned(c.vi_restore), unsigned(c.vi_divot),
             unsigned(c.vi_resample), unsigned(c.vi_gamma), unsigned(c.vi_gamma_dither));
+        log_cb(
+            RETRO_LOG_INFO,
+            "GLRDP ubershader = blending=%s combiner=%s vi_filters=%u texture_barrier=%u texture_filter=%s.\n",
+            c.blending == GLRDP_ARITHMETIC_FAST ? "fast" : "accurate",
+            c.combiner == GLRDP_ARITHMETIC_FAST ? "fast" : "accurate", unsigned(c.vi_filter),
+            unsigned(glrdp_texture_barrier != nullptr), c.texture_filter ? "native" : "point");
+        log_cb(RETRO_LOG_INFO,
+               "GLRDP tradeoffs = texcoords=%s lod=%u color_dither=%u alpha_dither=%u.\n",
+               c.accurate_texcoords ? "accurate" : "fast", unsigned(c.texture_lod),
+               unsigned(c.color_dither), unsigned(c.alpha_dither));
     }
     try {
-        if (opened)
-            ready = initialize_renderer();
+        // Compile before emulation starts. RDRAM is bound by glrdp_open;
+        // initialization only creates GPU resources and stores its wrapper.
+        ready = initialize_renderer();
     } catch (const std::exception &e) {
         error("context reset", e.what());
         ready = false;
@@ -149,7 +160,7 @@ bool glrdp_open() {
         };
         // The core schedules DP completion. Never alter DPC_CLOCK or deliver an early IRQ.
         parser->callbacks().sync_full = [] { *gfx_info.MI_INTR_REG |= 0x20; };
-        opened = initialize_renderer();
+        opened = (renderer || es_renderer) || initialize_renderer();
     } catch (const std::exception &e) {
         error("open", e.what());
         glrdp_close();

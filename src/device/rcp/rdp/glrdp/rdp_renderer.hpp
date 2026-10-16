@@ -52,7 +52,7 @@ class RDPRenderer {
     void initialize_samplers(GLuint program);
     std::unordered_map<GLuint, std::unordered_map<std::string, GLint>> uniforms_;
     std::unordered_map<GLuint, std::array<std::uint64_t, 9>> combiner_values_;
-    std::unordered_map<GLuint, std::array<std::uint64_t, 8>> configuration_values_;
+    std::unordered_map<GLuint, std::array<std::uint64_t, 9>> configuration_values_;
     struct TileUniforms {
         std::array<float, 4> transform{};
         std::array<int, 4> wrap{};
@@ -68,13 +68,8 @@ class RDPRenderer {
     void primitive_scissor(const GLFramebuffer &target, const RDPState &state, int scale);
     FramebufferManager fb_;
     GPUDepthBuffer gpu_depth_;
-    GLuint program_ = 0, triangle_program_ = 0, rectangle_program_ = 0, present_program_ = 0,
-           final_present_program_ = 0, vao_ = 0, vbo_ = 0;
-    std::array<std::array<std::array<GLuint, 3>, 4>, 3> cycle_programs_{};
+    GLuint program_ = 0, present_program_ = 0, final_present_program_ = 0, vao_ = 0, vbo_ = 0;
     GLRDPConfig config_ = glrdp_reference_config();
-    std::array<std::string, 6> shader_sources_;
-    bool triangle_geometry_supported_ = false;
-    void select_cycle(unsigned);
     GLuint post_fbo_ = 0, post_color_ = 0, post_depth_ = 0;
     GLuint vi_fbo_ = 0, vi_color_ = 0;
     int vi_w_ = 0, vi_h_ = 0;
@@ -86,6 +81,7 @@ class RDPRenderer {
     std::array<std::vector<std::uint8_t>, 8> tile_pixels_;
     std::array<std::uint64_t, 8> tile_signature_{};
     GLuint feedback_texture_ = 0;
+    GLuint current_feedback_texture_ = 0;
     int feedback_w_ = 0, feedback_h_ = 0;
     int output_w_ = 640, output_h_ = 480, rdp_w_ = 320, rdp_h_ = 240;
     int max_texture_size_ = 2048;
@@ -95,7 +91,7 @@ class RDPRenderer {
     float content_aspect_ = 4.0f / 3.0f;
     RDPImage current_color_{};
     void upload_tile(const RDPState &, std::uint8_t, unsigned);
-    void update_feedback(GLFramebuffer &, bool copy = true);
+    void update_feedback(GLFramebuffer &, bool copy = true, bool defer_barrier = false);
     void set_combiner_uniforms(const RDPState &, GLuint);
     bool render_gpu_depth(const std::vector<GLVertex> &vertices, bool textured,
                           GLFramebuffer &target, const RDPState &state, bool texture_is_framebuffer,

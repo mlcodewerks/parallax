@@ -132,23 +132,6 @@ void GLES2Renderer::uniform4(const char *name, const std::array<float, 4> &value
     glUniform4f(location, value[0], value[1], value[2], value[3]);
     values[location] = value;
 }
-GLuint GLES2Renderer::cycle_program(unsigned cycle) {
-    auto &program = cycle_programs_[config_.coverage][cycle & 3];
-    if (program)
-        return program;
-    const auto header = shader_header_ + "#define RDP_CYCLE " + std::to_string(cycle & 3) +
-                        ".0\n#define GLRDP_FAST_COVERAGE " +
-                        (config_.coverage == GLRDP_COVERAGE_OFF ? "1\n" : "0\n") +
-                        "#define GLRDP_REDUCED_COVERAGE " +
-                        (config_.coverage == GLRDP_COVERAGE_REDUCED ? "1\n" : "0\n");
-    program = link(header, glrdp_es2::vertex, glrdp_es2::fragment);
-    glUseProgram(program);
-    glUniform1i(uniform(program, "atlas_image"), 0);
-    glUniform1i(uniform(program, "metadata"), 1);
-    glUniform1i(uniform(program, "color_memory"), 2);
-    glUniform1i(uniform(program, "depth_memory"), 3);
-    return program;
-}
 void GLES2Renderer::bytes(unsigned slot, unsigned a, unsigned b, unsigned c, unsigned d) {
     auto *out = meta_.data() + slot * 4;
     out[0] = a;
@@ -188,8 +171,7 @@ bool GLES2Renderer::initialize(N64Memory *memory, bool force_mediump) {
                                                   "#define Z_ROUND 0.0\n"
                                                   "#define PRECISE_Z 0\n") +
                                "precision P float;\nprecision mediump int;\n";
-    shader_header_ = header;
-    program_ = cycle_program(0);
+    program_ = link(header, glrdp_es2::vertex, glrdp_es2::fragment);
     present_program_ = link(header, glrdp_es2::present_vertex, glrdp_es2::present_fragment.c_str());
     glGenFramebuffers(1, &vi_fbo_);
     glGenTextures(1, &vi_color_);
@@ -226,13 +208,8 @@ void GLES2Renderer::shutdown() {
         glDeleteFramebuffers(2, s.fbo);
     }
     depth_.clear();
-    for (auto &coverage : cycle_programs_)
-        for (auto &p : coverage) {
-            if (p)
-                glDeleteProgram(p);
-            p = 0;
-        }
-    shader_header_.clear();
+    if (program_)
+        glDeleteProgram(program_);
     if (present_program_)
         glDeleteProgram(present_program_);
     if (vbo_)
@@ -269,7 +246,7 @@ void GLES2Renderer::quad(float x0, float y0, float x1, float y1) {
 }
 void GLES2Renderer::atlas(const RDPState &s, unsigned base, unsigned level) {
     unsigned count = ((s.other_modes >> 52) & 3) == 2 ? 1u
-                     : (s.other_modes & (uint64_t(1) << 48))
+                     : (config_.texture_lod && (s.other_modes & (uint64_t(1) << 48)))
                          ? std::min(level + 1 + unsigned((s.other_modes >> 50) & 1), 8u)
                          : (rdp_uses_second_texel(s) ? 2u : 1u);
     uint64_t signature = 1469598103934665603ull;
@@ -521,7 +498,6 @@ void GLES2Renderer::draw(const RDPState &s, const Planes &p, float x0, float y0,
         old && (old->native_width != s.color_image.width || old->native_height != height))
         fb_read(old->address);
     const unsigned cycle = (s.other_modes >> 52) & 3;
-    program_ = cycle_program(cycle);
     const bool raw_z = cycle == 3 && s.color_image.size == RDPImageSize::Bits16 &&
                        s.color_image.address == s.z_image_address;
     const auto destination_bytes =
@@ -575,8 +551,7 @@ void GLES2Renderer::draw(const RDPState &s, const Planes &p, float x0, float y0,
     }
     glBindTexture(GL_TEXTURE_2D, feedback_);
     glBindFramebuffer(GL_FRAMEBUFFER, f.fbo);
-    // Raw copy/fill does not consume framebuffer colour or coverage.
-    if (cycle < 2)
+    if (rdp_reads_color_memory(s))
         glCopyTexSubImage2D(GL_TEXTURE_2D, 0, left * f.internal_scale,
                             (height - bottom) * f.internal_scale, left * f.internal_scale,
                             (height - bottom) * f.internal_scale, (right - left) * f.internal_scale,
@@ -592,11 +567,14 @@ void GLES2Renderer::draw(const RDPState &s, const Planes &p, float x0, float y0,
           (s.other_modes >> 18) & 3);
     bytes(5, (s.other_modes >> 28) & 3, (s.other_modes >> 24) & 3, (s.other_modes >> 20) & 3,
           (s.other_modes >> 16) & 3);
-    bytes(6, cycle, (s.other_modes >> 44) & 3, s.other_modes & 3, (s.other_modes >> 8) & 3);
+    bytes(6, cycle, config_.texture_filter ? (s.other_modes >> 44) & 3 : 0, s.other_modes & 3,
+          (s.other_modes >> 8) & 3);
     bytes(7,
-          ((s.other_modes >> 48) & 1) | (((s.other_modes >> 50) & 1) << 1) |
-              (((s.other_modes >> 49) & 1) << 2) | (((s.other_modes >> 40) & 1) << 3) |
-              unsigned(rdp_uses_second_texel(s)) * 16 | unsigned(rdp_uses_lod_fraction(s)) * 32,
+          (config_.texture_lod ? (s.other_modes >> 48) & 1 : 0) |
+              (((s.other_modes >> 50) & 1) << 1) | (((s.other_modes >> 49) & 1) << 2) |
+              (((s.other_modes >> 40) & 1) << 3) | unsigned(rdp_uses_second_texel(s)) * 16 |
+              unsigned(config_.texture_lod && rdp_uses_lod_fraction(s)) * 32 |
+              (config_.texture_lod ? 0 : 64),
           unsigned(p.textured) | unsigned(p.triangle) * 2 | unsigned(p.shaded) * 4,
           ((s.other_modes >> 6) & 1) | (((s.other_modes >> 3) & 1) << 1) |
               (((s.other_modes >> 14) & 1) << 2) | (((s.other_modes >> 12) & 1) << 3) |
@@ -656,7 +634,8 @@ void GLES2Renderer::draw(const RDPState &s, const Planes &p, float x0, float y0,
         number(117 + i, float(2 * s.convert.k[i] + 1));
     bytes(121, (s.other_modes >> 43) & 1, (s.other_modes >> 42) & 1, (s.other_modes >> 41) & 1,
           ((s.other_modes >> 45) & 1) | (((s.other_modes >> 51) & 1) << 1));
-    bytes(122, (s.other_modes >> 38) & 3, (s.other_modes >> 36) & 3, 0, 0);
+    bytes(122, config_.color_dither ? (s.other_modes >> 38) & 3 : 3,
+          config_.alpha_dither ? (s.other_modes >> 36) & 3 : 3, (s.other_modes >> 38) & 3, 0);
     bytes(123, s.tiles[p.tile & 7].line >> 8, s.tiles[p.tile & 7].line, 0, 0);
     number(112, float(left));
     number(114, float(s.convert.k[4]));
@@ -683,6 +662,8 @@ void GLES2Renderer::draw(const RDPState &s, const Planes &p, float x0, float y0,
     uniform4("key_center",
              {float(s.key.center_r), float(s.key.center_g), float(s.key.center_b), 0});
     uniform4("key_scale", {float(s.key.scale_r), float(s.key.scale_g), float(s.key.scale_b), 0});
+    uniform4("accuracy_config", {float(config_.coverage), float(config_.blending),
+                                 float(config_.combiner), float(config_.accurate_texcoords)});
     uniform4("settings", {float(s.primitive_min_lod), float(s.primitive_lod_fraction),
                           float(s.blend.a), float(p.level)});
     auto plane = [&](const char *name, const std::array<float, 4> &v) { uniform4(name, v); };
@@ -877,6 +858,7 @@ void GLES2Renderer::draw_fill_rectangle(const RDPFillRectangle &r, const RDPStat
 void GLES2Renderer::present(const RDPState &, uint32_t status, uint32_t origin, uint32_t width,
                             uint32_t hstart, uint32_t vstart, uint32_t xscale, uint32_t yscale,
                             uint32_t vsync) {
+    const auto scanout = glrdp_scanout_config(config_);
     ES2Guard guard;
     auto *source = fb_.find_containing(origin);
     unsigned type = status & 3;
@@ -927,10 +909,10 @@ void GLES2Renderer::present(const RDPState &, uint32_t status, uint32_t origin, 
     glUniform4f(uniform(present_program_, "layout_info"), stride / native_width,
                 stride % native_width, offset % native_width, offset / native_width);
     bool pal = (vsync & 1023) > 550;
-    const unsigned aa_mode = glrdp_vi_aa_mode(config_, status);
-    const bool restore = config_.vi_restore && (status & 0x10000) != 0;
-    glUniform2f(uniform(present_program_, "filter_config"), config_.vi_aa == GLRDP_VI_AA_FULL,
-                config_.vi_resample);
+    const unsigned aa_mode = glrdp_vi_aa_mode(scanout, status);
+    const bool restore = scanout.vi_restore && (status & 0x10000) != 0;
+    glUniform2f(uniform(present_program_, "filter_config"), scanout.vi_aa == GLRDP_VI_AA_FULL,
+                scanout.vi_resample);
     glUniform4f(uniform(present_program_, "timing"), pal ? 128 : 108, pal ? 44 : 34, restore,
                 pal ? 288 : 240);
     glUniform4f(uniform(present_program_, "active_scan"), (hstart >> 16) & 1023, hstart & 1023,
@@ -938,9 +920,9 @@ void GLES2Renderer::present(const RDPState &, uint32_t status, uint32_t origin, 
     glUniform4f(uniform(present_program_, "scales"), float(xscale & 4095) / 1024,
                 float((xscale >> 16) & 4095) / 1024, float(yscale & 4095) / 1024,
                 float((yscale >> 16) & 4095) / 1024);
-    glUniform4f(uniform(present_program_, "flags"), aa_mode, config_.vi_divot && (status & 16) != 0,
-                config_.vi_gamma && (status & 8) != 0,
-                config_.vi_gamma_dither && (status & 4) != 0);
+    glUniform4f(uniform(present_program_, "flags"), aa_mode, scanout.vi_divot && (status & 16) != 0,
+                scanout.vi_gamma && (status & 8) != 0,
+                scanout.vi_gamma_dither && (status & 4) != 0);
     bool precomputed = false;
     if (aa_mode < 2 || restore) {
         if (ensure_vi_target(source->width, source->height)) {

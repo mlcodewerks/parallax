@@ -75,9 +75,7 @@ class GLES2Renderer {
     std::unordered_map<uint32_t, Depth> depth_;
     std::unordered_map<GLuint, std::unordered_map<std::string, GLint>> uniforms_;
     std::unordered_map<GLuint, std::unordered_map<GLint, std::array<float, 4>>> draw_uniforms_;
-    std::array<std::array<GLuint, 4>, 3> cycle_programs_{};
     GLRDPConfig config_ = glrdp_reference_config();
-    std::string shader_header_;
     GLuint program_ = 0, present_program_ = 0, vbo_ = 0, atlas_ = 0, metadata_ = 0, feedback_ = 0,
            output_fbo_ = 0;
     GLuint vi_fbo_ = 0, vi_color_ = 0;
@@ -95,7 +93,6 @@ class GLES2Renderer {
     void bytes(unsigned, unsigned, unsigned, unsigned, unsigned);
     GLint uniform(GLuint, const char *);
     void uniform4(const char *, const std::array<float, 4> &);
-    GLuint cycle_program(unsigned);
     void quad(float, float, float, float);
     bool ensure_vi_target(int, int);
     void atlas(const RDPState &, unsigned, unsigned);

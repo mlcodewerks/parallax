@@ -466,6 +466,7 @@ int main(int argc, char **argv)
 
     FILE *frame_times = NULL;
     const char *frame_times_path = getenv("M64P_BENCH_FRAME_TIMES");
+    const bool gpu_sync = getenv("M64P_BENCH_GPU_SYNC") != NULL;
     if (frame_times_path) {
         frame_times = fopen(frame_times_path, "w");
         if (!frame_times) { fprintf(stderr, "frame timing open failed\n"); return 4; }
@@ -479,6 +480,7 @@ int main(int argc, char **argv)
         const uint64_t start_vi = g_vi_count;
         const double frame_start = frame_times ? benchmark_seconds() : 0.0;
         retro_run();
+        if (gpu_sync) bench_gl_finish();
         if(state_vi&&!state_done&&g_vi_count>=state_vi) {
             size_t bytes=retro_serialize_size();void *state=malloc(bytes);
             if(!bytes||!state||!retro_serialize(state,bytes)||!retro_unserialize(state,bytes)) {

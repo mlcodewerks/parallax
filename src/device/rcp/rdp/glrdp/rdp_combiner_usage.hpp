@@ -1,6 +1,20 @@
 #pragma once
 #include "rdp_types.hpp"
 
+// Memory coverage is a constant seven with image reads disabled. In that case
+// only explicit memory-colour mux inputs require a destination snapshot.
+inline bool rdp_reads_color_memory(const RDPState &s) {
+    const unsigned cycle = (s.other_modes >> 52) & 3;
+    if (cycle >= 2)
+        return false;
+    if (s.other_modes & 0x40u)
+        return true;
+    auto reads = [&](unsigned p, unsigned m) {
+        return ((s.other_modes >> p) & 3) == 1 || ((s.other_modes >> m) & 3) == 1;
+    };
+    return reads(30, 22) || (cycle == 1 && reads(28, 20));
+}
+
 inline bool rdp_rgb_difference_zero(unsigned a, unsigned b) {
     // A/B selectors 0..5 share their inputs; both banks return zero at 8+.
     // Selectors 6/7 differ between banks (one/noise versus key/K4).
