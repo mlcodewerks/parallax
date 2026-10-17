@@ -64,9 +64,9 @@ bool initialize_renderer() {
 }
 } // namespace
 
-bool glrdp_context_reset(const retro_hw_render_callback *callback, bool gles2) {
+bool glrdp_context_reset(const retro_hw_render_callback *callback) {
     hw = *callback;
-    es2 = gles2;
+    es2 = hw.context_type == RETRO_HW_CONTEXT_OPENGLES2;
     ready = load_gl33(hw.get_proc_address, es2);
     if (!ready) {
         error("context", "required GL 3.3 / GLES2 entry points unavailable");

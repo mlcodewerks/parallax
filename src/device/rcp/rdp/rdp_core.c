@@ -30,6 +30,7 @@
 #include "device/r4300/r4300_core.h"
 #include "device/rcp/mi_controller.h"
 #include "device/rcp/rsp/rsp_core.h"
+#include "device/rcp/rsp/rsp_timing.h"
 #include "plugin/plugin.h"
 #ifdef __LIBRETRO__
 #include "renderer_options.h"
@@ -40,6 +41,19 @@ static const uint32_t *hle_words;
 static uint32_t hle_base, hle_bytes;
 static uint32_t hle_rsp_cycles;
 static int hle_submission;
+/* HLE runs synchronously, so these milestones cannot span a CPU yield or a
+ * savestate. Persistent DP work and packet phase stay in dp->timing. */
+static int hle_timed;
+static struct rdp_timing_sync hle_sync;
+
+void rdp_time_hle(struct rdp_core *dp, const uint32_t *words, uint32_t count, uint32_t rsp_cycles)
+{
+    if (!dp->instruction_timing || (dp->dpc_regs[DPC_STATUS_REG] & DPC_STATUS_FREEZE)) return;
+    cp0_update_count(dp->mi->r4300);
+    int64_t submitted = dp->sp->slice_start_clock + rsp_count_ticks(rsp_cycles, dp->sp->slice_overhang);
+    rdp_timing_words_sync(&dp->timing, words, count, submitted, &hle_sync);
+    hle_timed = 1;
+}
 const uint32_t *rdp_hle_command_buffer(uint32_t address)
 {
     return hle_words && address >= hle_base && address - hle_base < hle_bytes
@@ -64,6 +78,8 @@ void rdp_submit_hle(struct rdp_core *dp, const uint32_t *words, uint32_t base, u
     n64video_set_hle_cmd_buffer(NULL, 0, 0);
     hle_words = NULL; hle_bytes = 0;
     hle_submission = 0;
+    hle_timed = 0;
+    memset(&hle_sync, 0, sizeof(hle_sync));
 }
 #endif
 #if defined(HAVE_PARALLEL_RSP)
@@ -98,7 +114,12 @@ static uint32_t dpc_clock_now(struct rdp_core* dp, int from_rsp)
     uint32_t clock = rdp_dpc_clock_value(dp, cp0_regs[CP0_COUNT_REG]);
 #if defined(HAVE_PARALLEL_RSP)
     /* The synchronous RSP slice has not reached CPU COUNT yet. */
-    if (from_rsp) clock += rsp_submission_cycles();
+    if (from_rsp) {
+        uint32_t start = cp0_regs[CP0_COUNT_REG];
+        if (dp->instruction_timing)
+            start += (uint32_t)(dp->sp->slice_start_clock - dp->mi->r4300->cp0.count_clock);
+        clock = rdp_dpc_clock_value(dp, start) + rsp_submission_cycles();
+    }
 #else
     (void)from_rsp;
 #endif
@@ -141,10 +162,12 @@ static void process_dpc_commands(struct rdp_core* dp, int from_rsp)
         return;
 
     dp_pending = dp->mi->regs[MI_INTR_REG] & MI_INTR_DP;
-    if (dp->vi_regs && dp->instruction_timing) {
+    if (hle_submission && hle_timed) sync = hle_sync;
+    else if (dp->vi_regs && dp->instruction_timing) {
         int64_t submitted = dp->mi->r4300->cp0.count_clock;
 #if defined(HAVE_PARALLEL_RSP)
-        if (from_rsp) submitted += ((uint64_t)rsp_submission_cycles() * 3 + 3) / 4;
+        if (from_rsp) submitted = dp->sp->slice_start_clock +
+            rsp_count_ticks(rsp_submission_cycles(), dp->sp->slice_overhang);
 #endif
         uint32_t begin = dp->dpc_regs[DPC_CURRENT_REG] & 0xfffff8;
         uint32_t end = dp->dpc_regs[DPC_END_REG] & 0xfffff8;
@@ -211,7 +234,13 @@ static void process_dpc_commands(struct rdp_core* dp, int from_rsp)
                  * matching native packet in this submission. */
                 int64_t deadline = sync.seen ? sync.deadline : dp->timing.deadline;
                 int64_t work = dp->instruction_timing ? deadline - dp->mi->r4300->cp0.count_clock : 0;
-                if (work > delay) delay = work > UINT32_MAX ? UINT32_MAX : (uint32_t)work;
+                /* A decoded FullSync already includes packet delivery and
+                 * queued raster work. The geometry fallback is not another
+                 * minimum frame cost: it delays small/blank lists and can
+                 * move a buffer swap across a retrace. */
+                if (dp->instruction_timing && sync.seen)
+                    delay = work <= 0 ? 0 : work > UINT32_MAX ? UINT32_MAX : (uint32_t)work;
+                else if (work > delay) delay = work > UINT32_MAX ? UINT32_MAX : (uint32_t)work;
                 add_interrupt_event(&dp->mi->r4300->cp0, DP_INT, delay);
             }
         }
@@ -258,7 +287,11 @@ static void update_dpc_status(struct rdp_core* dp, uint32_t w, int from_rsp)
         dp->clock_base = cp0_regs[CP0_COUNT_REG];
         dp->clock_offset = 0;
 #if defined(HAVE_PARALLEL_RSP)
-        if (from_rsp) dp->clock_offset = -parallelRSPExecutedCycles();
+        if (from_rsp) {
+            if (dp->instruction_timing)
+                dp->clock_base += (uint32_t)(dp->sp->slice_start_clock - dp->mi->r4300->cp0.count_clock);
+            dp->clock_offset = -rsp_submission_cycles();
+        }
 #endif
         dp->dpc_regs[DPC_CLOCK_REG] = 0;
     }
@@ -285,6 +318,8 @@ void init_rdp(struct rdp_core* dp,
 
 void poweron_rdp(struct rdp_core* dp)
 {
+    hle_timed = 0;
+    memset(&hle_sync, 0, sizeof(hle_sync));
     memset(dp->dpc_regs, 0, DPC_REGS_COUNT*sizeof(uint32_t));
     memset(dp->dps_regs, 0, DPS_REGS_COUNT*sizeof(uint32_t));
     dp->dpc_regs[DPC_STATUS_REG] |= DPC_STATUS_START_GCLK;

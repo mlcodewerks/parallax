@@ -3,13 +3,6 @@
 #include <string.h>
 
 struct renderer_settings renderer_settings;
-#ifdef GLRDP_DEFAULT_GLES2
-#define GLRDP_CONTEXT_DEFAULT "gles2"
-#define GLRDP_CONTEXT_VALUES "gles2|gl33"
-#else
-#define GLRDP_CONTEXT_DEFAULT "gl33"
-#define GLRDP_CONTEXT_VALUES "gl33|gles2"
-#endif
 #ifdef HAVE_PARALLEL_RDP
 #define RENDERERS_BASE "angrylion|parallel-rdp"
 #else
@@ -30,7 +23,6 @@ struct renderer_settings renderer_settings;
 static const struct retro_variable options[] = {
     {"wtfn64_renderer", "Renderer (restart required); " RENDERERS},
 #ifdef HAVE_GLRDP
-    {"wtfn64_glrdp_context", "GLRDP context (restart required); " GLRDP_CONTEXT_VALUES},
     {"wtfn64_glrdp_upscale", "GLRDP internal upscaling (restart required); 1|2|4|8"},
     {"wtfn64_glrdp_blending", "GLRDP blending accuracy (restart required); accurate|fast"},
     {"wtfn64_glrdp_combiner", "GLRDP combiner accuracy (restart required); accurate|fast"},
@@ -119,8 +111,6 @@ void renderer_register_options(retro_environment_t environment)
             else if (strstr(d->key, "glrdp")) d->category_key = "glrdp";
             else if (strstr(d->key, "parallel") || strstr(d->key, "ss_") || strstr(d->key, "native_tex_rect")) d->category_key = "parallel";
             else if (strstr(d->key, "rsp_") || strstr(d->key, "lle_") || strstr(d->key, "per_cycle_timing") || !strcmp(d->key, "wtfn64_cpu_core")) d->category_key = "emulation";
-            if (!strcmp(d->key, "wtfn64_glrdp_context"))
-                d->info = "Select OpenGL 3.3 or OpenGL ES 2.0 for native GPU RDP rendering. Restart content to apply.";
             if (!strcmp(d->key, "wtfn64_glrdp_blending"))
                 d->info = "Accurate uses the RDP divider and quantized blend factors. Fast uses arithmetic division with the same colour sources and factors; translucent edges may differ. Restart content to apply.";
             if (!strcmp(d->key, "wtfn64_glrdp_combiner"))
@@ -260,7 +250,6 @@ void renderer_read_options(retro_environment_t env)
 #ifdef HAVE_GLRDP
     if (!strcmp(value(env, "wtfn64_renderer", "angrylion"), "glrdp"))
         s->renderer = RENDERER_GLRDP;
-    s->glrdp_gles2 = !strcmp(value(env, "wtfn64_glrdp_context", GLRDP_CONTEXT_DEFAULT), "gles2");
     s->glrdp = glrdp_default_config();
     s->glrdp.blending = !strcmp(value(env, "wtfn64_glrdp_blending", "accurate"), "fast") ?
         GLRDP_ARITHMETIC_FAST : GLRDP_ARITHMETIC_ACCURATE;

@@ -344,6 +344,7 @@ void rdp_fifo_init(RdpFifo *f, unsigned char *storage,
     f->used    = 0;
     f->cap     = cap;
     f->flush   = 0;
+    f->time    = 0;
 }
 
 static int s_dl_has_fullsync;
@@ -381,6 +382,9 @@ void rdp_fifo_append(RdpFifo *f, const int32_t *words, int count)
         if (f->used + (unsigned int)count * 4u > f->cap)
             return;
     }
+    /* Timestamp after any overflow flush: the new packet belongs to the next
+     * batch. RSP production can overlap DP work while rendering stays batched. */
+    if (count > 0 && f->time) f->time(words, (unsigned int)count);
     off = f->used;
     for (i = 0; i < count; i++)
     {

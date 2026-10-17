@@ -814,6 +814,7 @@ void rdp_emit_hle_process_dlist(void)
     fifo_base = rdram_size - HLE_FIFO_CAP;
     rdp_fifo_init(&s_fifo, s_fifo_storage, fifo_base, HLE_FIFO_CAP);
     s_fifo.flush = fifo_flush_to_rdp;
+    s_fifo.time = s_backend->time;
 
     dl_addr = read_dmem_u32(dmem, TASK_DATA_PTR_DMEM) & 0x00ffffffu;
     if (dl_addr == 0 || dl_addr >= rdram_size)

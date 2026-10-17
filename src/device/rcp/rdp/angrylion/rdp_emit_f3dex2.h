@@ -32,6 +32,7 @@ typedef struct RdpFifo
      * SYNC_FULL, which leaves the game waiting forever on the RDP
      * interrupt (video freezes while audio keeps running). */
     void         (*flush)(struct RdpFifo *f);
+    void         (*time)(const int32_t *words, unsigned int count);
 } RdpFifo;
 
 void rdp_fifo_init(RdpFifo *f, unsigned char *storage,

@@ -477,23 +477,21 @@ static bool request_vulkan_context(void)
 #endif
 
 #ifdef HAVE_GLRDP
+#include "device/rcp/rdp/glrdp/context_request.h"
 static struct retro_hw_render_callback gl_hw;
 static void gl_context_reset(void)
 {
-    glrdp_context_reset(&gl_hw, renderer_settings.glrdp_gles2);
+    glrdp_context_reset(&gl_hw);
 }
 static void gl_context_destroy(void) { glrdp_context_destroy(); }
 static bool request_gl_context(void)
 {
     memset(&gl_hw, 0, sizeof(gl_hw));
-    gl_hw.context_type = renderer_settings.glrdp_gles2 ? RETRO_HW_CONTEXT_OPENGLES2 : RETRO_HW_CONTEXT_OPENGL_CORE;
-    gl_hw.version_major = renderer_settings.glrdp_gles2 ? 2 : 3;
-    gl_hw.version_minor = renderer_settings.glrdp_gles2 ? 0 : 3;
     gl_hw.context_reset = gl_context_reset;
     gl_hw.context_destroy = gl_context_destroy;
     gl_hw.bottom_left_origin = true;
     gl_hw.cache_context = false;
-    return environ_cb(RETRO_ENVIRONMENT_SET_HW_RENDER, &gl_hw);
+    return glrdp_request_context(environ_cb, &gl_hw);
 }
 #endif
 
@@ -598,7 +596,7 @@ bool retro_load_game(const struct retro_game_info *game)
 #ifdef HAVE_GLRDP
     if (renderer_settings.renderer == RENDERER_GLRDP && !request_gl_context())
     {
-        if (log_cb) log_cb(RETRO_LOG_ERROR, "GLRDP requires the selected GL3.3 / GLES2 frontend context; content load rejected.\n");
+        if (log_cb) log_cb(RETRO_LOG_ERROR, "GLRDP requires a GL3.3 or GLES2 frontend context; content load rejected.\n");
         return false;
     }
 #endif

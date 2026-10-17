@@ -20,6 +20,7 @@
  * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
 
 #include "rsp_core.h"
+#include "rsp_timing.h"
 #ifdef __LIBRETRO__
 #include "renderer_options.h"
 #endif
@@ -223,6 +224,8 @@ void poweron_rsp(struct rsp_core* sp)
 
     sp->rsp_task_locked = 0;
     sp->dma_end_clock = 0;
+    sp->slice_start_clock = sp->slice_end_clock = 0;
+    sp->slice_overhang = sp->clock_overhang = 0;
     sp->rsp_completion_status = 0;
     sp->mi->r4300->cp0.interrupt_unsafe_state &= ~INTR_UNSAFE_RSP;
     sp->regs[SP_STATUS_REG] = 1;
@@ -316,8 +319,10 @@ void write_rsp_regs2(void* opaque, uint32_t address, uint32_t value, uint32_t ma
     masked_write(&sp->regs2[reg], value, mask);
 }
 
-void do_SP_Task(struct rsp_core* sp)
+static void do_SP_Task_at(struct rsp_core* sp, int64_t start_clock, uint32_t overhang)
 {
+    sp->slice_start_clock = start_clock;
+    sp->slice_overhang = overhang;
     uint32_t save_pc = sp->regs2[SP_PC_REG] & ~0xfff;
 
     uint32_t sp_delay_time;
@@ -341,7 +346,6 @@ void do_SP_Task(struct rsp_core* sp)
         sp->regs2[SP_PC_REG] |= save_pc;
         new_frame();
 
-       
         sp_delay_time = 1000;
 
         protect_framebuffers(&sp->dp->fb);
@@ -371,8 +375,7 @@ void do_SP_Task(struct rsp_core* sp)
     }
 
 #if defined(HAVE_PARALLEL_RSP)
-   
-    uint32_t task_ticks = (uint32_t)(((uint64_t)executed_cycles * 3 + 3) / 4);
+    uint32_t task_ticks = rsp_count_ticks(executed_cycles, overhang);
     if (sp->cycle_timing) sp_delay_time = task_ticks;
 #endif
     uint32_t current_irq = sp->mi->regs[MI_INTR_REG] & MI_INTR_SP;
@@ -381,11 +384,10 @@ void do_SP_Task(struct rsp_core* sp)
     sp->mi->r4300->cp0.interrupt_unsafe_state &= ~INTR_UNSAFE_RSP;
     if ((sp->regs[SP_STATUS_REG] & (SP_STATUS_HALT | SP_STATUS_BROKE)) == 0)
     {
-       
         sp->rsp_task_locked = 1;
         sp->mi->r4300->cp0.interrupt_unsafe_state |= INTR_UNSAFE_RSP;
         cp0_update_count(sp->mi->r4300);
-        add_interrupt_event(&sp->mi->r4300->cp0, SP_INT, sp_delay_time ? sp_delay_time : 64);
+        if (!sp_delay_time && (!sp->cycle_timing || !executed_cycles)) sp_delay_time = 64;
     }
     else
     {
@@ -399,7 +401,6 @@ void do_SP_Task(struct rsp_core* sp)
             if ((sp->mi->regs[MI_INTR_REG] & sp->mi->regs[MI_INTR_MASK_REG]) == 0)
                 remove_event(&sp->mi->r4300->cp0.q, CHECK_INT);
         }
-        add_interrupt_event(&sp->mi->r4300->cp0, SP_INT, sp_delay_time);
     }
 
     if (sp->cycle_timing) {
@@ -417,6 +418,18 @@ void do_SP_Task(struct rsp_core* sp)
         }
     }
     sp->regs[SP_STATUS_REG] &= ~(SP_STATUS_BROKE | SP_STATUS_HALT);
+
+    struct cp0* cp0 = &sp->mi->r4300->cp0;
+    sp->clock_overhang = sp->cycle_timing ? rsp_count_overhang(executed_cycles, overhang) : 0;
+    sp->slice_end_clock = (sp->cycle_timing ? start_clock : cp0->count_clock) + sp_delay_time;
+    add_interrupt_event_count(cp0, SP_INT, cp0->regs[CP0_COUNT_REG] +
+        (uint32_t)(sp->slice_end_clock - cp0->count_clock));
+}
+
+void do_SP_Task(struct rsp_core* sp)
+{
+    cp0_update_count(sp->mi->r4300);
+    do_SP_Task_at(sp, sp->mi->r4300->cp0.count_clock, 0);
 }
 
 void rsp_interrupt_event(void* opaque)
@@ -432,7 +445,8 @@ void rsp_interrupt_event(void* opaque)
     if (sp->rsp_task_locked)
     {
         if (pending & RSP_PENDING_IRQ_SET) signal_rcp_interrupt(sp->mi, MI_INTR_SP);
-        do_SP_Task(sp);
+        /* CPU instruction/service lateness is not RSP execution time. */
+        do_SP_Task_at(sp, sp->slice_end_clock, sp->clock_overhang);
         return;
     }
 
@@ -456,6 +470,10 @@ void rsp_rebase_dma(struct rsp_core* sp)
 {
     struct cp0* cp0 = &sp->mi->r4300->cp0;
     sp->dma_end_clock = cp0->count_clock;
-    for (struct node* e = cp0->q.first; e; e = e->next)
+    sp->slice_start_clock = sp->slice_end_clock = cp0->count_clock;
+    sp->slice_overhang = 0;
+    for (struct node* e = cp0->q.first; e; e = e->next) {
         if (e->data.type == RSP_DMA_EVT) sp->dma_end_clock = e->data.deadline;
+        if (e->data.type == SP_INT) sp->slice_end_clock = e->data.deadline;
+    }
 }

@@ -14,7 +14,6 @@ struct renderer_settings {
     bool per_cycle_timing;
     enum cpu_core_type cpu_core;
     enum renderer_type renderer;
-    bool glrdp_gles2;
     struct GLRDPConfig glrdp;
     unsigned threads, upscale, downscale;
     bool performance_only, vi_filter, dedither, blur, overscan, bob;

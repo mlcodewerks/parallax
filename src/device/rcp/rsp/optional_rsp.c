@@ -83,7 +83,11 @@ static void submit(const unsigned char *storage, unsigned int base, unsigned int
         *info.DPC_CURRENT_REG=*info.DPC_END_REG=cursor;
     }
 }
-static const RdpEmitBackend backend = {get_rdram, get_rdram_size, get_dmem, submit};
+static void time_packet(const int32_t *words, unsigned int count)
+{
+    rdp_time_hle(&g_dev.dp, (const uint32_t *)words, count, hle_timing_cycles());
+}
+static const RdpEmitBackend backend = {get_rdram, get_rdram_size, get_dmem, submit, time_packet};
 
 void optional_rsp_init(RSP_INFO rsp_info)
 {

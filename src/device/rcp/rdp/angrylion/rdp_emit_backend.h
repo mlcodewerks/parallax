@@ -15,6 +15,7 @@
  */
 #ifndef RDP_EMIT_BACKEND_H
 #define RDP_EMIT_BACKEND_H
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -42,6 +43,9 @@ typedef struct RdpEmitBackend
     void           (*submit)(const unsigned char *storage,
                              unsigned int base_byte_addr,
                              unsigned int len_bytes);
+
+    /* Optional timing-only packet delivery. Rendering remains batched. */
+    void           (*time)(const int32_t *words, unsigned int count);
 
 } RdpEmitBackend;
 

@@ -60,7 +60,7 @@ enum { GB_CART_FINGERPRINT_OFFSET = 0x134 };
 enum { DD_DISK_ID_OFFSET = 0x43670 };
 
 static const char* savestate_magic = "M64+SAVE";
-static const int savestate_latest_version = 0x00011700;  /* 1.23: persistent NEAD vector constant */
+static const int savestate_latest_version = 0x00011800;  /* 1.24: fractional RSP slice clock */
 static const unsigned char pj64_magic[4] = { 0xC8, 0xA6, 0xD8, 0x23 };
 
 static savestates_job job = savestates_job_nothing;
@@ -943,6 +943,7 @@ int savestates_load_m64p(struct device* dev, const void *data)
         dev->sp.rsp_completion_status = GETDATA(curr, uint32_t);
     }
     else dev->sp.rsp_completion_status = SP_STATUS_HALT | SP_STATUS_BROKE;
+    dev->sp.clock_overhang = version >= 0x00011800 ? GETDATA(curr, uint32_t) & 3u : 0;
     if (version < 0x00011100)
         dev->sp.rsp_completion_status &= SP_STATUS_HALT | SP_STATUS_BROKE;
 #ifdef __LIBRETRO__
@@ -1430,6 +1431,7 @@ int savestates_save_m64p(const struct device* dev, void *data)
         PUTDATA(curr, uint32_t, dev->vi.field_ticks);
         PUTDATA(curr, int64_t, dev->vi.field_start_count_clock - dev->r4300.cp0.count_clock);
         PUTDATA(curr, uint32_t, dev->sp.rsp_completion_status);
+        PUTDATA(curr, uint32_t, dev->sp.clock_overhang);
     }
 
 #ifdef __LIBRETRO__

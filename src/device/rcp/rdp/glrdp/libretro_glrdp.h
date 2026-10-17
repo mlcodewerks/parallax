@@ -5,7 +5,7 @@
 #ifdef __cplusplus
 extern "C" {
 #endif
-bool glrdp_context_reset(const struct retro_hw_render_callback *hw, bool gles2);
+bool glrdp_context_reset(const struct retro_hw_render_callback *hw);
 void glrdp_context_destroy(void);
 bool glrdp_open(void);
 void glrdp_close(void);
