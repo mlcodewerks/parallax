@@ -70,21 +70,22 @@ extern "C"
 			*rsp->cp0.cr[rd] = 1; // Atomic semaphore test-and-set, even for r0.
 
 #ifdef PARALLEL_INTEGRATION
-		if (rd == CP0_REGISTER_SP_RESERVED && res)
-		{
-			// A failed atomic acquisition needs the CPU to release the lock.
-			// A successful acquisition can proceed within this slice.
-			*RSP::rsp.SP_STATUS_REG |= SP_STATUS_HALT;
-			return MODE_CHECK_FLAGS;
-		}
 		// CPU-owned DMA completes through the CPU event queue in both modes.
 		// A busy/full wait must yield even in the untimed UINT32_MAX slice;
 		// otherwise the CPU cannot advance the event that clears the flag.
+		// Bound failed semaphore acquisitions the same way. Yielding on every
+		// MFC0 loses the load-to-branch pipeline delay at each JIT re-entry,
+		// making the CIC-6105 boot timeout expire before its PI DMA completes.
 		if (rd == CP0_REGISTER_SP_STATUS || rd >= CP0_REGISTER_CMD_START ||
-		    (res && (rd == CP0_REGISTER_DMA_FULL || rd == CP0_REGISTER_DMA_BUSY)))
+		    (res && (rd == CP0_REGISTER_DMA_FULL || rd == CP0_REGISTER_DMA_BUSY ||
+		             rd == CP0_REGISTER_SP_RESERVED)))
 		{
 			RSP::MFC0_count[rt] += 1;
-			if (RSP::MFC0_count[rt] >= RSP::SP_STATUS_TIMEOUT)
+			// Untimed continuations use a fixed retry delay, so retain one
+			// semaphore attempt per retry in compatibility mode.
+			const int poll_limit = rd == CP0_REGISTER_SP_RESERVED && rsp->cycle_limit == UINT32_MAX
+			    ? 1 : RSP::SP_STATUS_TIMEOUT;
+			if (RSP::MFC0_count[rt] >= poll_limit)
 			{
 				*RSP::rsp.SP_STATUS_REG |= SP_STATUS_HALT;
 				return MODE_CHECK_FLAGS;
