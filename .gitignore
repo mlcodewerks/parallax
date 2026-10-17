@@ -21,6 +21,7 @@ benchmarks/*.log
 benchmarks/__pycache__/
 benchmarks/results/glrdp-hle-performance/
 benchmarks/results/glrdp-interlace-wdc/
+benchmarks/results/audio-clock/
 
 # User-ROM audit listings, captures and local emulator saves.
 benchmarks/zboss-audit/*

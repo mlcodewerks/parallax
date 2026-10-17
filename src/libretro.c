@@ -104,6 +104,7 @@ static unsigned retro_filtering = 0;
 static bool first_context_reset = false;
 static bool initializing = true;
 static bool load_game_successful = false;
+static double frontend_refresh_rate;
 static bool renderer_open = false;
 bool libretro_swap_buffer;
 
@@ -415,7 +416,8 @@ void retro_get_system_av_info(struct retro_system_av_info *info)
     info->geometry.max_width = 640 * (renderer_settings.upscale ? renderer_settings.upscale : 1);
     info->geometry.max_height = 625 * (renderer_settings.upscale ? renderer_settings.upscale : 1);
     info->geometry.aspect_ratio = 640.0 / 480.0;
-    info->timing.fps = vi_expected_refresh_rate_from_tv_standard(ROM_PARAMS.systemtype);
+    info->timing.fps = frontend_refresh_rate > 0.0 ? frontend_refresh_rate :
+        vi_expected_refresh_rate_from_tv_standard(ROM_PARAMS.systemtype);
     info->timing.sample_rate = 44100.0;
 }
 
@@ -679,6 +681,7 @@ bool retro_load_game(const struct retro_game_info *game)
         return false;
     emu_step_initialize();
 
+    frontend_refresh_rate = vi_expected_refresh_rate_from_tv_standard(ROM_PARAMS.systemtype);
     load_game_successful = true;
 
     return true;
@@ -700,6 +703,7 @@ void retro_unload_game(void)
     emu_initialized = false;
     load_game_successful = false;
     initializing = true;
+    frontend_refresh_rate = 0.0;
 }
 
 void update_variables(bool startup)
@@ -747,12 +751,33 @@ void retro_run(void)
 #ifdef HAVE_GLRDP
     if (renderer_settings.renderer == RENDERER_GLRDP) glrdp_begin_frame();
 #endif
+    const bool first_frame = initializing;
+    const int64_t audio_start_clock = g_dev.r4300.cp0.count_clock;
     EmuThreadFunction();
 #ifdef HAVE_GLRDP
     if (renderer_settings.renderer == RENDERER_GLRDP) glrdp_end_frame();
 #endif
+    /* The frontend must pace these same guest fields, rather than advancing
+     * a nominal 60/50 fields per wall-clock second for every VI mode. */
+    const double refresh_rate = vi_actual_refresh_rate(&g_dev.vi);
+    if (refresh_rate > 0.0 &&
+        (refresh_rate - frontend_refresh_rate > 0.000001 ||
+         frontend_refresh_rate - refresh_rate > 0.000001))
+    {
+        struct retro_system_av_info info;
+        frontend_refresh_rate = refresh_rate;
+        retro_get_system_av_info(&info);
+        environ_cb(RETRO_ENVIRONMENT_SET_SYSTEM_AV_INFO, &info);
+    }
     ai_flush_samples(&g_dev.ai);
-    audio_end_frame_libretro(1.0 / vi_expected_refresh_rate_from_tv_standard(ROM_PARAMS.systemtype));
+    /* DMA samples follow the guest oscillator, including fractional fields
+     * and CPU service latency. A fixed 1/60 budget accumulates audio until
+     * the queue starts dropping it. Boot/reset may restart the guest clock;
+     * budget just one field then, matching audio's silent startup. */
+    int64_t audio_ticks = g_dev.r4300.cp0.count_clock - audio_start_clock;
+    if (first_frame || audio_ticks < 0)
+        audio_ticks = g_dev.vi.field_ticks;
+    audio_end_frame_libretro(audio_ticks / 46875000.0);
     sync_end();
     performance_core_leave(&emulation_affinity);
 
