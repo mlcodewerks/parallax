@@ -30,6 +30,7 @@ uniform vec4 primitive, environment, fog, blend, key_center, key_scale, settings
 uniform vec2 atlas_size;
 uniform float depth_pass;
 uniform vec4 accuracy_config;
+uniform bool accurate_shading;
 uniform vec4 edge_y, edge_x, edge_slope;
 varying P vec4 vQ, vQdx, vQdy;
 varying P vec4 vShade, vShadeDx, vShadeDy, vZ, vPixel;
@@ -527,6 +528,11 @@ bool fast_triangle_pixel(vec2 pixel, bool first_sample_only) {
     return width < 1.0 && right > left && pixel.x < right && pixel.x + 1.0 > left;
 }
 
+bool coverage_sample(int row, int col) {
+    if (accuracy_config.x == 3.0)
+        return (row == 0 && col == 0) || (row == 2 && col == 1);
+    return accuracy_config.x != 1.0 || col == ((row == 1 || row == 2) ? 1 : 0);
+}
 float coverage(out vec2 offset, out bool coverage_bit, bool aa) {
     vec2 pixel = floor(vPixel.xy);
     if (accuracy_config.x == 0.0) {
@@ -541,6 +547,7 @@ float coverage(out vec2 offset, out bool coverage_bit, bool aa) {
         float xh = edge_x.x, xm = edge_x.y, xl = edge_x.z, dh = edge_slope.x, dm = edge_slope.y,
               dl = edge_slope.z;
         for (int row = 0; row < 4; ++row) {
+            if (accuracy_config.x == 3.0 && (row == 1 || row == 3)) continue;
             float y = pixel.y * 4.0 + float(row);
             if (y >= yh && y < yl) {
                 float major = xh + dh * (y - floor(yh / 4.0) * 4.0);
@@ -548,18 +555,11 @@ float coverage(out vec2 offset, out bool coverage_bit, bool aa) {
                 float left = major_side > 0.0 ? major : minor,
                       right = major_side > 0.0 ? minor : major;
                 for (int col = 0; col < 2; ++col) {
-                    if (accuracy_config.x == 1.0) {
-                        if (col != ((row == 1 || row == 2) ? 1 : 0))
-                            continue;
-                    }
+                    if (!coverage_sample(row, col)) continue;
                     float quarter = mod(float(row), 2.0) + float(col) * 2.0,
                           x = pixel.x + quarter * 0.25;
                     if (x >= left && x < right) {
-                        if (accuracy_config.x == 1.0) {
-                            count += 2.0;
-                        } else {
-                            count += 1.0;
-                        }
+                        count += accuracy_config.x == 3.0 ? 4.0 : (accuracy_config.x == 1.0 ? 2.0 : 1.0);
                         if (row == 0 && col == 0)
                             coverage_bit = true;
                         if (!found) {
@@ -590,18 +590,11 @@ float rectangle_coverage(out vec2 offset, out bool coverage_bit, bool aa) {
         coverage_bit = false;
         for (int row = 0; row < 4; ++row)
             for (int col = 0; col < 2; ++col) {
-                if (accuracy_config.x == 1.0) {
-                    if (col != ((row == 1 || row == 2) ? 1 : 0))
-                        continue;
-                }
+                if (!coverage_sample(row, col)) continue;
                 float quarter = mod(float(row), 2.0) + float(col) * 2.0;
                 vec2 p = pixel + vec2(quarter, float(row)) * 0.25;
                 if (p.x >= bounds.x && p.x < bounds.z && p.y >= bounds.y && p.y < bounds.w) {
-                    if (accuracy_config.x == 1.0) {
-                        count += 2.0;
-                    } else {
-                        count += 1.0;
-                    }
+                    count += accuracy_config.x == 3.0 ? 4.0 : (accuracy_config.x == 1.0 ? 2.0 : 1.0);
                     if (row == 0 && col == 0)
                         coverage_bit = true;
                     if (!found) {
@@ -705,10 +698,7 @@ float alpha_coverage_at(vec2 pixel, out vec2 first) {
     } else {
         for (int row = 0; row < 4; ++row)
             for (int col = 0; col < 2; ++col) {
-                if (accuracy_config.x == 1.0) {
-                    if (col != ((row == 1 || row == 2) ? 1 : 0))
-                        continue;
-                }
+                if (!coverage_sample(row, col)) continue;
                 float quarter = mod(float(row), 2.0) + float(col) * 2.0,
                       y = pixel.y * 4.0 + float(row);
                 bool inside;
@@ -728,11 +718,7 @@ float alpha_coverage_at(vec2 pixel, out vec2 first) {
                 if (inside) {
                     if (count == 0.0)
                         first = vec2(quarter, float(row));
-                    if (accuracy_config.x == 1.0) {
-                        count += 2.0;
-                    } else {
-                        count += 1.0;
-                    }
+                    count += accuracy_config.x == 3.0 ? 4.0 : (accuracy_config.x == 1.0 ? 2.0 : 1.0);
                 }
             }
         return count;
@@ -869,7 +855,7 @@ void main() {
     combine_rgb = depth_pass < 0.5 || flag(features.x, 8.0);
     vec4 shade = clamp(floor(vShade + vShadeDx * offset.x + vShadeDy * offset.y + 0.5), 0.0, 255.0);
 #if PRECISE_Z
-    if (flag(features.y, 2.0) && flag(features.y, 4.0) && vPixel.z == 1.0) {
+    if (accurate_shading && flag(features.y, 2.0) && flag(features.y, 4.0) && vPixel.z == 1.0) {
         shade.a = triangle_shade(204.0, geometric_cvg, offset);
         if (combine_rgb)
             shade.rgb = vec3(triangle_shade(192.0, geometric_cvg, offset),
@@ -946,7 +932,7 @@ void main() {
             vec2 np = floor(vPixel.xy) + vec2(direction, 0.0), nfirst;
             compare_coverage = alpha_coverage_at(np, nfirst);
 #if PRECISE_Z
-            if (flag(features.y, 2.0) && flag(features.y, 4.0) && vPixel.z == 1.0)
+            if (accurate_shading && flag(features.y, 2.0) && flag(features.y, 4.0) && vPixel.z == 1.0)
                 nshade.a = triangle_shade_at(204.0, np, compare_coverage, nfirst);
 #endif
             compare_alpha = combine(0.0, vec4(0.0), nt0, nt1, nshade, nfraction).a;

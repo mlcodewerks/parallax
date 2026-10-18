@@ -241,9 +241,9 @@ extern "C"
 		RSP::cpu.set_imem(reinterpret_cast<uint32_t *>(Rsp_Info.IMEM));
 		RSP::cpu.set_rdram(reinterpret_cast<uint32_t *>(Rsp_Info.RDRAM));
 #if defined(__LIBRETRO__) && !defined(DEBUG_JIT)
-        RSP::cpu.set_cycle_timing(renderer_settings.per_cycle_timing);
+        RSP::cpu.set_cycle_timing(renderer_component_timing());
         DebugMessage(M64MSG_INFO,"RSP backend: JIT LLE; per-cycle timing %s",
-                     renderer_settings.per_cycle_timing ? "on" : "off");
+                     renderer_component_timing() ? "on" : "off");
 #endif
 	}
 }

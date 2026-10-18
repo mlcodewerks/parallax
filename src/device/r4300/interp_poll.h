@@ -70,7 +70,8 @@ static int interp_ram_poll_read(const struct r4300_core* r, uint32_t address, ui
     }
     unsigned index = (address >> 4) & 511;
     if ((r->dcache_tags[index] & ~2u) != ((physical & UINT32_C(0x1ffff000)) | 1)) return 0;
-    *word = r->dcache_words[index][(physical >> 2) & 3];
+    *word = r->cache_timing == 2 ? ((const struct rdram*)h->opaque)->dram[physical >> 2] :
+        r->dcache_words[index][(physical >> 2) & 3];
     return 1;
 }
 

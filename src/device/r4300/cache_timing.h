@@ -16,7 +16,8 @@ enum { R4300_DCACHE_HIT_CYCLES = 1 };
  * 16-byte lines, direct mapped with virtual indices and physical tags.
  * I-cache fills cost 48 CPU cycles; D-cache fills and writebacks cost
  * Ares's 40 CPU cycles (CEN64 models a 44-cycle pipelined miss interlock).
- * D-cache contents are write-back; bus arbitration remains unmodeled. */
+ * Full mode keeps write-back contents; tags-only mode charges these costs
+ * while loads/stores access RAM directly. Bus arbitration remains unmodeled. */
 /* Keep the uncommon mapped-address scan out of every load/store handler. */
 static R4300_CACHE_NOINLINE int r4300_mapped_access_cached(struct r4300_core* r, uint32_t va)
 {
@@ -74,6 +75,11 @@ static inline void r4300_dcache_writeback(struct r4300_core* r, uint32_t va)
     unsigned index = (va >> 4) & 511;
     uint32_t pa = (r->dcache_tags[index] & 0x1ffff000) | (va & 0xff0);
     cp0_step_cycles(&r->cp0, 40);
+    if (r->cache_timing == 2) {
+        /* Fast mode already wrote through to RAM; only the bus cost remains. */
+        r->dcache_tags[index] &= ~2u;
+        return;
+    }
     for (unsigned i = 0; i < 4; ++i)
         mem_write32(mem_get_handler(r->mem, pa), pa + i * 4,
                     r->dcache_words[index][i], ~0u);
@@ -88,9 +94,11 @@ static R4300_CACHE_NOINLINE void r4300_dcache_refill(struct r4300_core* r,
     if ((r->dcache_tags[index] & 3) == 3) r4300_dcache_writeback(r, va);
     cp0_step_cycles(&r->cp0, 40);
     uint32_t line = pa & 0x1ffffff0;
-    const struct mem_handler* handler = mem_get_handler(r->mem, line);
-    for (unsigned i = 0; i < 4; ++i)
-        mem_read32(handler, line + i * 4, &r->dcache_words[index][i]);
+    if (r->cache_timing != 2) {
+        const struct mem_handler* handler = mem_get_handler(r->mem, line);
+        for (unsigned i = 0; i < 4; ++i)
+            mem_read32(handler, line + i * 4, &r->dcache_words[index][i]);
+    }
     r->dcache_tags[index] = (pa & 0x1ffff000) | 1;
 }
 
@@ -119,7 +127,7 @@ static osal_force_inline int r4300_data_access_cycles(struct r4300_core* r, uint
         r4300_dcache_refill(r, va, pa);
     } else cp0_step_cycles(&r->cp0, R4300_DCACHE_HIT_CYCLES);
     if (write) *tag |= 2;
-    return 1;
+    return r->cache_timing != 2;
 }
 
 static osal_force_inline unsigned int r4300_fetch_cycles(struct r4300_core* r, uint32_t va)

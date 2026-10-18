@@ -12,6 +12,8 @@ enum controller_pak_option { CONTROLLER_PAK_NONE, CONTROLLER_PAK_MEMORY,
 struct renderer_settings {
     bool rsp_hle, lle_graphics, lle_audio;
     bool per_cycle_timing;
+    bool component_timing;
+    bool fast_cpu_timing;
     enum cpu_core_type cpu_core;
     enum renderer_type renderer;
     struct GLRDPConfig glrdp;
@@ -20,6 +22,12 @@ struct renderer_settings {
     bool native_lod, native_tex_rect, ss_readbacks, ss_dither;
 };
 extern struct renderer_settings renderer_settings;
+/* Full timing always includes component clocks. Fast CPU execution can retain
+ * work-derived RSP/RDP deadlines without emulating CPU cache contents. */
+static inline bool renderer_component_timing(void)
+{
+    return renderer_settings.per_cycle_timing || renderer_settings.component_timing;
+}
 void renderer_register_options(retro_environment_t environment);
 void renderer_read_options(retro_environment_t environment);
 enum controller_pak_option controller_read_pak_option(retro_environment_t environment, unsigned port);

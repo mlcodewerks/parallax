@@ -78,7 +78,8 @@ void poweron_r4300(struct r4300_core* r4300)
     r4300->cache_timing = 1;
     r4300->compat_issue_clock = 1;
 #ifdef __LIBRETRO__
-    r4300->cache_timing = renderer_settings.per_cycle_timing;
+    r4300->cache_timing = renderer_settings.per_cycle_timing ? 1 :
+        renderer_settings.fast_cpu_timing ? 2 : 0;
 #endif
 
     cached_interp_invalidate(r4300, 0, 0);

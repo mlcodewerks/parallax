@@ -208,7 +208,7 @@ void init_rsp(struct rsp_core* sp,
     sp->mem = sp_mem;
     sp->cycle_timing = 1;
 #ifdef __LIBRETRO__
-    sp->cycle_timing = renderer_settings.per_cycle_timing;
+    sp->cycle_timing = renderer_component_timing();
 #endif
     sp->mi = mi;
     sp->dp = dp;

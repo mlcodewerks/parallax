@@ -3,7 +3,8 @@
 
 // Coverage remains independent of scanout filters. Off retains geometric
 // ownership and rejection tests, but treats surviving pixels as fully covered.
-enum GLRDPCoverage { GLRDP_COVERAGE_OFF = 0, GLRDP_COVERAGE_REDUCED = 1, GLRDP_COVERAGE_FULL = 2 };
+enum GLRDPCoverage { GLRDP_COVERAGE_OFF = 0, GLRDP_COVERAGE_REDUCED = 1,
+                     GLRDP_COVERAGE_FULL = 2, GLRDP_COVERAGE_2X = 3 };
 enum GLRDPVIAA { GLRDP_VI_AA_OFF = 0, GLRDP_VI_AA_REDUCED = 1, GLRDP_VI_AA_FULL = 2 };
 enum GLRDPArithmetic { GLRDP_ARITHMETIC_ACCURATE = 0, GLRDP_ARITHMETIC_FAST = 1 };
 struct GLRDPConfig {
@@ -15,6 +16,7 @@ struct GLRDPConfig {
     bool texture_filter;
     bool accurate_texcoords, texture_lod, color_dither, alpha_dither;
     bool vi_bob;
+    bool accurate_shading, specialize_shaders;
 };
 // Frontend defaults preserve the former Fast preset. Low-level renderers use
 // full emulation by default for reference clients that supply no configuration.
@@ -34,7 +36,7 @@ static inline struct GLRDPConfig glrdp_default_config(void) {
                                  true,
                                  true,
                                  true,
-                                 false};
+                                 false, true, false};
     return config;
 }
 static inline struct GLRDPConfig glrdp_reference_config(void) {
@@ -53,11 +55,11 @@ static inline struct GLRDPConfig glrdp_reference_config(void) {
                                  true,
                                  true,
                                  true,
-                                 false};
+                                 false, true, false};
     return config;
 }
 static inline struct GLRDPConfig glrdp_validate_config(struct GLRDPConfig config) {
-    if ((unsigned)config.coverage > GLRDP_COVERAGE_FULL)
+    if ((unsigned)config.coverage > GLRDP_COVERAGE_2X)
         config.coverage = GLRDP_COVERAGE_FULL;
     if ((unsigned)config.vi_aa > GLRDP_VI_AA_FULL)
         config.vi_aa = GLRDP_VI_AA_FULL;

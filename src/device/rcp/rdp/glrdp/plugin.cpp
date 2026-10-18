@@ -391,7 +391,8 @@ PJ64_EXPORT void PJ64_CALL CaptureScreen(char *directory) {
 }
 
 // Bit mask: restore=1, divot=2, resample=4, gamma=8, gamma dither=16.
-// Coverage and AA use 0=off, 1=reduced, 2=full independently.
+// Coverage: 0=off, 1=four samples, 2=eight samples, 3=two samples.
+// AA uses 0=off, 1=reduced, 2=full independently.
 PJ64_EXPORT void PJ64_CALL SetRenderingFilters(int coverage, int aa, unsigned filters) {
     if (g_renderer) {
         GLRDPConfig config{static_cast<GLRDPCoverage>(coverage),
@@ -401,6 +402,7 @@ PJ64_EXPORT void PJ64_CALL SetRenderingFilters(int coverage, int aa, unsigned fi
                            (filters & 8) != 0,
                            (filters & 16) != 0,
                            (filters & 4) != 0};
+        config.accurate_shading = true;
         safe_gl_call([&] { g_renderer->set_rendering_config(config); });
     }
 }

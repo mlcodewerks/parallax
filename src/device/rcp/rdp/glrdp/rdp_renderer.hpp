@@ -1,4 +1,5 @@
 #pragma once
+#include "shader_config.hpp"
 #include "framebuffer_manager.hpp"
 #include "gl_loader.hpp"
 #include "n64_memory.hpp"
@@ -24,6 +25,9 @@ class RDPRenderer {
     void set_internal_resolution_scale(int scale);
     void set_rendering_config(GLRDPConfig config) {
         config_ = glrdp_validate_config(config);
+        program_ = specialized_program_ && config_.specialize_shaders &&
+                   glrdp_shader_config_key(config_) == specialized_key_
+                       ? specialized_program_ : generic_program_;
     }
     void set_display_resolution(int width, int height);
     void set_display_aspect_mode(int mode);
@@ -70,6 +74,8 @@ class RDPRenderer {
     void primitive_scissor(const GLFramebuffer &target, const RDPState &state, int scale);
     FramebufferManager fb_;
     GPUDepthBuffer gpu_depth_;
+    GLuint generic_program_ = 0, specialized_program_ = 0;
+    std::uint32_t specialized_key_ = 0;
     GLuint program_ = 0, present_program_ = 0, final_present_program_ = 0, vao_ = 0, vbo_ = 0;
     GLRDPConfig config_ = glrdp_reference_config();
     VIFieldHistory field_history_;

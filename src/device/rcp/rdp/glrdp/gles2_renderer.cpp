@@ -171,7 +171,13 @@ bool GLES2Renderer::initialize(N64Memory *memory, bool force_mediump) {
                                                   "#define Z_ROUND 0.0\n"
                                                   "#define PRECISE_Z 0\n") +
                                "precision P float;\nprecision mediump int;\n";
-    program_ = link(header, glrdp_es2::vertex, glrdp_es2::fragment);
+    generic_program_ = link(header, glrdp_es2::vertex, glrdp_es2::fragment);
+    if (config_.specialize_shaders) {
+        specialized_key_ = glrdp_shader_config_key(config_);
+        const auto specialized = glrdp_specialize_shader(glrdp_es2::fragment, config_, true);
+        specialized_program_ = link(header, glrdp_es2::vertex, specialized.c_str());
+    }
+    set_rendering_config(config_);
     present_program_ = link(header, glrdp_es2::present_vertex, glrdp_es2::present_fragment.c_str());
     glGenFramebuffers(1, &vi_fbo_);
     glGenTextures(1, &vi_color_);
@@ -189,11 +195,13 @@ bool GLES2Renderer::initialize(N64Memory *memory, bool force_mediump) {
         bytes(128 + i, rdp_tc_points[i] >> 8, rdp_tc_points[i], rdp_tc_slopes[i], 0);
     glActiveTexture(GL_TEXTURE1);
     texture(metadata_, 16, 16, meta_.data());
-    glUseProgram(program_);
-    glUniform1i(uniform(program_, "atlas_image"), 0);
-    glUniform1i(uniform(program_, "metadata"), 1);
-    glUniform1i(uniform(program_, "color_memory"), 2);
-    glUniform1i(uniform(program_, "depth_memory"), 3);
+    for (GLuint p : {generic_program_, specialized_program_}) if (p) {
+        glUseProgram(p);
+        glUniform1i(uniform(p, "atlas_image"), 0);
+        glUniform1i(uniform(p, "metadata"), 1);
+        glUniform1i(uniform(p, "color_memory"), 2);
+        glUniform1i(uniform(p, "depth_memory"), 3);
+    }
     glGetIntegerv(GL_MAX_TEXTURE_SIZE, &max_texture_);
     return true;
 }
@@ -217,8 +225,9 @@ void GLES2Renderer::shutdown() {
         glDeleteFramebuffers(2, s.fbo);
     }
     depth_.clear();
-    if (program_)
-        glDeleteProgram(program_);
+    if (generic_program_) glDeleteProgram(generic_program_);
+    if (specialized_program_) glDeleteProgram(specialized_program_);
+    generic_program_ = specialized_program_ = 0;
     if (present_program_)
         glDeleteProgram(present_program_);
     if (vbo_)
@@ -685,6 +694,7 @@ void GLES2Renderer::draw(const RDPState &s, const Planes &p, float x0, float y0,
     uniform4("key_center",
              {float(s.key.center_r), float(s.key.center_g), float(s.key.center_b), 0});
     uniform4("key_scale", {float(s.key.scale_r), float(s.key.scale_g), float(s.key.scale_b), 0});
+    glUniform1i(uniform(program_, "accurate_shading"), config_.accurate_shading);
     uniform4("accuracy_config", {float(config_.coverage), float(config_.blending),
                                  float(config_.combiner), float(config_.accurate_texcoords)});
     uniform4("settings", {float(s.primitive_min_lod), float(s.primitive_lod_fraction),

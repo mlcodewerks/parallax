@@ -213,7 +213,9 @@ vec2 raster_offset = vec2(0.0);
 float primitive_coverage = 1.0;
 uniform int cycle_type;
 uniform int coverage_mode;
-uniform bool fast_blending, fast_combiner;
+uniform bool fast_blending;
+uniform bool fast_combiner;
+uniform bool accurate_shading;
 uniform bool accurate_texcoords;
 uniform float copy_start_x;
 float copy_lane = 0.0;
@@ -920,6 +922,11 @@ bool fast_triangle_pixel(ivec2 pixel, bool first_sample_only) {
     return width < 65536 && right > left && x < right && x + 65536 > left;
 }
 
+bool coverage_sample(int row, int col) {
+    if (coverage_mode == 3)
+        return (row == 0 && col == 0) || (row == 2 && col == 1);
+    return coverage_mode != 1 || col == ((row == 1 || row == 2) ? 1 : 0);
+}
 float rdp_triangle_coverage() {
     ivec2 pixel = ivec2(floor(gl_FragCoord.xy / max(internalScale, 1.0)));
     pixel.y = int(viewport.y) - 1 - pixel.y;
@@ -933,6 +940,7 @@ float rdp_triangle_coverage() {
         bool found = false;
         bool coverage_bit = false;
         for (int row = 0; row < 4; ++row) {
+            if (coverage_mode == 3 && (row == 1 || row == 3)) continue;
             int y = pixel.y * 4 + row;
             if (y < edge_y.x || y >= edge_y.z)
                 continue;
@@ -941,18 +949,11 @@ float rdp_triangle_coverage() {
                                      : stepped_edge(edge_x.z, edge_slope.z, y - edge_y.y);
             int left = edge_y.w != 0 ? major : minor, right = edge_y.w != 0 ? minor : major;
             for (int col = 0; col < 2; ++col) {
-                if (coverage_mode == 1) {
-                    if (col != ((row == 1 || row == 2) ? 1 : 0))
-                        continue;
-                }
+                if (!coverage_sample(row, col)) continue;
                 int quarter = (row & 1) + col * 2;
                 int x = (pixel.x << 16) + (quarter << 14);
                 if (x >= left && x < right) {
-                    if (coverage_mode == 1) {
-                        covered += 2;
-                    } else {
-                        ++covered;
-                    }
+                    covered += coverage_mode == 3 ? 4 : (coverage_mode == 1 ? 2 : 1);
                     if (row == 0 && col == 0)
                         coverage_bit = true;
                     if (!found) {
@@ -1031,19 +1032,12 @@ float rdp_rectangle_coverage() {
         ivec2 first = ivec2(0);
         for (int row = 0; row < 4; ++row)
             for (int col = 0; col < 2; ++col) {
-                if (coverage_mode == 1) {
-                    if (col != ((row == 1 || row == 2) ? 1 : 0))
-                        continue;
-                }
+                if (!coverage_sample(row, col)) continue;
                 int quarter = (row & 1) + col * 2;
                 vec2 p = vec2(pixel) + vec2(quarter, row) * 0.25;
                 if (p.x >= rectangle_bounds.x && p.x < rectangle_bounds.z &&
                     p.y >= rectangle_bounds.y && p.y < rectangle_bounds.w) {
-                    if (coverage_mode == 1) {
-                        covered += 2;
-                    } else {
-                        ++covered;
-                    }
+                    covered += coverage_mode == 3 ? 4 : (coverage_mode == 1 ? 2 : 1);
                     if (row == 0 && col == 0)
                         first_bit = true;
                     if (!found) {
@@ -1077,10 +1071,7 @@ int alpha_coverage_at(ivec2 pixel, out ivec2 first) {
     } else {
         for (int row = 0; row < 4; ++row)
             for (int col = 0; col < 2; ++col) {
-                if (coverage_mode == 1) {
-                    if (col != ((row == 1 || row == 2) ? 1 : 0))
-                        continue;
-                }
+                if (!coverage_sample(row, col)) continue;
                 int quarter = (row & 1) + col * 2;
                 bool inside;
                 if (triangle_coverage) {
@@ -1100,11 +1091,7 @@ int alpha_coverage_at(ivec2 pixel, out ivec2 first) {
                 if (inside) {
                     if (count == 0)
                         first = ivec2(quarter, row);
-                    if (coverage_mode == 1) {
-                        count += 2;
-                    } else {
-                        ++count;
-                    }
+                    count += coverage_mode == 3 ? 4 : (coverage_mode == 1 ? 2 : 1);
                 }
             }
         return count;
@@ -1112,6 +1099,11 @@ int alpha_coverage_at(ivec2 pixel, out ivec2 first) {
 }
 int tc_span_gpu(ivec4 c, ivec2 pixel);
 int shade_span_gpu(ivec4 c, ivec2 pixel, ivec2 first, int coverage) {
+    if (!accurate_shading) {
+        vec2 point = vec2(pixel) + vec2(first) * 0.25 - triangle_origin;
+        return int(clamp(floor((float(c.x) + float(c.y) * point.x + float(c.w) * point.y) /
+                              65536.0 + 0.5), 0.0, 255.0));
+    }
     int value = tc_span_gpu(c, pixel);
     int result;
     if (coverage == 8)
@@ -1814,8 +1806,15 @@ void main() {
 )";
     // All RDP primitives use a conservative quad. Edge, texture, shade and
     // depth planes are evaluated by the same fragment ubershader.
-    program_ = link(vs, fs);
-    initialize_samplers(program_);
+    generic_program_ = link(vs, fs);
+    initialize_samplers(generic_program_);
+    if (config_.specialize_shaders) {
+        specialized_key_ = glrdp_shader_config_key(config_);
+        const auto specialized = glrdp_specialize_shader(fs, config_, false);
+        specialized_program_ = link(vs, specialized.c_str());
+        initialize_samplers(specialized_program_);
+    }
+    set_rendering_config(config_);
     present_program_ = link(pvs, pfs.c_str());
     final_present_program_ = link(final_vs, final_fs);
     glGenVertexArrays(1, &vao_);
@@ -1914,8 +1913,9 @@ void RDPRenderer::shutdown() {
     if (vao_)
         glDeleteVertexArrays(1, &vao_);
 
-    if (program_)
-        glDeleteProgram(program_);
+    if (generic_program_) glDeleteProgram(generic_program_);
+    if (specialized_program_) glDeleteProgram(specialized_program_);
+    generic_program_ = specialized_program_ = 0;
     if (present_program_)
         glDeleteProgram(present_program_);
     if (final_present_program_)
@@ -2180,10 +2180,7 @@ void RDPRenderer::configure_rdp_program(GLuint active_program, const GLFramebuff
         s.fill_color,
         unsigned(s.color_image.size) | (unsigned(s.color_image.format) << 8) |
             (unsigned(max_mip_level_) << 16) | (std::uint64_t(s.blend.a) << 24),
-        unsigned(config_.coverage) | (unsigned(config_.blending) << 2) |
-            (unsigned(config_.combiner) << 3) | (unsigned(config_.texture_filter) << 4) |
-            (unsigned(config_.accurate_texcoords) << 5) | (unsigned(config_.texture_lod) << 6) |
-            (unsigned(config_.color_dither) << 7) | (unsigned(config_.alpha_dither) << 8)};
+        glrdp_shader_config_key(config_)};
     if (cycle_type == 2)
         glUniform1f(loc("copy_start_x"), float(std::max(bounds_x_, int(s.scissor_xh) >> 2)));
     auto previous = configuration_values_.find(active_program);
@@ -2196,6 +2193,7 @@ void RDPRenderer::configure_rdp_program(GLuint active_program, const GLFramebuff
     glUniform1i(loc("fast_blending"), config_.blending == GLRDP_ARITHMETIC_FAST);
     glUniform1i(loc("fast_combiner"), config_.combiner == GLRDP_ARITHMETIC_FAST);
     glUniform1i(loc("accurate_texcoords"), config_.accurate_texcoords);
+    glUniform1i(loc("accurate_shading"), config_.accurate_shading);
 
     const int alpha_compare_mode = int(s.other_modes & 3);
     const int texture_filter_mode = config_.texture_filter ? int((s.other_modes >> 44) & 3) : 0;

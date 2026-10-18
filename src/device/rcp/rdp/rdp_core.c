@@ -310,7 +310,7 @@ void init_rdp(struct rdp_core* dp,
     dp->vi_regs = NULL;
     dp->instruction_timing = 1;
 #ifdef __LIBRETRO__
-    dp->instruction_timing = renderer_settings.per_cycle_timing;
+    dp->instruction_timing = renderer_component_timing();
 #endif
 
     init_fb(&dp->fb, mem, rdram, r4300);

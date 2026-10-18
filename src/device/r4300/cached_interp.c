@@ -1326,7 +1326,9 @@ static CI_FORCE_INLINE int ci_execute_direct_ram(struct r4300_core* r, uint32_t 
         unsigned index = (address >> 4) & 511;
         uint32_t* tag = &r->dcache_tags[index];
         if ((*tag & ~2u) != ((physical & UINT32_C(0x1ffff000)) | 1)) return 0;
-        word = &r->dcache_words[index][(physical >> 2) & 3];
+        word = r->cache_timing == 2 ?
+            &((struct rdram*)handler->opaque)->dram[rdram_dram_address(physical)] :
+            &r->dcache_words[index][(physical >> 2) & 3];
         if (write) *tag |= 2;
         *access_cycles = R4300_DCACHE_HIT_CYCLES;
     } else {
@@ -1701,7 +1703,7 @@ static void ci_execute_jit(struct r4300_core* r, int one)
          * across unsafe delay slots. Compile those sooner than cold regions. */
         if (!one && block->heat < (block->native_candidate == 2 ? 3 : 8)) {
             ++block->heat;
-            ci_execute_block(r, r->cache_timing != 0, block);
+            ci_execute_block(r, r->cache_timing, block);
             return;
         }
         ++state->jit_compile_misses[*entry != NULL];

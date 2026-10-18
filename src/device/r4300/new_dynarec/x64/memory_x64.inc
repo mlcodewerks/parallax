@@ -245,13 +245,20 @@ static void emit_memory_native(uint32_t instruction, unsigned index,
         emit_mov(R11, RCX); emit_shift_reg(RCX, 5, 4, 0); emit_imm_op(4, RCX, 511, 0);
         emit_mem(0x8b, 0, RAX, R12, RCX, 2, offsetof(struct r4300_core, dcache_tags));
         emit_imm_op(4, RAX, ~UINT32_C(2), 0);
+        /* Keep the direct RAM pointer for the tags-only model. Restore before
+         * any side exit; POP preserves the tag comparison's flags. */
+        if (config->cache_timing == 2) { output_byte(0x41); output_byte(0x56); } /* PUSH r14 */
         emit_mov(RDX, R14); emit_imm_op(4, R14, UINT32_C(0x1ffff000), 0); emit_imm_op(1, R14, 1, 0);
-        emit_reg_op(0x39, R14, RAX, 0); memory_guard(exit, 5);
+        emit_reg_op(0x39, R14, RAX, 0);
+        if (config->cache_timing == 2) { output_byte(0x41); output_byte(0x5e); } /* POP r14 */
+        memory_guard(exit, 5);
         if (write) {
             emit_mem(0x81, 0, 1, R12, RCX, 2, offsetof(struct r4300_core, dcache_tags)); output_w32(2);
         }
-        emit_mov(R11, R14); emit_imm_op(4, R14, UINT32_C(0x1ffc), 0);
-        emit_mem(0x8d, 1, R14, R12, R14, 0, offsetof(struct r4300_core, dcache_words));
+        if (config->cache_timing != 2) {
+            emit_mov(R11, R14); emit_imm_op(4, R14, UINT32_C(0x1ffc), 0);
+            emit_mem(0x8d, 1, R14, R12, R14, 0, offsetof(struct r4300_core, dcache_words));
+        }
         emit_movimm(1, RCX); emit_movimm(1, RDX);
         output_byte(0xe9); unsigned char* data_ready = out; output_w32(0);
         patch_jump(uncached, out); patch_jump(config_uncached, out); patch_jump(mapped_uncached, out);

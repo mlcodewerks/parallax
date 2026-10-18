@@ -77,7 +77,7 @@ bool glrdp_context_reset(const retro_hw_render_callback *callback) {
                es2 ? "native GLES2 RDP" : "native GL 3.3 RDP");
     if (log_cb) {
         const auto &c = renderer_settings.glrdp;
-        const char *levels[] = {"off", "reduced", "full"};
+        const char *levels[] = {"off", "reduced", "full", "2x"};
         log_cb(
             RETRO_LOG_INFO,
             "GLRDP filters = coverage=%s aa=%s restore=%u divot=%u resample=%u gamma=%u gamma_dither=%u.\n",
@@ -93,6 +93,8 @@ bool glrdp_context_reset(const retro_hw_render_callback *callback) {
                "GLRDP tradeoffs = texcoords=%s lod=%u color_dither=%u alpha_dither=%u.\n",
                c.accurate_texcoords ? "accurate" : "fast", unsigned(c.texture_lod),
                unsigned(c.color_dither), unsigned(c.alpha_dither));
+        log_cb(RETRO_LOG_INFO, "GLRDP shader controls = shading=%s specialization=%u.\n",
+               c.accurate_shading ? "accurate" : "fast", unsigned(c.specialize_shaders));
     }
     try {
         // Compile before emulation starts. RDRAM is bound by glrdp_open;

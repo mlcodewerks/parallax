@@ -244,7 +244,7 @@ unsigned int optional_rsp_execute(unsigned int cycles)
         *info.DPC_START_REG=*info.DPC_CURRENT_REG=*info.DPC_END_REG=task[11];
     }
     forwarded = 0;
-    hle_timing_set_slice_limit(renderer_settings.per_cycle_timing?32768u:0u);
+    hle_timing_set_slice_limit(renderer_component_timing()?32768u:0u);
     start_status = *info.SP_STATUS_REG;
     parallelRSPResetExecutedCycles();
     hle.rsp_vco=parallelRSPGetVCO();hle.rsp_vco_written=0;

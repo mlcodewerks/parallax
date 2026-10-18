@@ -1,4 +1,5 @@
 #pragma once
+#include "shader_config.hpp"
 #include "framebuffer_manager.hpp"
 #include "rdp_tmem.hpp"
 #include "rdp_accuracy.h"
@@ -22,6 +23,9 @@ class GLES2Renderer {
     }
     void set_rendering_config(GLRDPConfig config) {
         config_ = glrdp_validate_config(config);
+        program_ = specialized_program_ && config_.specialize_shaders &&
+                   glrdp_shader_config_key(config_) == specialized_key_
+                       ? specialized_program_ : generic_program_;
     }
     void set_output_size(int w, int h) {
         output_w_ = w;
@@ -80,6 +84,8 @@ class GLES2Renderer {
     VIFieldHistory field_history_;
     GLuint field_fbo_ = 0, field_color_ = 0;
     int field_w_ = 0, field_h_ = 0;
+    GLuint generic_program_ = 0, specialized_program_ = 0;
+    std::uint32_t specialized_key_ = 0;
     GLuint program_ = 0, present_program_ = 0, vbo_ = 0, atlas_ = 0, metadata_ = 0, feedback_ = 0,
            output_fbo_ = 0;
     GLuint vi_fbo_ = 0, vi_color_ = 0;
