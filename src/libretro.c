@@ -402,7 +402,7 @@ void retro_set_environment(retro_environment_t cb)
 
 void retro_get_system_info(struct retro_system_info *info)
 {
-    info->library_name = "libgarbagefiar";
+    info->library_name = "Parallax";
     info->library_version = "0.01";
     info->valid_extensions = "n64|v64|z64|bin|u1";
     info->need_fullpath = false;

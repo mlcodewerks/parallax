@@ -43,11 +43,11 @@ static const struct retro_variable options[] = {
     {"wtfn64_glrdp_vi_gamma", "GLRDP VI gamma correction (restart required); enabled|disabled"},
     {"wtfn64_glrdp_vi_gamma_dither", "GLRDP VI gamma dithering (restart required); enabled|disabled"},
 #endif
-    {"wtfn64_rsp_hle", "RSP HLE (restart required); disabled|enabled"},
+    {"wtfn64_rsp_hle", "RSP HLE (restart required); enabled|disabled"},
     {"wtfn64_cpu_core", "CPU core (restart required); " CPU_CORES},
     {"wtfn64_lle_graphics", "Send display lists to LLE RSP (restart required); disabled|enabled"},
     {"wtfn64_lle_audio", "Send audio lists to LLE RSP (restart required); disabled|enabled"},
-    {"wtfn64_timing", "Timing accuracy (restart required); accurate|fast"},
+    {"wtfn64_timing", "Timing accuracy (restart required); fast|accurate"},
     {"wtfn64_angrylion_threads", "Angrylion rendering threads (restart required); 6|2|4|8|10|auto"},
     {"wtfn64_performance_cores", "Performance cores only (restart required); enabled|disabled"},
     {"wtfn64_angrylion_upscale", "Angrylion upscaling (restart required); 1|2|4"},
@@ -241,11 +241,11 @@ void renderer_read_options(retro_environment_t env)
     struct renderer_settings *s = &renderer_settings;
     const char *v;
     memset(s, 0, sizeof(*s));
-    s->rsp_hle = toggle(env, "wtfn64_rsp_hle", false);
+    s->rsp_hle = toggle(env, "wtfn64_rsp_hle", true);
     s->lle_graphics = toggle(env, "wtfn64_lle_graphics", false);
     s->lle_audio = toggle(env, "wtfn64_lle_audio", false);
-    v = value(env, "wtfn64_timing", "accurate");
-    s->per_cycle_timing = strcmp(v, "fast") != 0;
+    v = value(env, "wtfn64_timing", "fast");
+    s->per_cycle_timing = strcmp(v, "accurate") == 0;
     s->component_timing = true;
     s->fast_cpu_timing = true;
     v = value(env, "wtfn64_cpu_core", "cached");

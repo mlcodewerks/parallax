@@ -82,7 +82,7 @@ else ifeq ($(ARCH), $(filter $(ARCH), arm))
    WITH_DYNAREC = arm
 endif
 
-TARGET_NAME := libgarbagefire
+TARGET_NAME := parallax
 CC_AS ?= $(CC)
 NASM  ?= nasm
 
@@ -97,7 +97,7 @@ endif
 
 # Linux
 ifneq (,$(findstring unix,$(platform)))
-   TARGET := $(TARGET_NAME).so
+   TARGET := $(TARGET_NAME)_libretro.so
    LDFLAGS += -shared -Wl,--version-script=$(ROOT_DIR)/src/link.T -Wl,--no-undefined
 
    ifeq ($(FORCE_GLES),1)
@@ -139,7 +139,7 @@ ifneq (,$(findstring unix,$(platform)))
 
 # Raspberry Pi
 else ifneq (,$(findstring rpi,$(platform)))
-   TARGET := $(TARGET_NAME).so
+   TARGET := $(TARGET_NAME)_libretro.so
    LDFLAGS += -shared -Wl,--version-script=$(LIBRETRO_DIR)/link.T -Wl,--no-undefined -ldl
    ifeq ($(FORCE_GLES3),1)
       GLES3 = 1
@@ -484,7 +484,7 @@ else ifeq ($(platform), emscripten)
    ASFLAGS = -f elf -d ELF_TYPE
 # Windows
 else
-   TARGET := $(TARGET_NAME).dll
+   TARGET := $(TARGET_NAME)_libretro.dll
    LDFLAGS += -shared -Wl,--version-script=$(ROOT_DIR)/src/link.T
    
    ifeq ($(MSYSTEM),MINGW64)
