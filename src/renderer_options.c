@@ -47,9 +47,7 @@ static const struct retro_variable options[] = {
     {"wtfn64_cpu_core", "CPU core (restart required); " CPU_CORES},
     {"wtfn64_lle_graphics", "Send display lists to LLE RSP (restart required); disabled|enabled"},
     {"wtfn64_lle_audio", "Send audio lists to LLE RSP (restart required); disabled|enabled"},
-    {"wtfn64_per_cycle_timing", "Per-cycle timing (restart required); enabled|disabled"},
-    {"wtfn64_component_timing", "Component timing (restart required); enabled|disabled"},
-    {"wtfn64_fast_cpu_timing", "Fast CPU timing approximation (restart required); enabled|disabled"},
+    {"wtfn64_timing", "Timing accuracy (restart required); accurate|fast"},
     {"wtfn64_angrylion_threads", "Angrylion rendering threads (restart required); 6|2|4|8|10|auto"},
     {"wtfn64_performance_cores", "Performance cores only (restart required); enabled|disabled"},
     {"wtfn64_angrylion_upscale", "Angrylion upscaling (restart required); 1|2|4"},
@@ -114,7 +112,7 @@ void renderer_register_options(retro_environment_t environment)
             if (strstr(d->key, "angrylion")) d->category_key = "angrylion";
             else if (strstr(d->key, "glrdp")) d->category_key = "glrdp";
             else if (strstr(d->key, "parallel") || strstr(d->key, "ss_") || strstr(d->key, "native_tex_rect")) d->category_key = "parallel";
-            else if (strstr(d->key, "rsp_") || strstr(d->key, "lle_") || strstr(d->key, "_timing") || !strcmp(d->key, "wtfn64_cpu_core")) d->category_key = "emulation";
+            else if (strstr(d->key, "rsp_") || strstr(d->key, "lle_") || strstr(d->key, "_timing") || strstr(d->key, "wtfn64_cpu_")) d->category_key = "emulation";
             if (!strcmp(d->key, "wtfn64_glrdp_blending"))
                 d->info = "Accurate uses the RDP divider and quantized blend factors. Fast uses arithmetic division with the same colour sources and factors; translucent edges may differ. Restart content to apply.";
             if (!strcmp(d->key, "wtfn64_glrdp_combiner"))
@@ -154,14 +152,10 @@ void renderer_register_options(retro_environment_t environment)
                 d->info = "Allow gamma correction when requested by the game. Independent of gamma dithering. Restart content to apply.";
             if (!strcmp(d->key, "wtfn64_glrdp_vi_gamma_dither"))
                 d->info = "Allow gamma dithering when requested by the game. Independent of gamma correction. Restart content to apply.";
-            if (!strcmp(d->key, "wtfn64_per_cycle_timing"))
-                d->info = "Enable CPU cache emulation and detailed timing. When disabled, Component timing can retain work-derived RSP and RDP completion clocks with fast CPU execution. Restart content to apply.";
-            if (!strcmp(d->key, "wtfn64_component_timing"))
-                d->info = "Time RSP tasks and RDP commands by their work, including pipeline and DMA waits, while Per-cycle timing is disabled. Disabled uses fixed task delays. Always active with Per-cycle timing enabled. Restart content to apply.";
-            if (!strcmp(d->key, "wtfn64_fast_cpu_timing"))
-                d->info = "Retain instruction pipeline hazards, cache hit/miss latency and uncached bus delays with Per-cycle timing disabled. Tracks cache tags while accessing RAM directly; does not reproduce stale cache contents. Restart content to apply.";
+            if (!strcmp(d->key, "wtfn64_timing"))
+                d->info = "Accurate uses full CPU cache contents and detailed per-cycle timing. Fast tracks cache tags, instruction interlocks and bus delays while accessing RAM directly. Both time RSP tasks and RDP commands by their work, including pipeline and DMA waits. Restart content to apply.";
             if (!strcmp(d->key, "wtfn64_cpu_core"))
-                d->info = "Select the CPU execution core. All choices use the same instruction behavior and Per-cycle timing setting. Restart content to apply.";
+                d->info = "Select the CPU execution core. All choices use the same instruction behavior and Timing accuracy setting. Restart content to apply.";
             if (!strcmp(d->key, "wtfn64_rsp_hle"))
                 d->info = "Use HLE for supported RSP microcodes. Unsupported RSP tasks use LLE. Graphics/audio LLE overrides apply to their respective tasks. Restart content to apply.";
             if (!strcmp(d->key, "wtfn64_lle_graphics"))
@@ -250,9 +244,10 @@ void renderer_read_options(retro_environment_t env)
     s->rsp_hle = toggle(env, "wtfn64_rsp_hle", false);
     s->lle_graphics = toggle(env, "wtfn64_lle_graphics", false);
     s->lle_audio = toggle(env, "wtfn64_lle_audio", false);
-    s->per_cycle_timing = toggle(env, "wtfn64_per_cycle_timing", true);
-    s->component_timing = toggle(env, "wtfn64_component_timing", true);
-    s->fast_cpu_timing = toggle(env, "wtfn64_fast_cpu_timing", true);
+    v = value(env, "wtfn64_timing", "accurate");
+    s->per_cycle_timing = strcmp(v, "fast") != 0;
+    s->component_timing = true;
+    s->fast_cpu_timing = true;
     v = value(env, "wtfn64_cpu_core", "cached");
     s->cpu_core = !strcmp(v, "pure") ? CPU_CORE_PURE : CPU_CORE_CACHED;
 #ifdef HAVE_ARI64_X64

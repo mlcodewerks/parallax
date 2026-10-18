@@ -1,37 +1,17 @@
 #include "../../rsp/hle/hle_timing.h"
-/* rdp_emit_f3ddkr.c -- F3DDKR (Diddy Kong Racing custom microcode) display-
- * list dispatcher for the angrylion HLE path. See rdp_emit_f3ddkr.h for the
- * GBI overview. ISO C89 / MSVC-compatible.
+/* Rare's F3DDKR / JFG display-list decoder. Command dispatch, DMA,
+ * projection and clipping were decoded from the retail programs, including
+ * their reciprocal and clip overlays. See benchmarks/RARE_UCODE_ACCURACY.md
+ * for ROM identities, instruction ranges and native replay checks.
  *
- * Decode rules are taken from the F3DDKR GBI macros (the game's own f3ddkr.h):
- *
- *   gSPVertexDKR(pkt, v, n, v0):
- *     gDma1p(G_VTX, v, ((n*8 + n) << 1) + 8, ((n-1) << 3) | ((v) & 6) | v0)
- *     -> w0 low 16 bits = byte length, command 0x04; w1 = segmented addr.
- *        n is recovered from the parameter byte: ((param >> 3) & 0x1f) + 1.
- *        v0 (destination base) is param & 1 here in practice (the (v)&6 bits
- *        are address alignment carried for the RSP DMA, not a dest index);
- *        bit 0 is the G_VTX_APPEND flag.
- *
- *   gSPPolygon(dl, ptr, numTris, texEnabled):  command G_TRIN = 0x05
- *     w0 = (G_TRIN << 24) | (((numTris-1) << 4 | texEnabled) << 16)
- *            | (numTris * 16);   w1 = segmented addr of the triangle array.
- *     Each triangle entry is 4 bytes: i0, i1, i2, flags.
- *
- *   gSPMatrixDKR(pkt, m, i):  command G_MTX = 0x01, param (i) << 6 selects the
- *     destination matrix slot (0/1/2).  gSPSelectMatrixDKR selects the active
- *     MVP via G_MOVEWORD/G_MW_MVPMATRIX.
- *
- *   gDkrDmaDisplayList: command G_DMADL = 0x07, w0 carries the command count.
- *
- * Billboarding (G_MOVEWORD G_MW_BILLBOARD): while enabled, gSPVertexDKR
- * vertices are added to vertex 0 after MVP transform, before perspective
- * divide. NOT yet implemented here (see the G_MW_BILLBOARD note below); the
- * common 3D track/model geometry path does not use it, so plain rendering is
- * correct without it -- billboard sprites are the first follow-up.
+ * DKR: 10-byte XYZ/RGBA vertices, count-1 plus retained append base;
+ * JFG/Mickey: unbiased count and an explicit 7-bit destination;
+ * 0x05: 16-byte flag/index/S/T triangle records;
+ * 0x07: raw RDP DMA, never a recursively interpreted GBI list.
  */
 #include "rdp_emit_f3ddkr.h"
 #include "rdp_emit_f3d.h"
+#include "rdp_emit_rsp.h"
 
 #if defined(_MSC_VER) && (_MSC_VER < 1600)
 typedef signed   __int32 dkr_int32_t;
@@ -57,8 +37,7 @@ typedef signed   __int32 dkr_int32_t;
 #define JFG_G_DMA_OFFSETS       0xBF  /* JFG/Mickey build only */
 
 /* G_MOVEWORD indices used by DKR. The index byte is the low 8 bits of w0
- * (gImmp21 packs G_MOVEWORD as cmd<<24 | offset<<8 | index); GLideN64's
- * F3DDKR_MoveWord likewise reads _SHIFTR(w0,0,8). G_MW_SEGMENT is the stock
+ * (gImmp21 packs G_MOVEWORD as cmd<<24 | offset<<8 | index). G_MW_SEGMENT is the stock
  * F3D segment-base move that gSPSegment/rsp_segment emit: DKR uses it to point
  * SEGMENT_FRAMEBUFFER/ZBUFFER/MAIN at the live buffers each frame, so the
  * walker must record it or the SET_COLOR_IMAGE/SET_*_IMAGE seg lookups below
@@ -73,7 +52,7 @@ typedef signed   __int32 dkr_int32_t;
  * the gSPVertexDKR macro ORs v0's low bit, which lands here. */
 #define F3DDKR_VTX_APPEND 0x00010000u
 
-#define DKR_DL_MAX_DEPTH 10
+#define DKR_DL_MAX_DEPTH 11
 
 /* ---- module state -------------------------------------------------------- */
 static unsigned char *s_rdram = 0;
@@ -83,30 +62,20 @@ static int   s_textured  = 0;
 static int   s_zbuffered = 0;
 static int   s_dl_depth  = 0;
 static int   s_mtx_slot  = 0;   /* active MVP slot selected by gSPSelectMatrixDKR */
-static int   s_billboard = 0;   /* G_MW_BILLBOARD state (decode only for now) */
+static int   s_billboard = 0;   /* nonzero adds the previous vertex-0 anchor */
 static unsigned int s_othermode_h = 0;
 static unsigned int s_othermode_l = 0;
-static int   s_vtx_top   = 0;   /* next free vertex slot for G_VTX_APPEND */
+static int   s_vtx_top   = 0;   /* preceding non-append count, retained across draws */
 static unsigned int s_geom = 0; /* raw GBI 1 geometry mode; translated on write */
-/* JFG/Mickey's-Speedway build of the microcode (see f3ddkr_is_ucode): the
- * G_VTX count field is not biased by one, G_MTX carries the slot index in
- * bits 16..19 with a multiply flag in bit 23, and two extra commands appear:
- * G_DMA_OFFSETS (0xBF) supplies base offsets added to the matrix and vertex
- * DMA addresses, and G_DMA_TEX_OFFSET (0x02) points at a u16 table of
- * per-load texture-image address shifts (scrolling-texture animation). */
+/* JFG/Mickey: three-bit destination/source matrix slots, multiply bit 23,
+ * vertex/matrix DMA offsets, and a DMA'd 32-halfword texture shift table. */
 static int   s_jfg = 0;
 static unsigned int s_dma_mtx = 0;  /* G_DMA_OFFSETS matrix base */
 static unsigned int s_dma_vtx = 0;  /* G_DMA_OFFSETS vertex base */
 static unsigned int s_tex_ofs = 0;  /* G_DMA_TEX_OFFSET table address */
-static unsigned int s_tex_shift = 0;
 static unsigned int s_tex_count = 0;
-/* Last forwarded SET_TEXTURE_IMAGE, kept so a LOAD_BLOCK that invalidates the
- * texture shift (see JFG_G_DMA_TEX_OFFSET) can re-emit it unshifted before
- * the load consumes the address. */
-static unsigned int s_timg_w0 = 0;
-static unsigned int s_timg_base = 0;
-static int          s_timg_shifted = 0;
-
+static unsigned short s_tex_offsets[32];
+static unsigned int s_rdp_half = 0;
 /* ---- helpers (mirror rdp_emit_f3d.c) ------------------------------------ */
 static unsigned int rd32(const unsigned char *r, unsigned int a)
 {
@@ -150,8 +119,8 @@ void f3ddkr_seg_reset(void)
     s_dma_mtx   = 0u;
     s_dma_vtx   = 0u;
     s_tex_ofs   = 0u;
-    s_tex_shift = 0u;
     s_tex_count = 0u;
+    s_rdp_half = 0u;
     /* s_jfg is not reset here: f3ddkr_is_ucode() sets it per task, and the
      * hle.c dispatch calls that detector before this reset. */
 }
@@ -159,7 +128,7 @@ void f3ddkr_seg_reset(void)
 void f3ddkr_set_rdram(unsigned char *rdram)   { s_rdram = rdram; }
 void f3ddkr_set_rdram_size(unsigned int size) { s_rdram_size = size; }
 
-void f3ddkr_seed_othermode(GSPState *gsp, const unsigned char *rdram,
+void f3ddkr_seed_task(GSPState *gsp, const unsigned char *rdram,
                            unsigned int rdram_size, unsigned int ud)
 {
     unsigned int w0, w1;
@@ -175,29 +144,43 @@ void f3ddkr_seed_othermode(GSPState *gsp, const unsigned char *rdram,
        |  (unsigned int)rdram[(ud + 0x11f) ^ 3];
     if ((w0 >> 24) != 0xefu)
         return;
-    s_othermode_h = w0 & 0x00ffffffu;
+    s_othermode_h = w0;
     s_othermode_l = w1;
+    {
+        int plane, lane;
+        for (plane=0;plane<6;plane++)
+            for (lane=0;lane<4;lane++) {
+                unsigned int a=ud+0x98u-plane*8u+lane*2u;
+                gsp->dkr_clip_rows[plane][lane]=(short)
+                    ((rdram[a^3u]<<8)|rdram[(a+1u)^3u]);
+            }
+        gsp_set_persp_norm(gsp, rd32(rdram,ud+0x110u)&0xffffu);
+        s_geom=rd32(rdram,ud+0x114u);
+        gsp_set_geometry_mode(gsp,f3d_xlate_geom(s_geom));
+        if (ud + 0x420u <= rdram_size) {
+            unsigned int bank=s_jfg ? 0x220u : 0x210u;
+            unsigned int fog=rd32(rdram,ud+0x1e0u);
+            for (lane=0;lane<8;lane++)
+                gsp_matrix_dkr(gsp,rdram,ud+bank+lane*64u,lane,0,0);
+            s_mtx_slot=(int)((rd32(rdram,ud+0x148u)>>6)&(s_jfg?7u:3u));
+            gsp_select_matrix_dkr(gsp,s_mtx_slot);
+            gsp_set_viewport(gsp,rdram,ud+0x1d0u);
+            gsp_set_fog(gsp,(short)(fog>>16),(short)fog);
+            s_billboard=rd32(rdram,ud+0x144u)!=0u;
+            s_vtx_top=(short)(rd32(rdram,ud+0x14cu)>>16);
+            s_textured=(int)((s_geom>>1)&1u);
+            gsp->tex_tile=(int)((rd32(rdram,ud+0x120u)>>8)&7u);
+            gsp->tex_level=(int)((rd32(rdram,ud+0x120u)>>11)&7u);
+            for(lane=0;lane<16;lane++) s_seg[lane]=rd32(rdram,ud+0x160u+lane*4u);
+        }
+    }
     s_zbuffered = (((s_othermode_l >> 4) & 1u) ||
                    ((s_othermode_l >> 5) & 1u)) ? 1 : 0;
-    gsp_set_dkr_shade_alpha_zero(gsp,
-        (((s_othermode_l >> 30) & 3u) == 3u) ? 1 : 0);
 }
 
-/* Recognise the F3DDKR custom microcode by a positive fingerprint in its GBI
- * command dispatch table (data+0xbc, u16 IMEM handler addresses indexed by
- * opcode). F3DDKR shares F3D's lineage -- same boot word (text+4 = 0x201d0110)
- * and the same 0xef othermode-init tag at data+0x118 as stock F3DEX v1 -- so
- * neither the boot word nor the data-segment tags distinguish it. What does
- * distinguish it is that DKR implements opcode 0x07 (G_DMADL,
- * gDkrDmaDisplayList): its table slot points at a real handler, whereas stock
- * F3DEX/F3D leave that opcode at the table's null/NOP stub. (Verified against
- * the retail F3DDKR xbus data segment: op 0x07 -> 0x145c, a real handler,
- * while the most-common "null" entry is 0x10a8; stock gspF3DEX.fifo leaves
- * op 0x07 at its own null stub 0x109c.)
- *
- * The null stub value differs per build, so compute it as the most frequent
- * table entry and test that G_DMADL's slot is something else. This is robust
- * across the DKR/JFG/Mickey F3DDKR family without a per-build constant. */
+/* Positive fingerprints in the resident primary/secondary dispatch tables.
+ * DKR and JFG/Mickey are separate programs; they share the command family
+ * but differ in DMA field layout. Do not infer a build from a NOP pattern. */
 int f3ddkr_is_ucode(const unsigned char *rdram, unsigned int rdram_size,
                     unsigned int ud, unsigned int uds)
 {
@@ -209,33 +192,13 @@ int f3ddkr_is_ucode(const unsigned char *rdram, unsigned int rdram_size,
     for (i = 0; i < 16; i++)
         tbl[i] = (unsigned short)(((unsigned int)rdram[(ud + 0xbc + i * 2u) ^ 3] << 8)
                                  | (unsigned int)rdram[(ud + 0xbd + i * 2u) ^ 3]);
-    /* Match F3DDKR by an exact fingerprint of its GBI command dispatch table
-     * (data+0xbc, u16 IMEM handler addresses). These four handler addresses
-     * at these table positions are specific to the F3DDKR microcode image and
-     * are shared by the us/eu/jp DKR builds (same ucode). A non-DKR microcode
-     * would have to place four identical handler addresses at the same four
-     * table slots to collide, which does not happen in practice -- this is
-     * what makes the detector exclusive and stops it from hijacking other
-     * F3D-family tasks (the earlier slot-pattern heuristic was not opcode-
-     * accurate because the dispatch index is shifted, so it pattern-matched
-     * bytes and false-positived on Doom 64 / Yoshi's Story).
-     *
-     * Verified against the retail F3DDKR xbus data segment:
-     *   tbl[0]=0x1340 tbl[5]=0x1358 tbl[7]=0x145c tbl[8]=0x146c
-     * and against gspF3DEX.fifo, which matches none of them. */
     if (tbl[0] == 0x1340 && tbl[5] == 0x1358
         && tbl[7] == 0x145c && tbl[8] == 0x146c)
     {
         s_jfg = 0;
         return 1;
     }
-    /* The Jet Force Gemini / Mickey's Speedway USA evolution of the same
-     * microcode: the dispatch table keeps the DKR shape (same handler
-     * spacing: tbl[5]-tbl[0] = 0x18, tbl[8]-tbl[7] = 0x10) but the image is
-     * relocated and grew, so the handler addresses differ. Fingerprinted the
-     * same way, against the retail Mickey's Speedway USA xbus data segment
-     * (null stub 0x10cc at slots 1/4/12/13). This build changes the command
-     * set (see s_jfg above), so record the variant for the walker. */
+    /* The captured retail JFG and Mickey resident/overlay images match. */
     if (tbl[0] == 0x1390 && tbl[5] == 0x13a8
         && tbl[7] == 0x1504 && tbl[8] == 0x1514)
     {
@@ -247,48 +210,32 @@ int f3ddkr_is_ucode(const unsigned char *rdram, unsigned int rdram_size,
 
 /* ---- the F3DDKR walker --------------------------------------------------- */
 static void f3ddkr_run_dl_impl(GSPState *gsp, RdpFifo *fifo, unsigned int addr,
-                               int max_cmds, int textured, int z_buffered);
-static void f3ddkr_run_dl_n(GSPState *gsp, RdpFifo *fifo, unsigned int addr,
-                            int n, int textured, int z_buffered);
+                               int textured, int z_buffered);
+
 
 void f3ddkr_run_dl(GSPState *gsp, RdpFifo *fifo, unsigned int addr,
                    int textured, int z_buffered)
 {
-    /* DKR's F3DDKR is a standard (non-NoN) F3D-family microcode: dRspInit
-     * carries gsSPClipRatio(FRUSTRATIO_2) and no No-Nearclipping markers, so
-     * the near plane is z + w, not w alone.  The shared GSPState defaults
-     * clip_near_z to 0 (the NoN / w-only plane), and the DKR walker -- unlike
-     * the F3D walker -- never raised it, so the polygon clipper intersected
-     * against w = 0.  Vertices straddling the eye then clipped to cw == 0
-     * (or a hair negative), which the perspective divide cannot project and
-     * saturates to the screen-coordinate clamp.  Clip at z + w like the rest
-     * of the F3D family so the boundary vertex lands just in front of the eye
-     * with a small positive w. */
+    /* Both builds use z+w near clipping, a reversed stable fan, and the
+     * doubled/Newton divide with a final +3 factor accumulator seed. */
     gsp->clip_near_z = 1;
-    /* DKR's vertex chain is Rare's own, not the F3D/F3DEX MAC chain the
-     * bridge's rsp_vtx_screen models: the game never sends a perspNorm and
-     * its raw w values run far outside the modelled domain, so the F3D
-     * model displaced vertices by up to ~11 px (background batches worst).
-     * The exact divide tracks the cxd4 LLE stream to sub-quarter-pixel. */
+    gsp->clip_fan_first = 2;
+    rsp_set_clip_lerp_l3dex(1);
+    /* Preserve Rare's raw S/T domain while selecting its exact screen model. */
     gsp_set_rsp_screen_model(gsp, 0);
-    f3ddkr_run_dl_impl(gsp, fifo, addr, 0, textured, z_buffered);
-}
-
-/* count-delimited entry (gDkrDmaDisplayList): walk exactly n commands. */
-static void f3ddkr_run_dl_n(GSPState *gsp, RdpFifo *fifo, unsigned int addr,
-                            int n, int textured, int z_buffered)
-{
-    f3ddkr_run_dl_impl(gsp, fifo, addr, n, textured, z_buffered);
+    gsp->viewport.dkr_model = 1;
+    rsp_set_tri_attr_dkr(1);
+    f3ddkr_run_dl_impl(gsp, fifo, addr, textured, z_buffered);
 }
 
 static void f3ddkr_run_dl_impl(GSPState *gsp, RdpFifo *fifo, unsigned int addr,
-                               int max_cmds, int textured, int z_buffered)
+                               int textured, int z_buffered)
 {
     int guard = 0;
-    int count = 0;
     unsigned int pc = addr;
     int running = 1;
     const unsigned char *r = s_rdram;
+
 
     if (textured)   s_textured  = textured;
     if (z_buffered) s_zbuffered = z_buffered;
@@ -302,79 +249,57 @@ static void f3ddkr_run_dl_impl(GSPState *gsp, RdpFifo *fifo, unsigned int addr,
     {
         unsigned int w0, w1;
         int cmd;
-        if (max_cmds > 0 && count >= max_cmds)
-            break;
+        if (!in_range(pc, 8u)) break;
         w0 = rd32(r, pc);
         w1 = rd32(r, pc + 4);
         cmd = (int)((w0 >> 24) & 0xff);
         hle_timing_graphics_family("gfx_f3ddkr");
         hle_timing_add(HLE_WORK_COMMAND, 1);
         pc += 8;
-        count++;
 
         switch (cmd)
         {
         case DKR_G_MTX:
         {
-            /* gSPMatrixDKR. Verified layout (GLideN64 F3DDKR_DMA_Mtx): the
-             * length field (w0 low 16) is 64; the matrix index lives in
-             * w0 bits 22..23 for the DKR build (multiply is always 0 for
-             * DKR -- the JFG build uses bit 23 for multiply, but DKR copies).
-             * Projection is identity in this model, so the load goes to the
-             * indexed modelview slot and that slot becomes the active MVP. */
+            /* DKR selects bits 22..23. JFG selects bits 16..18 and,
+             * when bit 23 is set, multiplies by source bits 19..21. */
             unsigned int len = w0 & 0xffffu;
-            unsigned int ma  = (s_dma_mtx + seg_phys(w1)) & 0x00ffffffu;
+            unsigned int ma  = seg_phys(s_dma_mtx + w1) & ~7u;
             if (len == 64u && in_range(ma, 64u))
             {
-                /* The JFG/Mickey build carries the slot index in bits 16..19
-                 * (nonzero there means the JFG form) with a multiply flag in
-                 * bit 23; the DKR form leaves 16..19 zero and packs the index
-                 * in bits 22..23 with no multiply. GLideN64's F3DDKR_DMA_Mtx
-                 * applies the same discrimination unconditionally, which is
-                 * safe: a DKR word never has bits 16..19 set. */
-                int index = (int)((w0 >> 16) & 0x0fu);
+                int index = s_jfg ? (int)((w0 >> 16) & 7u)
+                                  : (int)((w0 >> 22) & 3u);
                 int multiply = 0;
-                if (index == 0)
-                    index = (int)((w0 >> 22) & 0x03u);
-                else
+                if (s_jfg)
                     multiply = (int)((w0 >> 23) & 0x01u);
-                gsp_matrix_dkr(gsp, r, ma, index, multiply);
+                gsp_matrix_dkr(gsp, r, ma, index, multiply,
+                               s_jfg ? (int)((w0 >> 19) & 7u) : 0);
             }
             break;
         }
 
         case DKR_G_VTX:
         {
-            /* gSPVertexDKR. Verified bit layout (GLideN64 F3DDKR_DMA_Vtx,
-             * cross-checked against the decomp gDma1p packing): vertex count
-             * n = ((w0 >> 19) & 0x1f) + 1, and the destination base index is
-             * ((w0 >> 9) & 0x1f). G_VTX_APPEND (w0 bit 0) appends after the
-             * running write cursor; when billboarding is active an append
-             * starts at index 1 (vertex 0 is the anchor). DKR vertices are
-             * the 10-byte pos+RGBA format, loaded via gsp_vertex_dkr. */
+            /* The DMA address is aligned down to eight bytes; parameter
+             * bits 1..2 select the in-DMEM halfword-aligned start. */
             int append = (int)(w0 & F3DDKR_VTX_APPEND);
-            /* The JFG/Mickey build's count field is unbiased (GLideN64
-             * F3DJFG_DMA_Vtx has no +1); the DKR build stores count-1.
-             * Verified against the Mickey's Speedway USA race display list:
-             * every gSPPolygon batch indexes exactly (w0>>19 & 0x1f) vertices
-             * (the DKR decode over-reads each block by one), and the DMA
-             * length in w0's low bits is 10*n+8 under the unbiased count. */
             int n  = (int)((w0 >> 19) & 0x1fu) + (s_jfg ? 0 : 1);
             int dst;
-            unsigned int va = (s_dma_vtx + seg_phys(w1)) & 0x00ffffffu;
+            unsigned int va = (seg_phys(s_dma_vtx + w1) & ~7u)
+                            + ((w0 >> 16) & 6u);
             if (append)
             {
-                if (s_billboard && s_vtx_top == 0)
-                    s_vtx_top = 1;
+                /* The RSP retains the preceding non-append count as the
+                 * append base. Repeated appends overwrite that same span. */
             }
             else
                 s_vtx_top = 0;
-            dst = s_vtx_top + (int)((w0 >> 9) & 0x1fu);
+            dst = s_jfg ? (int)((w0 >> 9) & 0x7fu) : s_vtx_top;
             if (n > 0 && dst >= 0 && dst + n <= GSP_MAX_VERTICES
                 && in_range(va, (unsigned int)n * 10u))
             {
                 gsp_vertex_dkr(gsp, r, va, n, dst, s_billboard);
-                s_vtx_top += n;
+                if (!append) s_vtx_top = n;
             }
             break;
         }
@@ -396,10 +321,9 @@ static void f3ddkr_run_dl_impl(GSPState *gsp, RdpFifo *fifo, unsigned int addr,
              * honours the geometry-mode cull). */
             int num_tris = (int)((w0 >> 20) & 0x0fu) + 1;
             int tex_en   = (int)((w0 >> 16) & 0x0fu);
-            unsigned int ta = seg_phys(w1);
-            int oldtex = s_textured;
+            unsigned int ta = seg_phys(w1) & ~7u;
             int t;
-            if (tex_en) s_textured = 1;
+            s_textured = tex_en & 1;
             if (in_range(ta, (unsigned int)num_tris * 16u))
             {
                 for (t = 0; t < num_tris; t++)
@@ -436,31 +360,45 @@ static void f3ddkr_run_dl_impl(GSPState *gsp, RdpFifo *fifo, unsigned int addr,
                     gsp_set_vertex_st(gsp, v2,
                         (int)(short)((r[(e + 12) ^ 3] << 8) | r[(e + 13) ^ 3]),
                         (int)(short)((r[(e + 14) ^ 3] << 8) | r[(e + 15) ^ 3]));
-                    /* DKR culls per triangle, not from the geometry mode:
-                     * plain triangles are backface-culled by the microcode,
-                     * and flag bit 0x40 (RENDER_BACKFACE in the DKR
-                     * decompilation) marks a triangle double-sided. The
-                     * per-triangle flag REPLACES the geometry-mode cull bits
-                     * entirely -- Mickey's Speedway USA runs its HUD-sprite
-                     * batches with G_CULL_BACK set in the geometry mode and
-                     * flag 0x40 on the triangles, and the cxd4 LLE stream
-                     * draws them (passing the mode bits through culled all
-                     * 29 such onscreen triangles). DKR itself never sets the
-                     * GBI 1 cull bits, so this is unobservable there; its
-                     * boot frame still emits 1428 triangles against the
-                     * oracle's 1426 (unconditional emission gave 2122,
-                     * culling both classes 827). */
+                    /* Flag 0x40 disables culling. Otherwise geometry bit
+                     * 0x1000 selects front versus back, as in the native
+                     * writer's 0x1a80..0x1b60 cull ladder. */
                     gsp_set_geometry_mode(gsp, (flag & 0x40u)
                         ? (f3d_xlate_geom(s_geom) & ~0x600u)
-                        : ((f3d_xlate_geom(s_geom) & ~0x600u) | 0x400u));
+                        : ((f3d_xlate_geom(s_geom) & ~0x600u)
+                            | ((s_geom & 0x1000u) ? 0x200u : 0x400u)));
                     nc = gsp_triangle(gsp, cmdw, v0, v1, v2,
                                       s_textured, s_zbuffered);
                     if (nc > 0) rdp_fifo_append(fifo, cmdw, nc);
                 }
                 gsp_set_geometry_mode(gsp, f3d_xlate_geom(s_geom));
             }
-            s_textured = oldtex;
-            s_vtx_top = 0;   /* DKR resets the vertex cursor after a polygon batch */
+            break;
+        }
+
+        case DKR_G_TEXTURE:
+            /* DKR IMEM 0x1230: only the low command bit is copied to
+             * geometry bit 1. w1 contains no texture scales in this build. */
+            s_textured = (int)(w0 & 1u);
+            gsp->tex_tile = (int)((w0 >> 8) & 7u);
+            gsp->tex_level = (int)((w0 >> 11) & 7u);
+            break;
+
+        case 0xb4: /* Rare's perspective-normalization halfword */
+            gsp_set_persp_norm(gsp, w1 & 0xffffu);
+            break;
+
+        case 0xb3: /* first RDP payload half */
+            s_rdp_half = w1;
+            break;
+
+        case 0xb1:
+        case 0xb2:
+        {
+            int32_t pair[2];
+            pair[0] = (int32_t)s_rdp_half;
+            pair[1] = (int32_t)w1;
+            rdp_fifo_append(fifo, pair, 2);
             break;
         }
 
@@ -468,24 +406,39 @@ static void f3ddkr_run_dl_impl(GSPState *gsp, RdpFifo *fifo, unsigned int addr,
         {
             unsigned int da = seg_phys(w1);
             if (in_range(da, 8u))
-                f3ddkr_run_dl(gsp, fifo, da, s_textured, s_zbuffered);
+            {
+                /* The parameter byte selects call (zero) or branch
+                 * (nonzero). A branch must not execute the old list's tail. */
+                if ((w0 & 0x00ff0000u) != 0u)
+                    pc = da;
+                else
+                    f3ddkr_run_dl_impl(gsp, fifo, da,
+                                       s_textured, s_zbuffered);
+            }
             break;
         }
 
         case DKR_G_DMADL:
         {
-            /* gDkrDmaDisplayList: a DMA display-list call whose length is the
-             * command COUNT carried in w0 bits 16..23 -- the sublist is NOT
-             * G_ENDDL-terminated (DKR's models and the texture-header `cmd`
-             * arrays are emitted as fixed-length blocks). Walk exactly that
-             * many 8-byte commands. This is the primary path DKR geometry
-             * arrives through, so treating it like G_DL (run-to-terminator)
-             * either overran or under-ran every model block. */
+            /* Retail DKR IMEM 0x176c..0x179c copies `num` 64-bit words
+             * directly to the RDP. These are packets, not GBI instructions:
+             * rectangle tails and segmented-looking image addresses remain
+             * opaque, and SET_OTHER_MODES does not change RSP state. */
             unsigned int num = (w0 >> 16) & 0xffu;
-            unsigned int da  = seg_phys(w1);
+            unsigned int da  = seg_phys(w1) & ~7u;
             if (num > 0u && in_range(da, num * 8u))
-                f3ddkr_run_dl_n(gsp, fifo, da, (int)num,
-                                s_textured, s_zbuffered);
+            {
+                unsigned int k;
+                int32_t words[510];
+                for (k = 0; k < num; k++)
+                {
+                    words[k*2u] = (int32_t)rd32(r, da + k * 8u);
+                    words[k*2u+1u] = (int32_t)rd32(r, da + k * 8u + 4u);
+                }
+                /* Keep the DMA block atomic at FIFO rollover: a rectangle
+                 * or triangle packet may span multiple 64-bit words. */
+                rdp_fifo_append(fifo, words, (int)(num*2u));
+            }
             break;
         }
 
@@ -494,23 +447,46 @@ static void f3ddkr_run_dl_impl(GSPState *gsp, RdpFifo *fifo, unsigned int addr,
             /* Index is the low byte of w0 (matches GLideN64 F3DDKR_MoveWord /
              * the gImmp21 G_MOVEWORD packing), not bits 16-23. */
             unsigned int index = w0 & 0xffu;
-            if (index == DKR_MW_BILLBOARD)
+            if (index == 0x00u) /* G_MW_MATRIX: two packed halves in bank zero */
+            {
+                unsigned int off=(w0>>8)&0xffffu;
+                if (off<64u && (off&3u)==0u) {
+                    unsigned int element=(off&31u)/2u, k;
+                    for(k=0;k<2;k++) {
+                        unsigned int row=(element+k)/4u, col=(element+k)&3u;
+                        unsigned int old=(unsigned int)gsp->modelview[0][row][col];
+                        unsigned int half=k ? (w1&0xffffu) : (w1>>16);
+                        gsp->modelview[0][row][col]=(int32_t)(off<32u
+                            ? ((old&0xffffu)|(half<<16))
+                            : ((old&0xffff0000u)|half));
+                    }
+                    gsp->combined_valid=0;
+                }
+            }
+            else if (index == DKR_MW_BILLBOARD)
                 s_billboard = (w1 != 0u) ? 1 : 0;
             else if (index == DKR_MW_MVPMATRIX)
             {
-                s_mtx_slot = (int)((w1 >> 6) & 0x03u);
+                s_mtx_slot = (int)((w1 >> 6) & (s_jfg ? 7u : 3u));
                 gsp_select_matrix_dkr(gsp, s_mtx_slot);
+            }
+            else if (index == 0x04u)
+            {
+                unsigned int off=(w0>>8)&0xffffu;
+                if (off<=44u && (off&3u)==0u) {
+                    unsigned int plane=5u-off/8u, lane=(off&7u)/2u;
+                    gsp->dkr_clip_rows[plane][lane]=(short)(w1>>16);
+                    gsp->dkr_clip_rows[plane][lane+1u]=(short)w1;
+                }
+            }
+            else if (index == 0x0cu) /* G_MW_POINTS */
+            {
+                unsigned int off=(w0>>8)&0xffffu;
+                gsp_modify_vertex(gsp,(int)(off/40u),off%40u,w1);
             }
             else if (index == DKR_MW_FOG)
             {
-                /* Stock F3D G_MW_FOG: DKR's dispatch keeps the F3D MoveWord
-                 * behaviour for the indices it does not redefine, and the
-                 * boot frame carries one (multiplier 0x6400 offset 0x9867).
-                 * Record the parameters; the cxd4 LLE stream shows non-zero
-                 * shade-alpha (fog) lanes on DKR triangles, so the vertex
-                 * fog consumer is a pending follow-up. The clip-ratio move
-                 * (index 0x04, gSPClipRatio) also appears with ratio 2 --
-                 * that matches the frontend default, so it needs no case. */
+                /* Signed multiplier/offset for the projected-z fog lane. */
                 gsp_set_fog(gsp, (int)(short)(w1 >> 16),
                                  (int)(short)(w1 & 0xffffu));
             }
@@ -576,58 +552,47 @@ static void f3ddkr_run_dl_impl(GSPState *gsp, RdpFifo *fifo, unsigned int addr,
             unsigned int length = w0 & 0xffu;
             unsigned int mask;
             int32_t two[2];
-            if (length >= 32u || shift >= 32u)
-                mask = 0xffffffffu;
-            else
-                mask = ((1u << length) - 1u) << shift;
+            /* SLLV masks both variable shift counts to five bits. The
+             * payload is ORed whole after clearing the selected field. */
+            mask = ((1u << (length & 31u)) - 1u) << (shift & 31u);
             if (cmd == DKR_G_SETOTHERMODE_H)
-                s_othermode_h = (s_othermode_h & ~mask) | ((unsigned int)w1 & mask);
+                s_othermode_h = (s_othermode_h & ~mask) | w1;
             else
-                s_othermode_l = (s_othermode_l & ~mask) | ((unsigned int)w1 & mask);
+                s_othermode_l = (s_othermode_l & ~mask) | w1;
             s_zbuffered = (((s_othermode_l >> 4) & 1u) ||
                            ((s_othermode_l >> 5) & 1u)) ? 1 : 0;
-            /* The RSP zeroes shade alpha under the fogged world blend
-             * (cycle-1 P mux == fog colour, othermode_l bits 31:30 == 3)
-             * and passes vertex alpha through otherwise (the alpha-shaded
-             * actors). Track it for gsp_vertex_dkr. */
-            gsp_set_dkr_shade_alpha_zero(gsp,
-                (((s_othermode_l >> 30) & 3u) == 3u) ? 1 : 0);
-            two[0] = (int32_t)(s_othermode_h | (0x2fu << 24));
+            two[0] = (int32_t)s_othermode_h;
             two[1] = (int32_t)s_othermode_l;
             rdp_fifo_append(fifo, two, 2);
             break;
         }
 
         case JFG_G_DMA_OFFSETS:
-            /* gSPSetDMAOffsets (JFG/Mickey build): w0's low 24 bits are a
-             * base added to every G_MTX DMA address, w1's low 24 bits a base
-             * added to every G_VTX DMA address. The G_TRIN triangle-array
-             * address is NOT offset (GLideN64 gSPDMATriangles reads the raw
-             * segment address; confirmed in the Mickey's Speedway race list,
-             * where the triangle arrays sit just below the vertex base and
-             * are addressed absolutely). The model blocks bracket their draw
-             * with a set and a clear-to-zero of these. */
+            /* Added before segment resolution by the JFG DMA entry. */
             if (s_jfg)
             {
                 s_dma_mtx = w0 & 0x00ffffffu;
-                s_dma_vtx = w1 & 0x00ffffffu;
+                s_dma_vtx = w1;
+                s_tex_ofs = 0u; /* BF also clears the table-enable byte. */
             }
             break;
 
         case JFG_G_DMA_TEX_OFFSET:
-            /* gSPSetDMATexOffset (JFG/Mickey build): points at a u16 table of
-             * texture-image address shifts (texture-scroll animation, e.g.
-             * water). Each following RGBA SET_TEXTURE_IMAGE adds the current
-             * table entry to its address; each LOAD_BLOCK whose byte length
-             * divides the shift advances the table cursor, and one that does
-             * not switches the mechanism off (GLideN64 gSPSetDMATexOffset /
-             * gDPSetTextureImage / gDPLoadBlock). Handled in the RDP
-             * pass-through below. */
+            /* JFG 0x14d4 copies 64 bytes to DMEM 0x320 and resets the
+             * byte cursor. Each FD consumes one halfword unconditionally. */
             if (s_jfg)
             {
-                s_tex_ofs   = seg_phys(w1);
-                s_tex_shift = 0u;
-                s_tex_count = 0u;
+                s_tex_ofs   = seg_phys(w1) & ~7u;
+                            s_tex_count = 0u;
+                if (in_range(s_tex_ofs, 64u))
+                {
+                    unsigned int k;
+                    for (k=0;k<32;k++)
+                        s_tex_offsets[k] = (unsigned short)
+                            ((r[(s_tex_ofs+k*2u)^3u]<<8)
+                              | r[(s_tex_ofs+k*2u+1u)^3u]);
+                }
+                else s_tex_ofs = 0u;
             }
             break;
 
@@ -638,25 +603,17 @@ static void f3ddkr_run_dl_impl(GSPState *gsp, RdpFifo *fifo, unsigned int addr,
         case 0xe4: /* G_TEXRECT */
         case 0xe5: /* G_TEXRECTFLIP */
         {
-            /* TEXTURE_RECTANGLE is a 4-word RDP command (angrylion reads 16
-             * bytes for ids 0x24/0x25). DKR's gsDPTextureRectangle emits it as
-             * two contiguous 64-bit words: the rect word pair (here in w0/w1)
-             * followed immediately by the s/t and dsdx/dtdy word pair. (DKR
-             * also has a gsSPTextureRectangle form that delivers the tail as
-             * two G_RDPHALF immediate commands, 0xB3/0xB2; handle both.) The
-             * plain pass-through forwarded only the first 2 words, so angrylion
-             * consumed the following command as the texrect tail and the
-             * rectangle never rendered -- this is why DKR's texture-rectangle
-             * UI (the title logo, HUD) drew nothing under HLE. Assemble the
-             * full 4-word command and advance past the consumed tail. */
+            /* Coalesce the B3/B2 form into one atomic FIFO packet.
+             * Contiguous rectangle packets use raw DMA instead. */
             unsigned int n0 = rd32(r, pc);
             unsigned int n1 = rd32(r, pc + 4);
             int32_t tr[4];
             unsigned int tail_cmd = (n0 >> 24) & 0xffu;
             tr[0] = (int32_t)w0;
             tr[1] = (int32_t)w1;
-            if (tail_cmd == 0xb3u || tail_cmd == 0xb2u
-                || tail_cmd == 0xf1u || tail_cmd == 0xe1u)
+            if (tail_cmd == 0xb3u && in_range(pc, 16u)
+                && ((rd32(r, pc + 8) >> 24) == 0xb2u
+                    || (rd32(r, pc + 8) >> 24) == 0xb1u))
             {
                 /* RDPHALF form: two immediate commands carry the coords. */
                 unsigned int m0, m1;
@@ -665,14 +622,15 @@ static void f3ddkr_run_dl_impl(GSPState *gsp, RdpFifo *fifo, unsigned int addr,
                 m1 = rd32(r, pc + 12);
                 (void)m0;
                 tr[3] = (int32_t)m1;          /* second RDPHALF payload */
+                s_rdp_half = n1;
                 pc += 16;
             }
             else
             {
-                /* contiguous gsDP form: the next word pair IS the coords. */
-                tr[2] = (int32_t)n0;          /* s, t          */
-                tr[3] = (int32_t)n1;          /* dsdx, dtdy    */
-                pc += 8;
+                /* Contiguous packets are sent through raw DMA (0x07).
+                 * Here the next word is still a GBI instruction. */
+                rdp_fifo_append(fifo, tr, 2);
+                break;
             }
             rdp_fifo_append(fifo, tr, 4);
             break;
@@ -682,106 +640,27 @@ static void f3ddkr_run_dl_impl(GSPState *gsp, RdpFifo *fifo, unsigned int addr,
             /* RDP pass-through opcodes (0xC8..0xFF) and any DKR command not
              * yet decoded. The shared RDP commands (SET_*, TEXRECT, sync) are
              * forwarded verbatim so state/texture setup reaches angrylion. */
-            if (cmd >= 0xc8 && cmd <= 0xff)
+            if (cmd >= 0xc0 && cmd <= 0xff)
             {
                 int rdp_id = cmd & 0x3f;
-                if (rdp_id == 0x29)
-                    rdp_fifo_fullsync_note();
-                if (rdp_id >= 0x24 && rdp_id <= 0x3f
-                    && rdp_id != 0x31 && rdp_id != 0x29)
+                if (rdp_id <= 0x3f)
                 {
                     int32_t two[2];
                     two[0] = (int32_t)w0;
-                    /* SET_*_IMAGE address handling, verified against the
-                     * cxd4 LLE stream on Mickey's Speedway USA: a word with
-                     * a nonzero segment nibble is resolved through the
-                     * segment table (0x01000000 -> the seg-1 base), but a
-                     * seg-0 word passes VERBATIM -- both 0x80xxxxxx CPU
-                     * pointers and 0x00xxxxxx physical ones keep their top
-                     * byte, and the game's gSPSegment(0, 0x80000000) is
-                     * never applied to them. (The RDP masks the high bits,
-                     * so verbatim CPU pointers are physically correct.) */
-                    if ((rdp_id == 0x3f || rdp_id == 0x3e || rdp_id == 0x3d)
-                        && ((w1 >> 24) & 0x0fu) != 0u)
-                        two[1] = (int32_t)((s_seg[(w1 >> 24) & 0x0fu]
-                                            + (w1 & 0x00ffffffu))
-                                           & 0x00ffffffu);
+                    /* Resolve all image pointers, including segment zero,
+                     * preserving carry and the full segment-base word. */
+                    if (rdp_id == 0x3f || rdp_id == 0x3e || rdp_id == 0x3d)
+                        two[1] = (int32_t)seg_rsp(w1);
                     else
                         two[1] = (int32_t)w1;
-                    /* JFG/Mickey texture-scroll shift (G_DMA_TEX_OFFSET):
-                     * an RGBA SET_TEXTURE_IMAGE adds the current u16 table
-                     * entry to its address; a LOAD_BLOCK whose byte length
-                     * divides the shift advances the table cursor, one that
-                     * does not re-emits the image address unshifted and
-                     * switches the mechanism off. The table entry read
-                     * matches GLideN64's ((u16*)(RDRAM+ofs))[count^1]: on
-                     * this host-native word storage the ^1 word swap makes
-                     * it the guest big-endian u16 at index `count`. */
+                    /* The JFG image handler consumes a DMA'd halfword on
+                     * every SET_TEXTURE_IMAGE, before segment resolution.
+                     * LOAD_BLOCK and the image format do not alter it. */
                     if (rdp_id == 0x3d && s_tex_ofs != 0u)
                     {
-                        if (((w0 >> 21) & 0x7u) == 0u /* G_IM_FMT_RGBA */
-                            && s_tex_ofs + (s_tex_count ^ 1u) * 2u + 2u
-                               <= s_rdram_size)
-                        {
-                            unsigned int e = s_tex_ofs
-                                           + ((s_tex_count ^ 1u) << 1);
-                            s_tex_shift = (unsigned int)r[e]
-                                        | ((unsigned int)r[e + 1u] << 8);
-                            s_timg_w0 = (unsigned int)w0;
-                            s_timg_base = (unsigned int)two[1];
-                            s_timg_shifted = 1;
-                            two[1] = (int32_t)((unsigned int)two[1]
-                                               + s_tex_shift);
-                        }
-                        else
-                        {
-                            s_tex_ofs   = 0u;
-                            s_tex_shift = 0u;
-                            s_tex_count = 0u;
-                            s_timg_shifted = 0;
-                        }
-                    }
-                    else if (rdp_id == 0x33 && s_tex_ofs != 0u
-                             && s_timg_shifted)
-                    {
-                        unsigned int lrs = (w1 >> 12) & 0xfffu;
-                        if (s_tex_shift % (((lrs >> 2) + 1u) << 3) != 0u)
-                        {
-                            int32_t fix[2];
-                            fix[0] = (int32_t)s_timg_w0;
-                            fix[1] = (int32_t)s_timg_base;
-                            rdp_fifo_append(fifo, fix, 2);
-                            s_tex_ofs   = 0u;
-                            s_tex_shift = 0u;
-                            s_tex_count = 0u;
-                        }
-                        else
-                            s_tex_count++;
-                        s_timg_shifted = 0;
-                    }
-                    /* A raw full SET_OTHER_MODES (0xEF) in the display list
-                     * does NOT reseed the running H/L merge mirror: that is
-                     * initialized from the data-segment default by
-                     * f3ddkr_seed_othermode() and updated only by the
-                     * G_SETOTHERMODE_H/L partial writes. (Verified against
-                     * the cxd4 LLE stream on Mickey's Speedway USA: a merged
-                     * partial emitted right after a raw 0xEF still carries
-                     * the microcode-default low bits, not the 0xEF's.)
-                     *
-                     * The vertex path's rendermode-derived state is separate:
-                     * the shade-alpha gate and the z-buffered triangle class
-                     * DO track a raw 0xEF's L word. (Verified against the
-                     * cxd4 stream on Diddy Kong Racing's character select,
-                     * which sets its fogged-world rendermode with raw 0xEF
-                     * commands: gating shade alpha on the seed+partial mirror
-                     * alone doubled the shade mismatches, 749 vs 370 of 777
-                     * triangles, and rendered the 3D scene black.) */
-                    if (rdp_id == 0x2f)
-                    {
-                        s_zbuffered = ((((unsigned int)w1 >> 4) & 1u) ||
-                                       (((unsigned int)w1 >> 5) & 1u)) ? 1 : 0;
-                        gsp_set_dkr_shade_alpha_zero(gsp,
-                            ((((unsigned int)w1 >> 30) & 3u) == 3u) ? 1 : 0);
+                        if (s_tex_count < 32u)
+                            two[1] = (int32_t)seg_rsp(w1 + s_tex_offsets[s_tex_count]);
+                        s_tex_count = (s_tex_count + 1u) & 127u;
                     }
                     rdp_fifo_append(fifo, two, 2);
                 }

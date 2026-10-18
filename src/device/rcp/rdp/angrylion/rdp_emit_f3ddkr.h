@@ -21,15 +21,13 @@
  *     (slot 0/1/2) is carried in (i) << 6 of the parameter; gSPSelectMatrixDKR
  *     (G_MOVEWORD G_MW_MVPMATRIX) selects the active MVP slot. This replaces
  *     F3DEX's push/pop stack.
- *   - G_DMADL (0x07) is gDkrDmaDisplayList: a DMA display-list call carrying a
- *     command count rather than a NULL-terminated sublist.
- *   - G_MOVEWORD G_MW_BILLBOARD (0x02) toggles billboarding: while enabled,
- *     gSPVertexDKR vertices are added to vertex 0 after MVP transform but
- *     before the perspective divide (used to draw 3D-anchored sprites).
+ *   - G_DMADL (0x07) copies a counted stream of raw 64-bit RDP words.
+ *   - G_MOVEWORD G_MW_BILLBOARD (0x02) adds the previous vertex-zero
+ *     anchor to a load. Repeated DKR appends retain the original base;
+ *     JFG/Mickey instead encode a destination directly.
  *
- * The transform and rasterisation math is identical to the other walkers, so
- * this dispatcher only implements the DKR command decode and the indexed-
- * matrix / billboard state on top of the shared frontend.
+ * Rare's fixed-point matrix, reciprocal, fog, edge, attribute and clip
+ * paths are modelled separately where they differ from F3DEX/F3D.
  */
 #ifndef RDP_EMIT_F3DDKR_H
 #define RDP_EMIT_F3DDKR_H
@@ -50,19 +48,17 @@ void f3ddkr_seg_reset(void);
 void f3ddkr_set_rdram(unsigned char *rdram);
 void f3ddkr_set_rdram_size(unsigned int size);
 
-/* Seed the walker's running other-modes mirror from the microcode's default
- * pair in its data segment (ud+0x118, self-validating on the 0xEF command
- * tag -- the same location the stock F3D data segment carries it). The RSP
- * initializes its mirror from this at task start and updates it ONLY through
- * G_SETOTHERMODE_H/L partial writes; raw full 0xEF commands in the display
- * list are opaque RDP pass-through and do not touch it. Call after
+/* Restore task-local state from the ucode data image: matrix bank, viewport,
+ * segments, geometry, perspective normalization, fog and six clip rows.
+ * Other-mode partial writes merge with the data image's default pair;
+ * raw full SET_OTHER_MODES remains opaque to this RSP mirror. Call after
  * f3ddkr_seg_reset() and before f3ddkr_run_dl(). */
-void f3ddkr_seed_othermode(GSPState *gsp, const unsigned char *rdram,
+void f3ddkr_seed_task(GSPState *gsp, const unsigned char *rdram,
                            unsigned int rdram_size, unsigned int ud);
 
 /* Walk an F3DDKR display list at RDRAM byte address `addr`, transforming
  * geometry through `gsp` and appending RDP commands to `fifo`. Recurses into
- * nested (G_DL / G_DMADL) display lists up to a bounded depth. */
+ * nested G_DL display lists up to a bounded depth. */
 void f3ddkr_run_dl(GSPState *gsp, RdpFifo *fifo, unsigned int addr,
                    int textured, int z_buffered);
 

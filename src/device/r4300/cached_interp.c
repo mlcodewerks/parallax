@@ -46,7 +46,11 @@
 
 
 #ifndef CI_CACHED_SET_COUNT
+#if UINTPTR_MAX > UINT32_MAX
+#define CI_CACHED_SET_COUNT 65536
+#else
 #define CI_CACHED_SET_COUNT 32768
+#endif
 #endif
 
 enum
@@ -56,7 +60,8 @@ enum
     CI_PHYS_SIZE = 0x20000000,
     CI_PHYS_PAGE_COUNT = CI_PHYS_SIZE >> CI_PAGE_SHIFT,
     CI_BLOCK_INSTRUCTIONS = 32,
-    /* Rare intros exceed 16,384 blocks; retain 65,536 decoded blocks. */
+    /* Retain 131,072 decoded blocks on 64-bit hosts; keep the smaller
+     * footprint on 32-bit hosts. More sets also reduce conflict eviction. */
     CI_SET_COUNT = CI_CACHED_SET_COUNT,
     CI_WAYS = 2,
     CI_RECENT_COUNT = CI_SET_COUNT
@@ -1101,7 +1106,7 @@ int cached_interp_init(struct r4300_core* r4300)
     unsigned set_count = CI_SET_COUNT;
 #ifdef HAVE_ARI64_X64
 #ifndef CI_JIT_SET_COUNT
-#define CI_JIT_SET_COUNT 32768
+#define CI_JIT_SET_COUNT CI_CACHED_SET_COUNT
 #endif
     if (r4300->emumode == EMUMODE_DYNAREC) set_count = CI_JIT_SET_COUNT;
 #endif
@@ -1295,6 +1300,32 @@ void cached_interp_execute_one(struct r4300_core* r4300)
     ci_execute_one(r4300);
 }
 
+/* Direct RAM descriptors already identify the complete memory operation.
+ * Reuse the cacheability decision instead of decoding the opcode and scanning
+ * a mapped TLB a second time just to update instruction-boundary history. */
+static CI_FORCE_INLINE unsigned ci_memory_pipeline_cycles(struct r4300_core* r,
+    uint32_t op, unsigned fp, unsigned write, unsigned cached)
+{
+    unsigned rt = (op >> 16) & 31;
+    uint64_t target;
+    unsigned stalls;
+    if (fp) {
+        unsigned fr = (r->cp0.regs[CP0_STATUS_REG] & CP0_STATUS_FR) != 0;
+        target = r4300_pipeline_fpr(r4300_pipeline_fpr_index(rt, fr));
+        stalls = (r->pipeline_load_mask & target) != 0;
+    } else {
+        target = r4300_pipeline_gpr(rt);
+        uint64_t candidates = target | r4300_pipeline_gpr((op >> 21) & 31);
+        stalls = !(r->pipeline_load_mask >> 32) && (r->pipeline_load_mask & candidates) != 0;
+    }
+    stalls += cached && r->pipeline_cached_store;
+    r->pipeline_load_mask = write ? 0 : target;
+    r->pipeline_fpu_result_mask = 0;
+    r->pipeline_fpu_cc = 0;
+    r->pipeline_cached_store = cached && write;
+    return stalls;
+}
+
 /* These accesses cannot trap or observe COUNT. Keep the installed handler
  * authoritative and flush the batch before MMIO, TLB faults, alignment, cache misses
  * or code-page accesses, which use the shared interpreter memory path. */
@@ -1322,7 +1353,8 @@ static CI_FORCE_INLINE int ci_execute_direct_ram(struct r4300_core* r, uint32_t 
         if (handler->write32 != write_rdram_dram || ci_page_is_cached(r->cached_interp, page)) return 0;
     } else if (handler->read32 != read_rdram_dram) return 0;
     uint32_t* word;
-    if (cache_timing && r4300_access_cached(r, address)) {
+    unsigned cached = cache_timing && r4300_access_cached(r, address);
+    if (cached) {
         unsigned index = (address >> 4) & 511;
         uint32_t* tag = &r->dcache_tags[index];
         if ((*tag & ~2u) != ((physical & UINT32_C(0x1ffff000)) | 1)) return 0;
@@ -1341,7 +1373,7 @@ static CI_FORCE_INLINE int ci_execute_direct_ram(struct r4300_core* r, uint32_t 
     /* Only commit history after every fast-path guard succeeds, before
      * a load can overwrite its own base register. Fallback must see the
      * previous instruction's history exactly once. */
-    *pipeline_cycles = cache_timing ? r4300_pipeline_cycles(r, op) : 0;
+    *pipeline_cycles = cache_timing ? ci_memory_pipeline_cycles(r, op, fp, write, cached) : 0;
     if (write) {
         uint64_t value = (uint64_t)r->regs[rt];
         if (fp) {
@@ -1449,9 +1481,10 @@ static CI_FORCE_INLINE void ci_execute_block(struct r4300_core* r4300, unsigned 
                 if (kind == CI_FAST_NONE && !ci_execute_direct_ram(r4300, fast_instruction, block->instructions[i].ram_kind, cache_timing, &access_cycles, &pipeline_cycles)) break;
                 if (cache_timing && kind != CI_FAST_NONE)
                     pipeline_cycles = ci_integer_pipeline_cycles(r4300, fast_instruction);
-                /* Interlocks overlap the reserved compatibility issue clock. */
+                /* Only compatibility modes reserve an extra issue clock. */
                 elapsed += block->instructions[i].cycles + access_cycles +
-                    r4300_pipeline_issue_cycles(cache_timing || r4300->compat_issue_clock, pipeline_cycles);
+                    r4300_pipeline_issue_cycles(r4300_issue_reservation(
+                        r4300->compat_issue_clock), pipeline_cycles);
                 if (cache_timing) elapsed += r4300_fetch_cycles(r4300, local_pc);
                 if (kind != CI_FAST_NONE && !ci_execute_hot_fast_op(r4300, kind, fast_instruction))
                     ci_execute_fast_op(r4300, kind, fast_instruction);
@@ -1530,7 +1563,9 @@ void cached_interp_run(struct r4300_core* r4300)
 {
     /* Cache emulation is fixed at startup. Specialize outside the dispatch
      * loop so disabled emulation does not carry the I-cache machinery. */
-    if (r4300->cache_timing) {
+    if (r4300->cache_timing == 2) {
+        while (!breakloop) ci_execute_block(r4300, 2, NULL);
+    } else if (r4300->cache_timing) {
         while (!breakloop) ci_execute_block(r4300, 1, NULL);
     } else {
         while (!breakloop) ci_execute_block(r4300, 0, NULL);

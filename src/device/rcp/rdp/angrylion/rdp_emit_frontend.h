@@ -96,6 +96,7 @@ typedef struct GSPState
      * load; OoT's pause screen sets 1 (clip exactly at the screen edges)
      * while the 3D scene restores 2. */
     int clip_ratio;
+    int16_t dkr_clip_rows[6][4]; /* task DMEM 0x98..0x70, near to -x */
     /* z coefficient of the near clip-plane row (microcode data + 0x1a8):
      * 0 = NoN microcode (near plane is w >= 0 only), 1 = standard near
      * clipping (z + w >= 0). Selects the near plane the polygon clipper
@@ -122,7 +123,6 @@ typedef struct GSPState
     int32_t accl_a[8];        /* per-light distance threshold A (s16) */
     int32_t accl_b[8];        /* per-light intensity scale B (s16) */
     int32_t accl_clampmax;    /* per-channel output clamp (0x7F80) */
-    int dkr_shade_alpha_zero; /* DKR: RSP zeroes shade alpha under the fog blender P mux */
     unsigned int mtx_stack_ptr;
     unsigned int mtx_stack_base;
     unsigned int mtx_stack_limit;
@@ -229,7 +229,6 @@ void gsp_set_lookat(GSPState *s, const unsigned char *rdram,
 /* G_MW_FOG: fog multiplier (w1 >> 16) and offset (w1 & 0xffff), both s16. */
 void gsp_set_vertex_color_base(GSPState *s, unsigned int base);
 void gsp_set_fog(GSPState *s, int fm, int fo);
-void gsp_set_dkr_shade_alpha_zero(GSPState *s, int on);
 void gsp_set_rsp_screen_model(GSPState *s, int on);
 
 /* per-RSP-task reset: the microcode's DRAM matrix-stack pointer is
@@ -246,7 +245,7 @@ void gsp_set_matrix_stack(GSPState *s, unsigned char *rdram,
 int gsp_culldl_test(const GSPState *s, int v0, int vn);
 /* DKR (F3DDKR) indexed matrix load + active-slot select. */
 void gsp_matrix_dkr(GSPState *s, const unsigned char *rdram, unsigned int addr,
-                    int index, int multiply);
+                    int index, int multiply, int source);
 void gsp_select_matrix_dkr(GSPState *s, int index);
 void gsp_combine_matrices(GSPState *s);
 void gsp_force_matrix_chunk(GSPState *s, const unsigned char *rdram,

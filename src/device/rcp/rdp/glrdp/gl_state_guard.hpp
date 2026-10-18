@@ -27,6 +27,8 @@ class GLStateGuard {
     GLint element_array_buffer_ = 0;
     GLint pixel_pack_buffer_ = 0;
     GLint pixel_unpack_buffer_ = 0;
+    GLint uniform_buffer_ = 0, uniform_binding_ = 0;
+    GLint64 uniform_start_ = 0, uniform_size_ = 0;
 
     GLint draw_framebuffer_ = 0;
     GLint read_framebuffer_ = 0;

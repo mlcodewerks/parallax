@@ -14,9 +14,11 @@ void rsp_light_dir_xfrm_one(const int32_t mv[4][4],
 void rsp_zsort_light_xfrm(const uint16_t mi[3][4], const uint16_t mf[3][4],
                           const int32_t dir[3], unsigned char out[4]);
 int32_t rsp_clip_scale_w(int32_t w, int ratio);
+int32_t rsp_dkr_clip_scale_w(int32_t w, int ratio);
 void rsp_set_clip_lerp_204h(int on);
 void rsp_set_vtx_invw_2rd(int on);
 void rsp_set_tri_attr_rs(int on);
+void rsp_set_tri_attr_dkr(int on);
 void rsp_tri_factor5_context(uint32_t values[5]);
 void rsp_tri_factor5_seed_fraction(uint32_t value);
 /* Arithmetic latches consumed when Factor 5 skips perspective staging.
@@ -61,8 +63,12 @@ void rsp_light_vtx(const int32_t n[3], const int32_t amb[3],
 int32_t rsp_vtx_invw(int32_t w);
 int32_t rsp_vtx_fog(int32_t cz, int32_t cw, int32_t pn,
                     int32_t fog_m, int32_t fog_o);
-int32_t rsp_vtx_fog_dkr(int32_t cz, int32_t cw,
-                        int32_t fog_m, int32_t fog_o);
+int32_t rsp_vtx_fog_dkr(int32_t ndcz, int32_t fog_m, int32_t fog_o);
+int32_t rsp_dkr_add32(int32_t a, int32_t b);
+void rsp_vtx_screen_dkr(int32_t cx, int32_t cy, int32_t cz, int32_t cw,
+    int32_t pn, int32_t vsx, int32_t vsy, int32_t vsz,
+    int32_t vtx, int32_t vty, int32_t vtz,
+    int32_t *sx, int32_t *sy, int32_t *sz, int32_t *iw, int32_t *ndcz);
 int32_t rsp_vtx_last_ndc2z(void);
 int32_t rsp_vtx_last_pw(void);
 int32_t rsp_vtx_last_outcode(void);

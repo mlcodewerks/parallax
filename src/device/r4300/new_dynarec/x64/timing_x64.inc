@@ -31,8 +31,9 @@ static void emit_region_guard(const struct ari64_x64_config* config, unsigned st
      * fetches cost 40 clocks each. Native data accesses either hit D-cache or
      * use the <=38-clock RAM bus path. Refills/devices/traps leave through a
      * precise side exit and recheck the remaining region before resuming.
-     * Only the first fetch can refill the instruction micro-TLB; restored
-     * simultaneous LDI/DCB history can exceed the issue reservation by one. */
+     * Only the first fetch can refill the instruction micro-TLB. Reserve one
+     * interlock/compatibility clock per instruction, plus one for restored
+     * simultaneous LDI/DCB history at entry. */
     unsigned compatibility = !config->cache_timing && config->compat_issue_clock ? count : 0;
     unsigned cached_bound = base + compatibility, uncached_bound = base + compatibility;
     if (config->cache_timing && count) {

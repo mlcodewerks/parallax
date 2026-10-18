@@ -94,15 +94,17 @@ static int interp_ram_poll_advance(struct r4300_core* r, const struct interp_ram
     byte = (byte >> ((3 - (p->byte_address & 3)) * 8)) & 255;
     if ((byte & p->mask) || word || r->regs[p->byte_reg] != byte) return 0;
 
-    /* Ten one-cycle instructions, ten compatibility issue clocks, and
-     * two D-cache hits. Each possible LDI is one clock and overlaps the
-     * reservation. Both NOP slots leave pipeline history empty. Elide
+    /* Ten one-cycle instructions and two D-cache hits. In full timing the
+     * ANDI and second BEQ each need a real LDI clock. Compatibility modes
+     * absorb both interlocks in their issue reservation. Both NOP slots
+     * leave pipeline history empty. Elide
      * whole iterations strictly before the next event, then execute the
      * final iteration normally for the exact PC, delay slot and phase.
      * Without detailed timing the ROM-facing compatibility envelope still
      * reserves the issue clocks, while reads bypass stale D-cache contents. */
-    const unsigned cycles = r->cache_timing ? 20 + 2 * R4300_DCACHE_HIT_CYCLES :
-        10 * (1 + (r->compat_issue_clock != 0));
+    const unsigned reservation = r4300_issue_reservation(r->compat_issue_clock);
+    const unsigned cycles = 10 * (1 + reservation) +
+        (r->cache_timing ? 2 * (R4300_DCACHE_HIT_CYCLES + !reservation) : 0);
     uint64_t iterations = (uint64_t)(-(r->cp0.cycle_count + 1)) / (cycles / 2);
     if (iterations > UINT32_MAX / cycles) iterations = UINT32_MAX / cycles;
     if (!iterations) return 0;

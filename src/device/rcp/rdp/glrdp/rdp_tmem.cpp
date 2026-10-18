@@ -343,11 +343,18 @@ DecodedTexture rdp_decode_tile(const RDPState &s, std::uint8_t ti) {
         }
         return d;
     }
-    if (t.sh < t.sl || t.th < t.tl)
-        return {};
     DecodedTexture d{};
-    d.width = ((t.sh - t.sl) >> 2) + 1;
-    d.height = ((t.th - t.tl) >> 2) + 1;
+    // SetTileSize is not an ordered host rectangle. The RDP subtracts
+    // integer tile endpoints in a 10-bit datapath, including wrapped bounds.
+    // Rejecting these tiles left draws sampling a previous GL binding.
+    d.width = (((t.sh >> 2) - (t.sl >> 2)) & 0x3ff) + 1;
+    d.height = (((t.th >> 2) - (t.tl >> 2)) & 0x3ff) + 1;
+    // Unclamped wrapped tiles only address their mask period. Sin and
+    // Punishment uses this for scrolling 128x64 tiles with inverted bounds.
+    if (t.sh < t.sl && t.mask_s && !t.clamp_s)
+        d.width = 1u << std::min(unsigned(t.mask_s), 10u);
+    if (t.th < t.tl && t.mask_t && !t.clamp_t)
+        d.height = 1u << std::min(unsigned(t.mask_t), 10u);
     if (!d.width || !d.height || d.width > 2048 || d.height > 2048)
         throw std::runtime_error("invalid TMEM tile dimensions");
     d.rgba.resize(std::size_t(d.width) * d.height * 4);

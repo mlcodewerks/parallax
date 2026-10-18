@@ -22,6 +22,7 @@
 #include "r4300_core.h"
 #ifdef __LIBRETRO__
 #include "renderer_options.h"
+#include "main/cpu_timing_profiles.h"
 #endif
 #include "cached_interp.h"
 #if defined(COUNT_INSTR)
@@ -42,6 +43,7 @@ void init_r4300(struct r4300_core* r4300, struct memory* mem, struct mi_controll
 {
 
     r4300->emumode = emumode;
+    r4300->issue_policy = 0;
     init_cp0(&r4300->cp0, count_per_op, count_per_op_denom_pot, interrupt_handlers);
     init_cp1(&r4300->cp1);
 
@@ -80,6 +82,15 @@ void poweron_r4300(struct r4300_core* r4300)
 #ifdef __LIBRETRO__
     r4300->cache_timing = renderer_settings.per_cycle_timing ? 1 :
         renderer_settings.fast_cpu_timing ? 2 : 0;
+    /* Fast and Accurate share the same issue policy; their cache contents
+     * model differs. Native RSP uses actual instruction costs and interlocks.
+     * Validated ROM compatibility profiles take precedence for both routes
+     * (notably DK64's second vine), independently of the cache mode. */
+    if (r4300->cache_timing && (!renderer_settings.rsp_hle ||
+        (renderer_settings.lle_graphics && renderer_settings.lle_audio)))
+        r4300->compat_issue_clock = 0;
+    if (r4300->cache_timing && r4300->issue_policy != CPU_ISSUE_DEFAULT)
+        r4300->compat_issue_clock = r4300->issue_policy == CPU_ISSUE_COMPATIBILITY;
 #endif
 
     cached_interp_invalidate(r4300, 0, 0);

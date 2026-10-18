@@ -1,5 +1,7 @@
 #pragma once
 #include "shader_config.hpp"
+#include "primitive_batch.hpp"
+#include "texture_atlas.hpp"
 #include "framebuffer_manager.hpp"
 #include "gl_loader.hpp"
 #include "n64_memory.hpp"
@@ -24,11 +26,19 @@ class RDPRenderer {
     }
     void set_internal_resolution_scale(int scale);
     void set_rendering_config(GLRDPConfig config) {
+        flush();
         config_ = glrdp_validate_config(config);
         program_ = specialized_program_ && config_.specialize_shaders &&
                    glrdp_shader_config_key(config_) == specialized_key_
                        ? specialized_program_ : generic_program_;
     }
+    void flush();
+    struct SubmissionStats {
+        std::uint64_t primitives = 0, draws = 0, batches = 0, batched_primitives = 0;
+        std::uint64_t atlas_hits = 0, atlas_uploads = 0, atlas_resets = 0, standalone_uploads = 0;
+        std::uint64_t framebuffer_tiles = 0, framebuffer_readbacks = 0;
+    };
+    const SubmissionStats &submission_stats() const { return stats_; }
     void set_display_resolution(int width, int height);
     void set_display_aspect_mode(int mode);
     int internal_resolution_scale() const {
@@ -46,6 +56,7 @@ class RDPRenderer {
     void read_screen(void *, int *, int *);
     void capture_bmp(const char *);
     FramebufferManager &framebuffers() {
+        flush();
         return fb_;
     }
     std::pair<int, int> depth_dimensions(std::uint32_t address) {
@@ -54,6 +65,35 @@ class RDPRenderer {
     }
 
   private:
+    PrimitiveUniforms primitive_uniforms_;
+    GLuint primitive_ubo_ = 0, atlas_texture_ = 0;
+    std::size_t ubo_offset_ = 0, ubo_slot_bytes_ = 0;
+    TextureAtlas atlas_;
+    std::array<TextureAtlas::Region, 8> tile_regions_{};
+    bool standalone_tiles_ = false, atlas_full_ = false;
+    unsigned current_tile_count_ = 1;
+    std::vector<PrimitiveUniforms::Slot> batch_records_;
+    std::vector<PrimitiveBounds> batch_bounds_;
+    GLFramebuffer *batch_target_ = nullptr;
+    GPUDepthBuffer::Surface *batch_depth_ = nullptr;
+    GLuint batch_program_ = 0;
+    bool batch_writes_z_ = false, batch_reads_color_ = false;
+    SubmissionStats stats_;
+    void primitive_geometry(const std::vector<GLVertex> &);
+    void submit_records(const PrimitiveUniforms::Slot *, unsigned, GLuint);
+    void bind_tiles();
+    void uniform_1i(GLint l, GLint x) { if (!primitive_uniforms_.store(l, &x, 4)) glUniform1i(l, x); }
+    void uniform_1ui(GLint l, GLuint x) { if (!primitive_uniforms_.store(l, &x, 4)) glUniform1ui(l, x); }
+    void uniform_1f(GLint l, GLfloat x) { if (!primitive_uniforms_.store(l, &x, 4)) glUniform1f(l, x); }
+    void uniform_2f(GLint l, GLfloat x, GLfloat y) {
+        const GLfloat v[] = {x,y}; if (!primitive_uniforms_.store(l, v, sizeof(v))) glUniform2f(l,x,y);
+    }
+    void uniform_4f(GLint l, GLfloat x, GLfloat y, GLfloat z, GLfloat w) {
+        const GLfloat v[] = {x,y,z,w}; if (!primitive_uniforms_.store(l, v, sizeof(v))) glUniform4f(l,x,y,z,w);
+    }
+    void uniform_4i(GLint l, GLint x, GLint y, GLint z, GLint w) {
+        const GLint v[] = {x,y,z,w}; if (!primitive_uniforms_.store(l, v, sizeof(v))) glUniform4i(l,x,y,z,w);
+    }
     GLint uniform(GLuint program, const char *name);
     void initialize_samplers(GLuint program);
     std::unordered_map<GLuint, std::unordered_map<std::string, GLint>> uniforms_;
@@ -62,6 +102,7 @@ class RDPRenderer {
     struct TileUniforms {
         std::array<float, 4> transform{};
         std::array<int, 4> wrap{};
+        std::array<float, 4> clamp{};
         bool valid = false;
     };
     std::unordered_map<GLuint, std::array<TileUniforms, 8>> tile_uniforms_;

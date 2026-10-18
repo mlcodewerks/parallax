@@ -69,6 +69,10 @@
 #include "profile.h"
 #endif
 #include "rom.h"
+#include "cpu_timing_profiles.h"
+#ifdef __LIBRETRO__
+#include "renderer_options.h"
+#endif
 #include "util.h"
 
 #include <libretro_private.h>
@@ -1168,6 +1172,12 @@ void main_prerun(void)
     g_EmulatorRunning = 1;
     StateChanged(M64CORE_EMU_STATE, M64EMU_RUNNING);
 
+#ifdef __LIBRETRO__
+    g_dev.r4300.issue_policy = rom_cpu_issue_policy(ROM_SETTINGS.MD5);
+    if (g_dev.r4300.issue_policy != CPU_ISSUE_DEFAULT)
+        DebugMessage(M64MSG_INFO, "CPU issue timing profile: %s",
+            g_dev.r4300.issue_policy == CPU_ISSUE_NATIVE ? "native" : "compatibility");
+#endif
     poweron_device(&g_dev);
     pif_bootrom_hle_execute(&g_dev.r4300);
 

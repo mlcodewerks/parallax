@@ -3,6 +3,22 @@
 #include <cstring>
 GLRDPPrecisionQuery glrdp_precision_query = nullptr;
 GLRDPTextureBarrier glrdp_texture_barrier = nullptr;
+decltype(glad_glBufferSubData) glad_glBufferSubData = nullptr;
+
+decltype(glad_glGetUniformBlockIndex) glad_glGetUniformBlockIndex = nullptr;
+
+decltype(glad_glUniformBlockBinding) glad_glUniformBlockBinding = nullptr;
+
+decltype(glad_glBindBufferBase) glad_glBindBufferBase = nullptr;
+
+decltype(glad_glBindBufferRange) glad_glBindBufferRange = nullptr;
+
+decltype(glad_glGetIntegeri_v) glad_glGetIntegeri_v = nullptr;
+
+decltype(glad_glGetInteger64i_v) glad_glGetInteger64i_v = nullptr;
+
+decltype(glad_glDrawArraysInstanced) glad_glDrawArraysInstanced = nullptr;
+
 decltype(glad_glActiveTexture) glad_glActiveTexture = nullptr;
 decltype(glad_glAttachShader) glad_glAttachShader = nullptr;
 decltype(glad_glBindAttribLocation) glad_glBindAttribLocation = nullptr;
@@ -174,6 +190,14 @@ bool load_gl33(retro_hw_get_proc_address_t resolver, bool gles2) {
                     break;
             }
         }
+        LOAD(glBufferSubData);
+        LOAD(glGetUniformBlockIndex);
+        LOAD(glUniformBlockBinding);
+        LOAD(glBindBufferBase);
+        LOAD(glBindBufferRange);
+        LOAD(glGetIntegeri_v);
+        LOAD(glGetInteger64i_v);
+        LOAD(glDrawArraysInstanced);
         LOAD(glBindSampler);
         LOAD(glBindVertexArray);
         LOAD(glBlendColor);

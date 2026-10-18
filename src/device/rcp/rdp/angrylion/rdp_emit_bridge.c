@@ -106,7 +106,19 @@ void bridge_compute_screen(const BridgeVertex *v, const BridgeViewport *vp,
      * making the downstream triangle write bit-identical to the LLE RSP. */
     e->rsp_ok = 0;
     e->rsp_invw = 0;
-    if (vp->rs_model)
+    if (vp->dkr_model)
+    {
+        int32_t sx, sy, sz, iw, ndcz;
+        rsp_vtx_screen_dkr(v->cx, v->cy, v->cz, v->cw,
+            vp->persp_norm, vp->vscale_x >> 14, -(vp->vscale_y >> 14),
+            vp->vscale_z >> 16, vp->vtrans_x >> 14,
+            vp->vtrans_y >> 14, vp->vtrans_z >> 16,
+            &sx, &sy, &sz, &iw, &ndcz);
+        e->x = (int32_t)((uint32_t)sx << 14);
+        e->y = (int32_t)((uint32_t)sy << 14);
+        e->z = sz; e->rsp_ok = 1; e->rsp_invw = iw;
+    }
+    else if (vp->rs_model)
     {
         int32_t sx, sy, sz, iwv;
         if (rsp_vtx_screen_rs(v->cx, v->cy, v->cz, v->cw,

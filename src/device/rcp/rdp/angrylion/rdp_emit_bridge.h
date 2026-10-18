@@ -24,13 +24,12 @@ typedef struct BridgeViewport
      * the orientation). rs_model gates it; rs_vs/rs_vt are vscale/vtrans
      * lanes x,y,z as stored. */
     int rs_model;
+    int dkr_model;          /* Rare's projection chain, including clip vertices */
     int32_t rs_vs[3], rs_vt[3];
     int rsp_screen_model;    /* 1: rsp_vtx_screen may supersede the exact
                               * divide (F3D/F3DEX-family MAC chain).
-                              * 0: always use the exact divide (F3DDKR,
-                              * whose custom vertex chain is not the F3D
-                              * one and whose raw w range sits outside the
-                              * modelled domain). */
+                              * 0: legacy exact divide, unless dkr_model selects
+                              * Rare's fixed-point chain. */
 } BridgeViewport;
 
 /* Clip-space vertex inputs to the bridge: exact s15.16 clip coords (cx,cy,cz,cw)

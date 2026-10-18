@@ -850,6 +850,17 @@ int32_t rsp_clip_scale_w(int32_t w, int ratio)
     return (int32_t)(((uint32_t)U16(i) << 16) | (uint32_t)U16(f));
 }
 
+int32_t rsp_dkr_clip_scale_w(int32_t w, int ratio)
+{
+    RspAcc acc=p_udn(w&0xffff,ratio);
+    int32_t f=acc_clamp_low(acc), i;
+    /* DKR 0x152c/JFG 0x15c4 latches the fraction before VMADH.
+     * Saturating the integer product must not overwrite that fraction. */
+    acc+=p_udh((w>>16)&0xffff,ratio);
+    i=acc_clamp_mid(acc);
+    return (int32_t)(((uint32_t)U16(i)<<16)|(uint32_t)U16(f));
+}
+
 /* The F3DEX2 2.04H clip subdivision: compute the fade factor between the
  * on-screen and off-screen vertex against one clip condition's plane
  * (the clipRatio row), and lerp position and attributes, mirroring the
@@ -875,6 +886,8 @@ void rsp_set_clip_lerp_l3dex(int on)
 
 static int s_vtx_invw_2rd = 0;
 static int s_tri_attr_rs = 0;
+static int s_tri_attr_dkr = 0;
+void rsp_set_tri_attr_dkr(int on) { s_tri_attr_dkr = on ? 1 : 0; }
 static int s_tri_attr_zboss = 0;
 
 /* Rogue Squadron stale-lane residue (probe-anchored at the writer's
@@ -1115,7 +1128,7 @@ void rsp_clip_lerp(const int32_t on_pos[4], const int32_t off_pos[4],
      * F3DEX2 chain does not have. It is what keeps a generated vertex
      * on the inside of the plane it was clipped against, which in turn
      * decides the stored quarter-pixel at a screen edge. */
-    acc = s_clip_lerp_seed3 ? 3 : 0;
+    acc = (s_clip_lerp_seed3 && !s_tri_attr_dkr) ? 3 : 0;
     acc += p_udl(v10[3], rcp_lo) + p_udm(v11[3], rcp_lo);
     v11[3] = acc_clamp_mid(acc);
     v10[3] = acc_clamp_low(acc);
@@ -1141,6 +1154,7 @@ void rsp_clip_lerp(const int32_t on_pos[4], const int32_t off_pos[4],
         r2_lo = acc_clamp_low(acc);
         acc += p_udh(r2_hi, 2);
         r2_hi = acc_clamp_mid(acc);
+        if (s_tri_attr_dkr) r2_lo = acc_clamp_low(acc);
         acc = p_udl(r2_lo, v10[3]) + p_udm(r2_hi, v10[3]);
         acc += p_udn(r2_lo, v11[3]);
         x_lo = acc_clamp_low(acc);
@@ -1379,11 +1393,11 @@ int32_t rsp_fog_rs(int32_t sz1616,
     return t.i & 0xff;
 }
 
-int rsp_vtx_screen_rs(int32_t cx, int32_t cy, int32_t cz, int32_t cw,
+static int rsp_vtx_screen_refined(int32_t cx, int32_t cy, int32_t cz, int32_t cw,
                       int32_t pn,
                       const int32_t *vs, const int32_t *vt,
                       int32_t *sx102, int32_t *sy102, int32_t *sz1616,
-                      int32_t *invw_out)
+                      int32_t *invw_out, int dkr)
 {
     Rsp32 pos[3];
     Rsp32 pw, r, t, u, iw;
@@ -1461,6 +1475,7 @@ int rsp_vtx_screen_rs(int32_t cx, int32_t cy, int32_t cz, int32_t cw,
         scr_f[lane] = acc_clamp_low(acc);
         acc += p_udh(ndc2.i, vs[lane]);
         scr_i[lane] = acc_clamp_mid(acc);
+        if (dkr) scr_f[lane] = acc_clamp_low(acc);
     }
 
     /* vge integer-lane clamps (DMEM 0x60 row, 1q pattern) */
@@ -1476,6 +1491,13 @@ int rsp_vtx_screen_rs(int32_t cx, int32_t cy, int32_t cz, int32_t cw,
         *sz1616 = (int32_t)(((uint32_t)U16(zi) << 16) | (uint32_t)U16(scr_f[2]));
     }
     return (cw > 0) ? 1 : 0;
+}
+
+int rsp_vtx_screen_rs(int32_t cx, int32_t cy, int32_t cz, int32_t cw,
+    int32_t pn, const int32_t *vs, const int32_t *vt,
+    int32_t *sx, int32_t *sy, int32_t *sz, int32_t *iw)
+{
+    return rsp_vtx_screen_refined(cx,cy,cz,cw,pn,vs,vt,sx,sy,sz,iw,0);
 }
 
 int rsp_vtx_screen(int32_t cx, int32_t cy, int32_t cz, int32_t cw,
@@ -1688,37 +1710,41 @@ int32_t rsp_vtx_fog(int32_t cz, int32_t cw, int32_t pn,
     return lane & 0xff;
 }
 
-/* DKR-family (F3DDKR / Jet Force Gemini / Mickey's Speedway) vertex fog.
- * Rare's vertex chain has no perspNorm and computes the projection with an
- * exact divide, so the fog input is the exact s15.16 ndc z = z/w rather than
- * the F3D reciprocal-chain product; the final lane shaping (fog_o + 0x7f00 +
- * ndc * fog_m, floored at 0x7f00, low byte) is the stock F3D one. Selected
- * against the cxd4 LLE stream on Jet Force Gemini's Goldwood landing frame:
- * the alpha population lands on the oracle's value clusters (0/100..126),
- * where the F3D chain under the default perspNorm computed factors several
- * times too small and the distance haze washed out. */
-int32_t rsp_vtx_fog_dkr(int32_t cz, int32_t cw,
-                        int32_t fog_m, int32_t fog_o)
+/* Rare's reciprocal overlay (DKR IMEM 0x1000..0x1054) uses the
+ * same doubled-table/Newton chain as rsp_vtx_screen_rs. The viewport
+ * clamps both x/y bounds; retain the projected z before the viewport
+ * for the independent fog multiply (DKR 0x15f8..0x1618). */
+void rsp_vtx_screen_dkr(int32_t cx, int32_t cy, int32_t cz, int32_t cw,
+    int32_t pn, int32_t vsx, int32_t vsy, int32_t vsz,
+    int32_t vtx, int32_t vty, int32_t vtz,
+    int32_t *sx, int32_t *sy, int32_t *sz, int32_t *iw, int32_t *ndcz)
 {
-    Rsp32 p2;
-    RspAcc acc;
-    int32_t lane, ndc;
+    int32_t vs[3], vt[3];
+    vs[0]=vsx; vs[1]=vsy; vs[2]=vsz;
+    vt[0]=vtx; vt[1]=vty; vt[2]=vtz;
+    rsp_vtx_screen_refined(cx,cy,cz,cw,pn,vs,vt,sx,sy,sz,iw,1);
+    if (*sx > 4090) *sx=4090;
+    if (*sy > 4090) *sy=4090;
+    *ndcz=s_rs_last_ndc2z;
+}
 
-    if (cw <= 0)
-        return 0;
-    ndc = (int32_t)(((int64_t)cz << 16) / cw);
-    p2.i = (ndc >> 16) & 0xffff;
-    p2.f = ndc & 0xffff;
+/* VADDC on the fractions followed by signed-saturating VADD on the
+ * integers. Fractional carry must survive even when the integer clamps. */
+int32_t rsp_dkr_add32(int32_t a, int32_t b)
+{
+    uint32_t f=(uint32_t)U16(a)+(uint32_t)U16(b);
+    int32_t i=clamp_s16(S16((uint32_t)a>>16)+S16((uint32_t)b>>16)+(f>>16));
+    return (int32_t)(((uint32_t)U16(i)<<16)|(f&0xffffu));
+}
 
-    acc = p_udh(fog_o, 1);
-    acc += p_udh(1, 0x7f00);
-    acc += p_udn(p2.f, fog_m);
-    acc += p_udh(p2.i, fog_m);
-    lane = (int32_t)(int16_t)acc_clamp_mid(acc);
-
-    if (lane < 0x7f00)
-        lane = 0x7f00;
-    return lane & 0xff;
+int32_t rsp_vtx_fog_dkr(int32_t ndcz, int32_t fog_m, int32_t fog_o)
+{
+    Rsp32 z=mk32(ndcz);
+    RspAcc acc=p_udn(z.f,fog_m)+p_udh(z.i,fog_m);
+    int32_t lane=clamp_s16(S16(acc_clamp_mid(acc))+S16(fog_o));
+    if (lane < 0) return 0;
+    if (lane > 255) return 255;
+    return lane;
 }
 
 /* ---- triangle write ---------------------------------------------------- */
@@ -2561,7 +2587,15 @@ int rsp_tri_write(int32_t *ew,
 
     hle_timing_add(HLE_WORK_TRIANGLE, 1);
 
-    if (s_tri_attr_zboss)
+    if (s_tri_attr_dkr)
+    {
+        /* Rare's scalar SLT/swap loop is stable for equal Y values. */
+        vh=v1c; vm=v2c; vl=v3c;
+        if (S16(vm->y)<S16(vh->y)) { tmpv=vh; vh=vm; vm=tmpv; }
+        if (S16(vl->y)<S16(vm->y)) { tmpv=vm; vm=vl; vl=tmpv; }
+        if (S16(vm->y)<S16(vh->y)) { tmpv=vh; vh=vm; vm=tmpv; }
+    }
+    else if (s_tri_attr_zboss)
     {
         /* The ZSortBOSS y-sort network (IMEM 0x904..0x94c), a
          * vlt/vge/vmrg ladder whose tie behavior is deterministic:
@@ -2715,7 +2749,7 @@ int rsp_tri_write(int32_t *ew,
             inv_dx.i = acc_clamp_mid(acc);
             inv_dx_64 = (int64_t)r32(inv_dx);
         }
-        if (s_tri_attr_rs)
+        if (s_tri_attr_rs || s_tri_attr_dkr)
         {
             /* Rogue Squadron routes the cross through its shared divide
              * (IMEM 0x179c, probe-verified ffff.ebb5 on the first drawn
@@ -2817,7 +2851,7 @@ int rsp_tri_write(int32_t *ew,
 
     /* ---- Doom 64 lineage edge chain (transcribed) ---- */
     d64_lh_crimp = 0; d64_lh_f = 0; d64_yfrac2 = 0;
-    if (s_d64_lut_sort)
+    if (s_d64_lut_sort || s_tri_attr_dkr)
     {
         /* The resident writer's edge section (ucode text 0x9cc..0xb2c),
          * replayed with exact RSP accumulator semantics.  It differs from
@@ -3019,7 +3053,8 @@ int rsp_tri_write(int32_t *ew,
             }
         }
     }
-    else if (textured && s_tri_attr_rs && (z_buffered || s_tri_attr_rs == 2))
+    else if (textured && ((s_tri_attr_rs && (z_buffered || s_tri_attr_rs == 2))
+                         || s_tri_attr_dkr))
     {
         /* Rogue Squadron's z-enabled perspective texture path (live
          * IMEM 0x1a04..0x1abc, probe- and stream-verified): the fold
@@ -3245,7 +3280,7 @@ int rsp_tri_write(int32_t *ew,
         zb_elh8.f = acc_clamp_low(acc);
     }
     int32_t rs_mh_y = mh_y, rs_hl_y = hl_y, rs_lh_x = lh_x, rs_hm_x = hm_x;
-    if (s_tri_attr_rs)
+    if (s_tri_attr_rs || s_tri_attr_dkr)
     {
         /* The writer multiplies the packed edge deltas by v30[5] == 4
          * (vmudh, clamped mid) after the edge reciprocals but before the
@@ -3264,22 +3299,22 @@ int rsp_tri_write(int32_t *ew,
 
         /* dA_x = dMH.y * dA_H + dHL.y * dA_M  (vmudn/vmadh chains, raw
          * accumulator reads) */
-        acc = p_udn(dA_H[k].f, s_tri_attr_rs ? rs_mh_y : mh_y);
-        acc += p_udh(dA_H[k].i, s_tri_attr_rs ? rs_mh_y : mh_y);
-        acc += p_udn(dA_M[k].f, s_tri_attr_rs ? rs_hl_y : hl_y);
-        acc += p_udh(dA_M[k].i, s_tri_attr_rs ? rs_hl_y : hl_y);
+        acc = p_udn(dA_H[k].f, (s_tri_attr_rs || s_tri_attr_dkr) ? rs_mh_y : mh_y);
+        acc += p_udh(dA_H[k].i, (s_tri_attr_rs || s_tri_attr_dkr) ? rs_mh_y : mh_y);
+        acc += p_udn(dA_M[k].f, (s_tri_attr_rs || s_tri_attr_dkr) ? rs_hl_y : hl_y);
+        acc += p_udh(dA_M[k].i, (s_tri_attr_rs || s_tri_attr_dkr) ? rs_hl_y : hl_y);
         dA_x[k].i = (int32_t)((acc >> 32) & 0xffff);
         dA_x[k].f = (int32_t)((acc >> 16) & 0xffff);
 
         /* dA_y = dLH.x * dA_M + dHM.x * dA_H */
-        acc = p_udn(dA_M[k].f, s_tri_attr_rs ? rs_lh_x : lh_x);
-        acc += p_udh(dA_M[k].i, s_tri_attr_rs ? rs_lh_x : lh_x);
-        acc += p_udn(dA_H[k].f, s_tri_attr_rs ? rs_hm_x : hm_x);
-        acc += p_udh(dA_H[k].i, s_tri_attr_rs ? rs_hm_x : hm_x);
+        acc = p_udn(dA_M[k].f, (s_tri_attr_rs || s_tri_attr_dkr) ? rs_lh_x : lh_x);
+        acc += p_udh(dA_M[k].i, (s_tri_attr_rs || s_tri_attr_dkr) ? rs_lh_x : lh_x);
+        acc += p_udn(dA_H[k].f, (s_tri_attr_rs || s_tri_attr_dkr) ? rs_hm_x : hm_x);
+        acc += p_udh(dA_H[k].i, (s_tri_attr_rs || s_tri_attr_dkr) ? rs_hm_x : hm_x);
         dA_y[k].i = (int32_t)((acc >> 32) & 0xffff);
         dA_y[k].f = (int32_t)((acc >> 16) & 0xffff);
 
-        if (s_tri_attr_rs)
+        if (s_tri_attr_rs || s_tri_attr_dkr)
         {
             /* Rogue Squadron (live IMEM 0x1bc0..0x1ca0, probe-anchored):
              * gradients = the clamped canonical multiply of the vsar'd
@@ -3538,7 +3573,7 @@ int rsp_tri_write(int32_t *ew,
     }
 
     /* ---- z block scaling (x32 with the special base sequence) ---- */
-    if (z_buffered && s_tri_attr_rs)
+    if (z_buffered && (s_tri_attr_rs || s_tri_attr_dkr))
     {
         /* Rogue Squadron's z block (live IMEM 0x1d3c..0x1da0,
          * probe-verified): the attribute pair and all three gradients
@@ -3809,7 +3844,7 @@ int rsp_tri_write(int32_t *ew,
 }
 
 #include "rdp_emit_state.h"
-#define WALKER_FIELDS(X) X(s_clip_lerp_l3dex) X(s_clip_lerp_seed3) X(s_vtx_invw_2rd) X(s_tri_attr_rs) X(s_tri_attr_zboss) X(s_rs_stale_w_i) X(s_rs_stale_w_f) X(s_rs_stale_l_sf) X(s_rs_stale_l_tf) X(s_vtx_invw_raw) X(s_vtx_y_round) X(s_vtx_x_round) X(s_keep_degenerate) X(s_attr_lowp) X(s_affine_tex) X(s_persp_skip) X(s_vtx_z_quant) X(s_clip_lerp_204h) X(s_rs_last_ndc2z) X(s_rs_last_pw) X(s_rs_last_outcode) X(s_rs_lut_sort) X(s_d64_lut_sort)
+#define WALKER_FIELDS(X) X(s_tri_attr_dkr) X(s_clip_lerp_l3dex) X(s_clip_lerp_seed3) X(s_vtx_invw_2rd) X(s_tri_attr_rs) X(s_tri_attr_zboss) X(s_rs_stale_w_i) X(s_rs_stale_w_f) X(s_rs_stale_l_sf) X(s_rs_stale_l_tf) X(s_vtx_invw_raw) X(s_vtx_y_round) X(s_vtx_x_round) X(s_keep_degenerate) X(s_attr_lowp) X(s_affine_tex) X(s_persp_skip) X(s_vtx_z_quant) X(s_clip_lerp_204h) X(s_rs_last_ndc2z) X(s_rs_last_pw) X(s_rs_last_outcode) X(s_rs_lut_sort) X(s_d64_lut_sort)
 EMIT_STATE_DEFINE(rsp_emit_saved, WALKER_FIELDS)
 #undef WALKER_FIELDS
 

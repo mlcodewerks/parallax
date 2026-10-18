@@ -1,10 +1,11 @@
 /* Core-specific x64 frontend for the Ari64 emitter. GPL-2.0-or-later. */
 #ifndef ARI64_X64_ARENA_BYTES
-#define ARI64_X64_ARENA_BYTES (4 << TARGET_SIZE_2)
+#define ARI64_X64_ARENA_BYTES (8 << TARGET_SIZE_2)
 #endif
 enum { CODE_BYTES = ARI64_X64_ARENA_BYTES, MAX_INSTRUCTIONS = 32 };
 #ifndef ARI64_X64_SEGMENTS
-#define ARI64_X64_SEGMENTS (CODE_BYTES >= (1 << 20) ? 16 : 1)
+/* Keep the default 8 MiB recycling granularity as the arena grows. */
+#define ARI64_X64_SEGMENTS (CODE_BYTES >= (256 << 20) ? 32 : CODE_BYTES >= (1 << 20) ? 16 : 1)
 #endif
 enum { CODE_SEGMENTS = ARI64_X64_SEGMENTS,
     SEGMENT_BYTES = CODE_BYTES / CODE_SEGMENTS };
@@ -405,6 +406,7 @@ static ari64_x64_entry compile_block(struct ari64_x64* s, void* block,
                 emit_mem(0xc7, 0, 0, RSP, -1, 0, 8); output_w32(0);
                 if (memory_region || likely_region) regcache.allow_dead_store = 0;
                 emit_movimm(0, R13);
+                int pipeline_live = 1;
                 for (unsigned j = i; j < end; ++j) {
                     regcache.index = j;
                     /* Native RAM does not alter I-cache tags. A precise RAM
@@ -416,16 +418,25 @@ static ari64_x64_entry compile_block(struct ari64_x64* s, void* block,
                     if (native_ram_opcode(instruction_op)) {
                         struct memory_exit* exit = &memory_exits[memory_exit_count++];
                         exit->start = i; exit->index = j; exit->end = end; exit->guard_count = 0;
-                        emit_memory_native(ops[j], j, config, exit, check_line);
+                        emit_memory_native(ops[j], j, config, exit, check_line,
+                            j == i ? 0 : ops[j - 1], j != i);
+                        pipeline_live = 1;
                         exit->resume = out; exit->resume_registers = regcache;
                     } else {
                         emit_fetch_native(config, j, i, r4300_base_cycles(ops[j], 0), check_line);
+                        unsigned reservation = r4300_issue_reservation(config->compat_issue_clock);
+                        if (config->cache_timing && !reservation && pipeline_live) {
+                            emit_ldi_native(ops[j], 0, j == i ? 0 : ops[j - 1], j != i);
+                            emit_pipeline_clear();
+                            pipeline_live = 0;
+                        }
                         if (j == branch_index) {
                             annul = emit_branch_native(ops[j], config->virtual_pc + j * 4);
                             annul_registers = regcache;
                         }
                         else if (!regcache_fold(ops[j]) && !regcache_direct(ops[j])) emit_native(ops[j], instruction_op);
-                        if (j + 1 == end || native_ram_opcode(r4300_get_idec(ops[j + 1])->opcode)) emit_pipeline_clear();
+                        if ((!config->cache_timing || reservation) &&
+                            (j + 1 == end || native_ram_opcode(r4300_get_idec(ops[j + 1])->opcode))) emit_pipeline_clear();
                     }
                 }
                 regcache_flush();

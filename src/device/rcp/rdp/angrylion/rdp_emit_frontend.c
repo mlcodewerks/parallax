@@ -193,9 +193,10 @@ void gsp_init(GSPState *s)
     s->persp_norm = 0xffffu; /* default until gSPPerspNormalize sets it */
     s->fog_m = 0;
     s->fog_o = 0;
-    s->dkr_shade_alpha_zero = 0;
     s->viewport.persp_norm = 0xffffu;
     s->viewport.rsp_screen_model = 1;
+    s->viewport.dkr_model = 0;
+    rsp_set_tri_attr_dkr(0);
     s->viewport.tri_dx_scale  = s->tri_dx_scale;
     s->viewport.tri_idy_scale = s->tri_idy_scale;
     s->viewport.tri_frac_mask = s->tri_frac_mask;
@@ -356,17 +357,42 @@ void gsp_matrix_load(GSPState *s, const unsigned char *rdram, unsigned int addr,
  * 0/1/2) and bakes projection into them, so the projection matrix is identity
  * and the combined transform is simply the active modelview slot. Semantics
  * mirror GLideN64's gSPDMAMatrix: load into modelview[index] (copy, or
- * multiply against slot 0 when `multiply`), set that slot active, and reset
+ * multiply against the selected source when `multiply`), set that slot active, and reset
  * projection to identity. */
 void gsp_matrix_dkr(GSPState *s, const unsigned char *rdram, unsigned int addr,
-                    int index, int multiply)
+                    int index, int multiply, int source)
 {
     int32_t m[4][4];
     if (index < 0 || index >= GSP_MTX_STACK)
         index = 0;
     load_n64_matrix(m, rdram, addr);
     if (multiply)
-        mtx_mul(s->modelview[index], m, s->modelview[0]);
+    {
+        int pair, i, j, k;
+        int32_t result[2][4];
+        int32_t (*src)[4]=s->modelview[source & 7];
+        hle_timing_add(HLE_WORK_MATRIX_MUL, 1);
+        /* JFG computes/stores two rows per vector-loop iteration. When
+         * source and destination coincide, the second pair reads the
+         * already-written first pair. The accumulator wraps at 48 bits. */
+        for (pair=0;pair<4;pair+=2) {
+            for (i=0;i<2;i++) for (j=0;j<4;j++) {
+                int64_t acc=0;
+                for (k=0;k<4;k++) {
+                    int32_t a=m[pair+i][k], b=src[k][j];
+                    acc+=((int64_t)(a&0xffff)*(b&0xffff))>>16;
+                    acc+=(int64_t)(a>>16)*(b&0xffff);
+                    acc+=(int64_t)(a&0xffff)*(b>>16);
+                    acc+=(int64_t)(a>>16)*(b>>16)*65536;
+                }
+                acc &= (((int64_t)1<<48)-1);
+                if (acc & ((int64_t)1<<47)) acc-=((int64_t)1<<48);
+                result[i][j]=gsp_mvp_readback(acc,0);
+            }
+            for(i=0;i<2;i++) for(j=0;j<4;j++)
+                s->modelview[index][pair+i][j]=result[i][j];
+        }
+    }
     else
         mtx_copy(s->modelview[index], m);
     s->modelview_top = index;
@@ -537,11 +563,6 @@ void gsp_set_fog(GSPState *s, int fm, int fo)
     s->fog_o = fo;
 }
 
-void gsp_set_dkr_shade_alpha_zero(GSPState *s, int on)
-{
-    s->dkr_shade_alpha_zero = on ? 1 : 0;
-}
-
 void gsp_set_rsp_screen_model(GSPState *s, int on)
 {
     s->viewport.rsp_screen_model = on ? 1 : 0;
@@ -549,6 +570,9 @@ void gsp_set_rsp_screen_model(GSPState *s, int on)
 
 void gsp_task_reset(GSPState *s)
 {
+    s->viewport.dkr_model = 0;
+    rsp_set_tri_attr_dkr(0);
+    rsp_set_clip_lerp_l3dex(0);
     s->pd_ci = 0;
     s->cbfd = 0;
     s->cbfd_nbase = 0;
@@ -1279,7 +1303,8 @@ void gsp_set_vertex_st(GSPState *s, int idx, int st_s, int st_t)
  * (verified against the retail F3DDKR xbus microcode and GLideN64's
  * gSPLoadDMAVertexData):
  *     +0 s16 x   +2 s16 y   +4 s16 z   +6 u8 r  +7 u8 g  +8 u8 b  +9 u8 a
- * Transform/clip/screen are identical to gsp_vertex; only the read differs.
+ * The translation-last MAC and the doubled reciprocal/viewport chain are
+ * Rare-specific; both are transcribed with their native lane latches.
  * Colour is the vertex RGBA directly (DKR's geometry is vertex-coloured, not
  * lit through the F3DEX lighting path). Texture coordinates are zero here; the
  * gSPPolygon tex-enable + the active tile drive texturing at draw time. */
@@ -1287,6 +1312,7 @@ void gsp_vertex_dkr(GSPState *s, const unsigned char *rdram, unsigned int addr,
                     int n, int v0, int billboard)
 {
     int i;
+    GSPVertex anchor = s->vtx[0];
     if (!s->combined_valid)
         gsp_combine_matrices(s);
 
@@ -1314,57 +1340,29 @@ void gsp_vertex_dkr(GSPState *s, const unsigned char *rdram, unsigned int addr,
         cw = (int64_t)ox * s->combined[0][3] + (int64_t)oy * s->combined[1][3]
            + (int64_t)oz * s->combined[2][3] + (int64_t)s->combined[3][3];
 
-        vt->cx = gsp_mvp_readback(cx, (int64_t)oz * (s->combined[2][0] >> 16));
-        vt->cy = gsp_mvp_readback(cy, (int64_t)oz * (s->combined[2][1] >> 16));
-        vt->cz = gsp_mvp_readback(cz, (int64_t)oz * (s->combined[2][2] >> 16));
-        vt->cw = gsp_mvp_readback(cw, (int64_t)oz * (s->combined[2][3] >> 16));
+        /* Rare's final VMADH adds the translation, not the z row. The
+         * fraction register was latched immediately before that add. */
+        vt->cx = gsp_mvp_readback(cx, s->combined[3][0] >> 16);
+        vt->cy = gsp_mvp_readback(cy, s->combined[3][1] >> 16);
+        vt->cz = gsp_mvp_readback(cz, s->combined[3][2] >> 16);
+        vt->cw = gsp_mvp_readback(cw, s->combined[3][3] >> 16);
 
-        /* Billboarding (gSPVertexDKR with billboard enabled): vertices loaded
-         * at idx >= 1 are camera-facing offsets relative to the anchor at
-         * vertex 0.  The microcode adds vertex 0's transformed clip position
-         * onto each (GLideN64 gSPBillboardVertex: vtx += vtx0).  Without this
-         * the offset vertices land at raw clip-space and the sprite collapses
-         * to a degenerate / off-screen quad (the DKR intro Diddy/palms blob). */
-        if (billboard && idx >= 1)
+        /* Both vertices of a pair use the anchor latched before the load,
+         * even if this command itself overwrites vertex zero. */
+        if (billboard)
         {
-            const GSPVertex *a = &s->vtx[0];
-            vt->cx += a->cx;
-            vt->cy += a->cy;
-            vt->cz += a->cz;
-            vt->cw += a->cw;
+            const GSPVertex *a = &anchor;
+            vt->cx = rsp_dkr_add32(vt->cx, a->cx);
+            vt->cy = rsp_dkr_add32(vt->cy, a->cy);
+            vt->cz = rsp_dkr_add32(vt->cz, a->cz);
+            vt->cw = rsp_dkr_add32(vt->cw, a->cw);
         }
 
         vt->r = (int32_t)read_u8_n64(rdram, base + 6) << 16;
         vt->g = (int32_t)read_u8_n64(rdram, base + 7) << 16;
         vt->b = (int32_t)read_u8_n64(rdram, base + 8) << 16;
-        /* Shade alpha. With G_FOG set in the geometry mode the microcode
-         * replaces it with the computed per-vertex fog factor from the
-         * G_MW_FOG coefficients, exactly like the stock F3D family -- Jet
-         * Force Gemini's in-game world runs G_FOG with live coefficients
-         * and the cxd4 LLE stream carries a full spread of fog alphas
-         * (90 distinct values on the Goldwood landing frame); forcing the
-         * fogged-rendermode zero there killed the distance haze and the
-         * whole scene rendered overbright. Diddy Kong Racing's frames are
-         * unaffected either way: its fog coefficients clamp the factor to
-         * zero at every visible depth, which is what the earlier
-         * "RSP zeroes shade alpha under the fogged world blend" finding
-         * was actually observing.
-         *
-         * Without G_FOG the DKR rule stands: the rendermode-gated zero
-         * (dkr_shade_alpha_zero, fed by both raw 0xEF and partial
-         * othermode writes) under the fogged world blend, the raw vertex
-         * alpha byte under the actor blend (the alpha-shaded Taj genie). */
-        if ((s->geometry_mode & 0x00010000u) && !s->fog_off)   /* G_FOG */
-        {
-            int32_t fa = 0;
-            if (vt->cw > 0)
-                fa = rsp_vtx_fog_dkr(vt->cz, vt->cw, s->fog_m, s->fog_o);
-            vt->a = fa << 16;
-        }
-        else
-            vt->a = s->dkr_shade_alpha_zero
-                  ? 0
-                  : ((int32_t)read_u8_n64(rdram, base + 9) << 16);
+        /* Raw alpha is replaced only when G_FOG enables the fog block. */
+        vt->a = (int32_t)read_u8_n64(rdram, base + 9) << 16;
 
         vt->s = 0;
         vt->t = 0;
@@ -1373,7 +1371,26 @@ void gsp_vertex_dkr(GSPState *s, const unsigned char *rdram, unsigned int addr,
         vt->flat2d = 0;
 
         gsp_clip_vertex_flags(s, vt);
-        gsp_vertex_screen(s, vt);
+        {
+            int32_t sx, sy, sz, iw, ndcz;
+            rsp_vtx_screen_dkr(vt->cx, vt->cy, vt->cz, vt->cw,
+                s->persp_norm,
+                s->viewport.vscale_x >> 14, -(s->viewport.vscale_y >> 14),
+                s->viewport.vscale_z >> 16,
+                s->viewport.vtrans_x >> 14, s->viewport.vtrans_y >> 14,
+                s->viewport.vtrans_z >> 16,
+                &sx, &sy, &sz, &iw, &ndcz);
+            vt->scr_x = (int32_t)((uint32_t)sx << 14);
+            vt->scr_y = (int32_t)((uint32_t)sy << 14);
+            vt->scr_z = sz;
+            vt->rsp_invw = iw;
+            vt->rsp_ok = 1;
+            vt->w_raw = 0;
+            vt->rs_pw = rsp_vtx_last_pw();
+            hle_timing_add(HLE_WORK_VERTEX, 1);
+            if ((s->geometry_mode & 0x00010000u) && !s->fog_off)
+                vt->a = rsp_vtx_fog_dkr(ndcz, s->fog_m, s->fog_o) << 16;
+        }
     }
 }
 
@@ -1625,7 +1642,9 @@ static void gsp_clip_vertex_flags(const GSPState *st, GSPVertex *vt)
         if (le) fl |= 1u << (4 + ax);
         if (ge) fl |= 1u << (12 + ax);
     }
-    w2 = rsp_clip_scale_w(vt->cw, st->clip_ratio);
+    w2 = st->viewport.dkr_model
+        ? rsp_dkr_clip_scale_w(vt->cw,st->dkr_clip_rows[5][3])
+        : rsp_clip_scale_w(vt->cw,st->clip_ratio);
     for (ax = 0; ax < 4; ax++)
     {
         int32_t vsf = (ax == 3) ? cf[2] : cf[ax];
@@ -1746,6 +1765,9 @@ static void gsp_clip_subdivide(GSPState *st, GSPVertex *out,
     out->t = (int32_t)((uint32_t)(int32_t)out_attr[5] << 17);
     gsp_clip_vertex_flags(st, out);
     gsp_vertex_screen(st, out);
+    if (st->viewport.dkr_model && (st->geometry_mode & 0x00010000u)
+        && !st->fog_off)
+        out->a = rsp_vtx_fog_dkr(out->rs_ndc2z, st->fog_m, st->fog_o) << 16;
 }
 
 static int clip_polygon_guard(GSPState *st, GSPVertex *poly, int n)
@@ -1778,7 +1800,38 @@ static int clip_polygon_guard(GSPState *st, GSPVertex *poly, int n)
         }
         if (cond >= 2)  /* the +-x/+-y guard-band planes scale with the ratio */
             cr[3] = (int16_t)((cr[3] < 0) ? -st->clip_ratio : st->clip_ratio);
-        if (st->clip_fan_first >= 2)
+        if (st->viewport.dkr_model)
+            for (i=0;i<4;i++) cr[i]=st->dkr_clip_rows[cond][i];
+        if (st->viewport.dkr_model)
+        {
+            /* Rare's overlay seeks the first outside run, then starts its
+             * rebuilt list at the crossing into the inside run. A plane
+             * that clips nothing leaves the pointer list unchanged. This
+             * rotation determines both the fan pivot and packet order. */
+            int outside = -1, start, prev;
+            for (i=0;i<n;i++)
+                if ((unsigned int)poly[i].clip & mask) { outside=i; break; }
+            if (outside < 0) continue;
+            start = (outside + 1) % n;
+            while (start != outside && ((unsigned int)poly[start].clip & mask))
+                start = (start + 1) % n;
+            if (start == outside) return 0;
+            prev = (start + n - 1) % n;
+            gsp_clip_subdivide(st, &tmp[m++], &poly[start], &poly[prev], cr);
+            i = start;
+            do {
+                int next = (i + 1) % n;
+                if (m >= GSP_CLIP_MAX) return 0;
+                tmp[m++] = poly[i];
+                if ((unsigned int)poly[next].clip & mask) {
+                    if (m >= GSP_CLIP_MAX) return 0;
+                    gsp_clip_subdivide(st, &tmp[m++], &poly[i], &poly[next], cr);
+                    break;
+                }
+                i = next;
+            } while (i != start);
+        }
+        else if (st->clip_fan_first >= 2)
         {
             /* Wipeout 64's clip driver (overlay i764-i7dc) walks the
              * pointer list linearly from vertex 0 -- vertex first, then
@@ -2260,7 +2313,7 @@ int gsp_triangle(GSPState *s, int32_t *cmd, int i0, int i1, int i2,
              * vertices lie exactly on their planes and carry the
              * inclusive vch bits, which would otherwise reject whole
              * sub-triangles along the clipped edge. */
-            if (!s->rs_clip_model
+            if (!s->rs_clip_model && !s->viewport.dkr_model
                 && (tv[0].clip & tv[1].clip & tv[2].clip
                 & (unsigned int)(s->clip_near_z
                                  ? ((GSP_CLIP_REJECT & ~GSP_CLIP_NW) | GSP_CLIP_NZ)
@@ -2284,6 +2337,16 @@ int gsp_triangle(GSPState *s, int32_t *cmd, int i0, int i1, int i2,
                 if (facc == 0
                     || (s->rs_fan_cull == 2 ? facc < 0 : facc > 0))
                     continue;
+            }
+            if (s->viewport.dkr_model && !(s->geometry_mode & 0x00200000u))
+            {
+                /* Rare reloads all four shade bytes from the original
+                 * provoking vertex, including across a clipped fan. */
+                int flat;
+                for(flat=0;flat<3;flat++) {
+                    tv[flat].r=a->r; tv[flat].g=a->g;
+                    tv[flat].b=a->b; tv[flat].a=a->a;
+                }
             }
             gsp_fold_st(s, tv);
             v0.cx = tv[0].cx; v0.cy = tv[0].cy; v0.cz = tv[0].cz; v0.cw = tv[0].cw;

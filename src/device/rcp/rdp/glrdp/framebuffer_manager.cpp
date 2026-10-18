@@ -148,7 +148,7 @@ int FramebufferManager::drawing_height(const RDPImage &image, int scissor_height
 }
 
 GLFramebuffer &FramebufferManager::bind_color_image(const RDPImage &image, int requested_height,
-                                                    std::uint32_t z_address, int requested_scale) {
+                                                    std::uint32_t z_address, int requested_scale, bool bind_gl) {
     const std::uint64_t key = image_key(image);
 
     auto &framebuffer = buffers_[key];
@@ -219,7 +219,7 @@ GLFramebuffer &FramebufferManager::bind_color_image(const RDPImage &image, int r
     // N64 Z/DZ state is maintained by GPUDepthBuffer in native-resolution
     // integer ping-pong textures. The color framebuffer deliberately has no
     // unrelated fixed-function depth attachment.
-    glBindFramebuffer(GL_FRAMEBUFFER, framebuffer.fbo);
+    if (bind_gl) glBindFramebuffer(GL_FRAMEBUFFER, framebuffer.fbo);
 
     synchronize_cpu_tracking(framebuffer);
     return framebuffer;

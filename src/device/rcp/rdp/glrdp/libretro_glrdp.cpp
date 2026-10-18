@@ -161,7 +161,7 @@ bool glrdp_open() {
                 renderer->fb_read(state.z_image_address);
         };
         // The core schedules DP completion. Never alter DPC_CLOCK or deliver an early IRQ.
-        parser->callbacks().sync_full = [] { *gfx_info.MI_INTR_REG |= 0x20; };
+        parser->callbacks().sync_full = [] { if (renderer) renderer->flush(); *gfx_info.MI_INTR_REG |= 0x20; };
         opened = (renderer || es_renderer) || initialize_renderer();
     } catch (const std::exception &e) {
         error("open", e.what());
@@ -206,6 +206,7 @@ void glrdp_process_commands() {
             rdram_memory.copy_be(start, command_bytes.data(), length);
         }
         parser->feed(command_bytes);
+        if (renderer) renderer->flush();
     } catch (const std::exception &e) {
         error("command list", e.what());
         parser->discard_pending();
@@ -226,6 +227,7 @@ void glrdp_begin_frame() {
     }
 }
 void glrdp_end_frame() {
+    if (renderer) renderer->flush();
     frame_guard.reset();
     es_frame_guard.reset();
 }

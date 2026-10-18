@@ -97,7 +97,7 @@ static void emit_itlb_native(uint32_t pc)
  * two-entry instruction micro-TLB hit/replacement state for later fetches. */
 static void emit_fetch_native(const struct ari64_x64_config* config, unsigned index, unsigned start, unsigned base, int check_line)
 {
-    unsigned cycles = base + (config->cache_timing || config->compat_issue_clock);
+    unsigned cycles = base + r4300_issue_reservation(config->compat_issue_clock);
     emit_addimm(R13, cycles, R13);
     if (!config->cache_timing) return;
     uint32_t pc = config->virtual_pc + index * 4;
@@ -124,6 +124,50 @@ static void emit_pipeline_clear(void)
     emit_state_imm(offsetof(struct r4300_core, pipeline_fpu_result_mask), 0, 1);
     emit_state_imm(offsetof(struct r4300_core, pipeline_fpu_cc), 0, 0);
     emit_state_imm(offsetof(struct r4300_core, pipeline_cached_store), 0, 0);
+}
+/* Native timing cannot absorb LDI in a compatibility issue reservation. Test
+ * raw fields just like the hardware's deliberately imprecise detector. */
+static void emit_ldi_native(uint32_t instruction, int fp, uint32_t previous, int known)
+{
+    if (known) {
+        unsigned major = previous >> 26, load = (previous >> 16) & 31;
+        if ((major >= 0x20 && major <= 0x25) || major == 0x27 || major == 0x37) {
+            if (!fp && load && (load == ((instruction >> 21) & 31) || load == ((instruction >> 16) & 31)))
+                emit_addimm(R13, 1, R13);
+        } else if (fp && (major == 0x31 || major == 0x35)) {
+            unsigned consumer = (instruction >> 16) & 31;
+            if (load == consumer) emit_addimm(R13, 1, R13);
+            else if ((load & ~1u) == (consumer & ~1u)) {
+                emit_mem(0xf7, 0, 0, R12, -1, 0, offsetof(struct r4300_core, cp0.regs[CP0_STATUS_REG])); output_w32(CP0_STATUS_FR);
+                unsigned char* fr = emit_jump(5);
+                emit_addimm(R13, 1, R13); patch_jump(fr, out);
+            }
+        }
+        return;
+    }
+    unsigned rs = (instruction >> 21) & 31, rt = (instruction >> 16) & 31;
+    uint32_t candidates = (rs ? UINT32_C(1) << rs : 0) | (rt ? UINT32_C(1) << rt : 0);
+    if (!fp && !candidates) return;
+    emit_mem(0x8b, 1, RAX, R12, -1, 0, offsetof(struct r4300_core, pipeline_load_mask));
+    unsigned char* fpr_history = NULL;
+    if (fp) {
+        emit_movimm64(UINT64_C(1) << (32 + rt), RDX);
+        if (rt & 1) {
+            emit_mem(0xf7, 0, 0, R12, -1, 0, offsetof(struct r4300_core, cp0.regs[CP0_STATUS_REG])); output_w32(CP0_STATUS_FR);
+            unsigned char* fr = emit_jump(5);
+            emit_movimm64(UINT64_C(1) << (32 + (rt & ~1u)), RDX); patch_jump(fr, out);
+        }
+        emit_reg_op(0x21, RDX, RAX, 1);
+    } else {
+        emit_mov64(RAX, RDX); emit_shift_reg(RDX, 5, 32, 1);
+        emit_reg_op(0x85, RDX, RDX, 0); fpr_history = emit_jump(5);
+        emit_imm_op(4, RAX, candidates, 0);
+    }
+    emit_reg_op(0x85, RAX, RAX, fp ? 1 : 0);
+    unsigned char* no_load = emit_jump(4);
+    emit_addimm(R13, 1, R13);
+    patch_jump(no_load, out);
+    if (fpr_history) patch_jump(fpr_history, out);
 }
 /* Match the authoritative TLB-entry scan, including overlapping entries,
  * global mappings, ASID and cache mode. Read it live rather than caching an
@@ -170,7 +214,8 @@ static void emit_mapped_cacheability(void)
     emit_mem(0x8b, 0, RDX, RSP, -1, 0, 0);
 }
 static void emit_memory_native(uint32_t instruction, unsigned index,
-    const struct ari64_x64_config* config, struct memory_exit* exit, int check_line)
+    const struct ari64_x64_config* config, struct memory_exit* exit, int check_line,
+    uint32_t previous, int known)
 {
     enum r4300_opcode op = r4300_get_idec(instruction)->opcode;
     int fp = op == R4300_OP_LWC1 || op == R4300_OP_LDC1 || op == R4300_OP_SWC1 || op == R4300_OP_SDC1;
@@ -273,6 +318,14 @@ static void emit_memory_native(uint32_t instruction, unsigned index,
         patch_jump(data_ready, out);
         emit_fetch_native(config, index, exit->start, 1, check_line);
         emit_reg_op(0x01, RDX, R13, 0);
+        if (!r4300_issue_reservation(config->compat_issue_clock)) {
+            emit_ldi_native(instruction, fp, previous, known);
+            emit_reg_op(0x85, RCX, RCX, 0); unsigned char* no_cache = emit_jump(4);
+            emit_mem(0x81, 0, 7, R12, -1, 0, offsetof(struct r4300_core, pipeline_cached_store)); output_w32(0);
+            unsigned char* no_store = emit_jump(4);
+            emit_addimm(R13, 1, R13);
+            patch_jump(no_store, out); patch_jump(no_cache, out);
+        } else {
         /* LDI and DCB can coexist in restored/test history at region entry.
          * Thereafter every instruction writes mutually exclusive load/store
          * history, so the reserved issue clock absorbs either single stall. */
@@ -302,6 +355,7 @@ static void emit_memory_native(uint32_t instruction, unsigned index,
         emit_addimm(R13, 1, R13);
         patch_jump(no_load, out); patch_jump(no_store, out); patch_jump(no_cache, out);
         if (fpr_history) patch_jump(fpr_history, out);
+        }
         }
         if (!write) emit_movimm(0, RCX);
         emit_mem(0x89, 0, RCX, R12, -1, 0, offsetof(struct r4300_core, pipeline_cached_store));

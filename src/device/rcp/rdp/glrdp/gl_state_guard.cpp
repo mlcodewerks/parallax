@@ -22,6 +22,10 @@ GLStateGuard::GLStateGuard() {
     glGetIntegerv(GL_ELEMENT_ARRAY_BUFFER_BINDING, &element_array_buffer_);
     glGetIntegerv(GL_PIXEL_PACK_BUFFER_BINDING, &pixel_pack_buffer_);
     glGetIntegerv(GL_PIXEL_UNPACK_BUFFER_BINDING, &pixel_unpack_buffer_);
+    glGetIntegerv(GL_UNIFORM_BUFFER_BINDING, &uniform_buffer_);
+    glGetIntegeri_v(GL_UNIFORM_BUFFER_BINDING, 0, &uniform_binding_);
+    glGetInteger64i_v(GL_UNIFORM_BUFFER_START, 0, &uniform_start_);
+    glGetInteger64i_v(GL_UNIFORM_BUFFER_SIZE, 0, &uniform_size_);
 
     glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &draw_framebuffer_);
     glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &read_framebuffer_);
@@ -131,6 +135,10 @@ GLStateGuard::~GLStateGuard() {
     glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, GLuint(element_array_buffer_));
     glBindBuffer(GL_PIXEL_PACK_BUFFER, GLuint(pixel_pack_buffer_));
     glBindBuffer(GL_PIXEL_UNPACK_BUFFER, GLuint(pixel_unpack_buffer_));
+    if (uniform_binding_ && uniform_size_)
+        glBindBufferRange(GL_UNIFORM_BUFFER, 0, GLuint(uniform_binding_), uniform_start_, uniform_size_);
+    else glBindBufferBase(GL_UNIFORM_BUFFER, 0, GLuint(uniform_binding_));
+    glBindBuffer(GL_UNIFORM_BUFFER, GLuint(uniform_buffer_));
 
     glViewport(viewport_[0], viewport_[1], viewport_[2], viewport_[3]);
     glScissor(scissor_box_[0], scissor_box_[1], scissor_box_[2], scissor_box_[3]);

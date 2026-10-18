@@ -11,6 +11,8 @@ enum controller_pak_option { CONTROLLER_PAK_NONE, CONTROLLER_PAK_MEMORY,
     CONTROLLER_PAK_RUMBLE, CONTROLLER_PAK_TRANSFER };
 struct renderer_settings {
     bool rsp_hle, lle_graphics, lle_audio;
+    /* Derived from the single Fast/Accurate setting. Component clocks and
+     * tags-only CPU timing are always available; Accurate selects full caches. */
     bool per_cycle_timing;
     bool component_timing;
     bool fast_cpu_timing;

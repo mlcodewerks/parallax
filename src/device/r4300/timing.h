@@ -53,10 +53,19 @@ static osal_force_inline void cp0_step_cycles(struct cp0* cp0, unsigned int cycl
 #include "cache_timing.h"
 #include "pipeline.h"
 
-static osal_force_inline unsigned int r4300_pipeline_issue_cycles(
-    unsigned int cache_timing, unsigned int stalls)
+static osal_force_inline unsigned int r4300_issue_reservation(unsigned int compatibility)
 {
-    unsigned int issue = cache_timing != 0;
+    /* The native per-cycle model already includes issue in its base cost.
+     * Cache storage does not determine the issue rate: tags-only timing can
+     * use the same interlocks. HLE and untimed components retain their
+     * compatibility envelope until their estimates support the native rate. */
+    return compatibility != 0;
+}
+
+static osal_force_inline unsigned int r4300_pipeline_issue_cycles(
+    unsigned int reservation, unsigned int stalls)
+{
+    unsigned int issue = reservation != 0;
     return stalls > issue ? stalls : issue;
 }
 
@@ -64,14 +73,10 @@ static osal_force_inline int r4300_begin_instruction_cycles(struct r4300_core* r
     uint32_t op, uint32_t pc, unsigned int cycles, unsigned int cache_timing)
 {
     if (cache_timing) r4300_fetch_access_cycles(r4300, pc);
-    /* The compatibility issue envelope already reserves one pipeline clock.
-     * An explicit interlock consumes that reservation; charge only a stall
-     * exceeding it. Adding both clocks serially regresses Racer's intro.
-     * Removing the reservation altogether regresses DK64's vine sequence.
-     * This remains an instruction-boundary estimate, not stage scheduling. */
-    // The ROM-facing compatibility clock is independent of cache/pipeline
-    // detail. Dropping it in untimed mode breaks DK64's post-intro handoff.
-    unsigned int issue = cache_timing || r4300->compat_issue_clock;
+    /* Compatibility timing absorbs interlocks in its reserved clock. Native
+     * timing charges the actual interlock, with no unconditional second issue.
+     * Keep the HLE/untimed envelope used by DK64's vine sequence. */
+    unsigned int issue = r4300_issue_reservation(r4300->compat_issue_clock);
     uint32_t status = r4300->cp0.regs[CP0_STATUS_REG];
     if ((status & CP0_STATUS_MODE_MASK) && !(status & (CP0_STATUS_EXL | CP0_STATUS_ERL))) {
         r4300->interp_PC.addr = pc;

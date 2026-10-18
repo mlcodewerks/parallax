@@ -114,7 +114,7 @@ void configure_callbacks() {
     g_parser->callbacks().sync_load = []() {};
     g_parser->callbacks().sync_pipe = []() {};
     g_parser->callbacks().sync_tile = []() {};
-    g_parser->callbacks().sync_full = []() { signal_dp(); };
+    g_parser->callbacks().sync_full = []() { if (g_renderer) g_renderer->flush(); signal_dp(); };
 }
 struct FRAME_BUFFER_INFO {
     std::uint32_t addr;
@@ -290,6 +290,7 @@ PJ64_EXPORT void PJ64_CALL ProcessRDPList(void) {
         current = end_address & ((status & kDpcStatusXbusDmemDma) ? 0x0ff8u : 0x00fffff8u);
     }
 
+    if (g_renderer) g_renderer->flush();
     if (g_info.DPC_CURRENT_REG)
         *g_info.DPC_CURRENT_REG = current;
     if (g_info.DPC_CLOCK_REG)

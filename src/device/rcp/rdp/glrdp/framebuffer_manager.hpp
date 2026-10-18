@@ -30,7 +30,7 @@ class FramebufferManager {
     static constexpr unsigned cpu_color_slots = 5;
     ~FramebufferManager();
     GLFramebuffer &bind_color_image(const RDPImage &, int, std::uint32_t z_address,
-                                    int internal_scale);
+                                    int internal_scale, bool bind_gl = true);
     int drawing_height(const RDPImage &, int scissor_height) const;
     GLFramebuffer *find(std::uint32_t);
     GLFramebuffer *find_containing(std::uint32_t, std::uint32_t span = 1);

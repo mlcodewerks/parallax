@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <cstring>
 #include <cstdio>
 #include <stdexcept>
 #include <string>
@@ -158,6 +159,8 @@ layout(location = 2) out uint depthStateOut;
 layout(location = 3) out uint depthAcceptOut;
 
 uniform sampler2D mip_tiles[8];
+uniform sampler2D tile_atlas;
+uniform ivec4 tile_region[8];
 
 uniform sampler2D fbtex;
 uniform bool framebuffer_rgba16;
@@ -196,6 +199,7 @@ uniform uint noise_seed;
 uniform float primitive_lod_fraction;
 uniform int primitive_min_lod;
 uniform vec4 tile_transform[8];
+uniform vec4 tile_clamp[8];
 uniform ivec4 tile_wrap[8]; // mask S/T, clamp/mirror flags S/T
 uniform int max_mip_level;
 uniform bool triangle_coverage;
@@ -280,8 +284,11 @@ int tile_axis(int p, int size, int mask, int mirror) {
 ivec2 tile_address(ivec2 p, ivec2 size, ivec4 wrap) {
     return ivec2(tile_axis(p.x, size.x, wrap.x, wrap.z), tile_axis(p.y, size.y, wrap.y, wrap.w));
 }
-vec4 sample_texture(sampler2D tex, vec2 uv, ivec4 wrap, int texture_cycle) {
-    ivec2 size = textureSize(tex, 0);
+vec4 tile_fetch(sampler2D tex, ivec2 p, ivec4 region) {
+    return texelFetch(tex, p + region.xy, 0);
+}
+vec4 sample_texture(sampler2D tex, vec2 uv, ivec4 wrap, int texture_cycle, ivec4 region) {
+    ivec2 size = region.zw;
     // RDP coordinates address texels directly; filtering starts at the texel,
     // without the normalized GL sampling half-texel subtraction.
     vec2 p = uv;
@@ -303,24 +310,24 @@ vec4 sample_texture(sampler2D tex, vec2 uv, ivec4 wrap, int texture_cycle) {
         int index = (coordinate.x + coordinate.y * (wrap.w >> 2) * 4) & 2047;
         if ((coordinate.y & 1) != 0)
             index ^= 2;
-        return texelFetch(tex, ivec2(index & 511, index >> 9), 0);
+        return tile_fetch(tex, ivec2(index & 511, index >> 9), region);
     }
     if (texture_filter_mode < 2 || cycle_type == 2)
-        return texelFetch(tex, tile_address(base, size, wrap), 0);
+        return tile_fetch(tex, tile_address(base, size, wrap), region);
     vec2 f = floor(fract(p) * 32.0) / 32.0;
     if ((wrap.z & 8) != 0 && texture_convert_modes[texture_cycle] == 0) {
-        vec4 a = texelFetch(tex, tile_address(base, size, wrap), 0);
-        vec4 d = texelFetch(tex, tile_address(base + ivec2(2, 1), size, wrap), 0);
+        vec4 a = tile_fetch(tex, tile_address(base, size, wrap), region);
+        vec4 d = tile_fetch(tex, tile_address(base + ivec2(2, 1), size, wrap), region);
         vec2 rg = vec2(floor(f.x * 16.0) / 32.0 + float(base.x & 1) * 0.5, f.y);
         return vec4(rg.x + rg.y >= 1.0 ? d.rg : a.rg, f.x + f.y >= 1.0 ? d.ba : a.ba);
     }
     if ((wrap.z & 12) != 0) {
         // YUV TLUT descriptors fetch the next column two byte indices away.
         // Red/green use the half-rate horizontal interpolation phase.
-        vec4 a = texelFetch(tex, tile_address(base, size, wrap), 0);
-        vec4 b = texelFetch(tex, tile_address(base + ivec2(2, 0), size, wrap), 0);
-        vec4 c = texelFetch(tex, tile_address(base + ivec2(0, 1), size, wrap), 0);
-        vec4 d = texelFetch(tex, tile_address(base + ivec2(2, 1), size, wrap), 0);
+        vec4 a = tile_fetch(tex, tile_address(base, size, wrap), region);
+        vec4 b = tile_fetch(tex, tile_address(base + ivec2(2, 0), size, wrap), region);
+        vec4 c = tile_fetch(tex, tile_address(base + ivec2(0, 1), size, wrap), region);
+        vec4 d = tile_fetch(tex, tile_address(base + ivec2(2, 1), size, wrap), region);
         vec2 rg = vec2(floor(f.x * 16.0) / 32.0 + float(base.x & 1) * 0.5, f.y);
         vec4 low = a + (b - a) * f.x + (c - a) * f.y;
         vec4 high = d + (c - d) * (1.0 - f.x) + (b - d) * (1.0 - f.y);
@@ -337,10 +344,10 @@ vec4 sample_texture(sampler2D tex, vec2 uv, ivec4 wrap, int texture_cycle) {
         return result;
     }
     if (texture_filter_mode == 3 && all(equal(f, vec2(0.5)))) {
-        return (texelFetch(tex, tile_address(base, size, wrap), 0) +
-                texelFetch(tex, tile_address(base + ivec2(1, 0), size, wrap), 0) +
-                texelFetch(tex, tile_address(base + ivec2(0, 1), size, wrap), 0) +
-                texelFetch(tex, tile_address(base + ivec2(1, 1), size, wrap), 0)) *
+        return (tile_fetch(tex, tile_address(base, size, wrap), region) +
+                tile_fetch(tex, tile_address(base + ivec2(1, 0), size, wrap), region) +
+                tile_fetch(tex, tile_address(base + ivec2(0, 1), size, wrap), region) +
+                tile_fetch(tex, tile_address(base + ivec2(1, 1), size, wrap), region)) *
                0.25;
     }
     ivec2 p0 = base, p1 = base + ivec2(1, 0), p2 = base + ivec2(0, 1);
@@ -350,9 +357,9 @@ vec4 sample_texture(sampler2D tex, vec2 uv, ivec4 wrap, int texture_cycle) {
         p2 = base + ivec2(1, 0);
         f = vec2(1.0) - f;
     }
-    vec4 a = texelFetch(tex, tile_address(p0, size, wrap), 0);
-    vec4 b = texelFetch(tex, tile_address(p1, size, wrap), 0);
-    vec4 c = texelFetch(tex, tile_address(p2, size, wrap), 0);
+    vec4 a = tile_fetch(tex, tile_address(p0, size, wrap), region);
+    vec4 b = tile_fetch(tex, tile_address(p1, size, wrap), region);
+    vec4 c = tile_fetch(tex, tile_address(p2, size, wrap), region);
     return a + (b - a) * f.x + (c - a) * f.y;
 }
 
@@ -373,23 +380,35 @@ vec4 sample_mip_tile(int level, vec2 st, int texture_cycle) {
     if (cycle_type == 2)
         uv.x = floor(uv.x) + copy_lane;
     ivec4 wrap = tile_wrap[level];
+    // RDP maximum tests use absolute tile endpoints before subtracting SL/TL.
+    // For inverted bounds, the unsigned clamp difference wraps to 10 bits;
+    // clamping relative coordinates to an ordinary host rectangle is wrong.
+    if (cycle_type != 2) {
+        vec4 limits = tile_clamp[level];
+        if (limits.x < 0.0 && ((wrap.z & 1) != 0 || wrap.x == 0) && uv.x >= limits.x)
+            uv.x = limits.z;
+        if (limits.y < 0.0 && ((wrap.w & 1) != 0 || wrap.y == 0) && uv.y >= limits.y)
+            uv.y = limits.w;
+    }
+    if (tile_region[level].z > 0)
+        return sample_texture(tile_atlas, uv, wrap, texture_cycle, tile_region[level]);
     switch (level) {
     case 0:
-        return sample_texture(mip_tiles[0], uv, wrap, texture_cycle);
+        return sample_texture(mip_tiles[0], uv, wrap, texture_cycle, ivec4(0, 0, textureSize(mip_tiles[0], 0)));
     case 1:
-        return sample_texture(mip_tiles[1], uv, wrap, texture_cycle);
+        return sample_texture(mip_tiles[1], uv, wrap, texture_cycle, ivec4(0, 0, textureSize(mip_tiles[1], 0)));
     case 2:
-        return sample_texture(mip_tiles[2], uv, wrap, texture_cycle);
+        return sample_texture(mip_tiles[2], uv, wrap, texture_cycle, ivec4(0, 0, textureSize(mip_tiles[2], 0)));
     case 3:
-        return sample_texture(mip_tiles[3], uv, wrap, texture_cycle);
+        return sample_texture(mip_tiles[3], uv, wrap, texture_cycle, ivec4(0, 0, textureSize(mip_tiles[3], 0)));
     case 4:
-        return sample_texture(mip_tiles[4], uv, wrap, texture_cycle);
+        return sample_texture(mip_tiles[4], uv, wrap, texture_cycle, ivec4(0, 0, textureSize(mip_tiles[4], 0)));
     case 5:
-        return sample_texture(mip_tiles[5], uv, wrap, texture_cycle);
+        return sample_texture(mip_tiles[5], uv, wrap, texture_cycle, ivec4(0, 0, textureSize(mip_tiles[5], 0)));
     case 6:
-        return sample_texture(mip_tiles[6], uv, wrap, texture_cycle);
+        return sample_texture(mip_tiles[6], uv, wrap, texture_cycle, ivec4(0, 0, textureSize(mip_tiles[6], 0)));
     default:
-        return sample_texture(mip_tiles[7], uv, wrap, texture_cycle);
+        return sample_texture(mip_tiles[7], uv, wrap, texture_cycle, ivec4(0, 0, textureSize(mip_tiles[7], 0)));
     }
 }
 
@@ -1806,12 +1825,17 @@ void main() {
 )";
     // All RDP primitives use a conservative quad. Edge, texture, shade and
     // depth planes are evaluated by the same fragment ubershader.
-    generic_program_ = link(vs, fs);
+    GLint block_size = 16384;
+    glGetIntegerv(GL_MAX_UNIFORM_BLOCK_SIZE, &block_size);
+    primitive_uniforms_.initialize(fs, unsigned(block_size));
+    const auto batch_vs = primitive_uniforms_.vertex();
+    const auto batch_fs = primitive_uniforms_.fragment(fs);
+    generic_program_ = link(batch_vs.c_str(), batch_fs.c_str());
     initialize_samplers(generic_program_);
     if (config_.specialize_shaders) {
         specialized_key_ = glrdp_shader_config_key(config_);
         const auto specialized = glrdp_specialize_shader(fs, config_, false);
-        specialized_program_ = link(vs, specialized.c_str());
+        specialized_program_ = link(batch_vs.c_str(), primitive_uniforms_.fragment(specialized).c_str());
         initialize_samplers(specialized_program_);
     }
     set_rendering_config(config_);
@@ -1830,6 +1854,14 @@ void main() {
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glGenBuffers(1, &primitive_ubo_);
+    GLint ubo_alignment = 256;
+    glGetIntegerv(GL_UNIFORM_BUFFER_OFFSET_ALIGNMENT, &ubo_alignment);
+    const auto block_bytes = primitive_uniforms_.values.size() * sizeof(PrimitiveUniforms::Slot) * primitive_uniforms_.capacity;
+    ubo_slot_bytes_ = (block_bytes + ubo_alignment - 1) / ubo_alignment * ubo_alignment;
+    ubo_offset_ = 0;
+    glBindBuffer(GL_UNIFORM_BUFFER, primitive_ubo_);
+    glBufferData(GL_UNIFORM_BUFFER, ubo_slot_bytes_ * 64, nullptr, GL_STREAM_DRAW);
     glGenBuffers(1, &vbo_);
     glGenTextures(GLsizei(tile_texture_.size()), tile_texture_.data());
     tile_signature_.fill(~0ull);
@@ -1837,6 +1869,15 @@ void main() {
     GLint max_texture_size = 0;
     glGetIntegerv(GL_MAX_TEXTURE_SIZE, &max_texture_size);
     max_texture_size_ = std::max<int>(max_texture_size, 1);
+    atlas_.size = std::min(2048, max_texture_size_);
+    glGenTextures(1, &atlas_texture_);
+    glActiveTexture(GL_TEXTURE4);
+    glBindTexture(GL_TEXTURE_2D, atlas_texture_);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, atlas_.size, atlas_.size, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
     glGenFramebuffers(1, &post_fbo_);
     glGenTextures(1, &post_color_);
     glGenTextures(1, &post_depth_);
@@ -1860,6 +1901,10 @@ void main() {
     return true;
 }
 GLint RDPRenderer::uniform(GLuint program, const char *name) {
+    if (program && (program == generic_program_ || program == specialized_program_)) {
+        auto found = primitive_uniforms_.locations.find(name);
+        if (found != primitive_uniforms_.locations.end()) return found->second;
+    }
     auto &locations = uniforms_[program];
     auto it = locations.find(name);
     if (it != locations.end())
@@ -1872,13 +1917,27 @@ void RDPRenderer::initialize_samplers(GLuint program) {
     glUseProgram(program);
     for (unsigned level = 0; level < 8; ++level) {
         const auto name = "mip_tiles[" + std::to_string(level) + "]";
-        glUniform1i(uniform(program, name.c_str()), level < 2 ? level : level + 4);
+        uniform_1i(uniform(program, name.c_str()), level < 2 ? level : level + 4);
     }
-    glUniform1i(uniform(program, "fbtex"), 2);
-    glUniform1i(uniform(program, "depth_state_texture"), 3);
-    glUniform1i(uniform(program, "depth_acceptance_mask"), 5);
+    glUniformBlockBinding(program, glGetUniformBlockIndex(program, "RDPBatch"), 0);
+    uniform_1i(uniform(program, "tile_atlas"), 4);
+    uniform_1i(uniform(program, "fbtex"), 2);
+    uniform_1i(uniform(program, "depth_state_texture"), 3);
+    uniform_1i(uniform(program, "depth_acceptance_mask"), 5);
 }
 void RDPRenderer::shutdown() {
+    flush();
+    if (primitive_ubo_ && stats_.primitives)
+        std::fprintf(stderr, "GLRDP submission = primitives=%llu draws=%llu batches=%llu batched=%llu atlas_hits=%llu atlas_uploads=%llu atlas_resets=%llu standalone=%llu framebuffer_tiles=%llu framebuffer_readbacks=%llu\n",
+            (unsigned long long)stats_.primitives, (unsigned long long)stats_.draws,
+            (unsigned long long)stats_.batches, (unsigned long long)stats_.batched_primitives,
+            (unsigned long long)stats_.atlas_hits, (unsigned long long)stats_.atlas_uploads,
+            (unsigned long long)stats_.atlas_resets, (unsigned long long)stats_.standalone_uploads,
+            (unsigned long long)stats_.framebuffer_tiles, (unsigned long long)stats_.framebuffer_readbacks);
+    if (primitive_ubo_) glDeleteBuffers(1, &primitive_ubo_);
+    if (atlas_texture_) glDeleteTextures(1, &atlas_texture_);
+    primitive_ubo_ = atlas_texture_ = 0;
+    atlas_.clear(); tile_regions_ = {};
     field_history_.reset();
     uniforms_.clear();
     combiner_values_.clear();
@@ -1926,6 +1985,7 @@ void RDPRenderer::shutdown() {
     gpu_depth_.clear();
 }
 void RDPRenderer::reset() {
+    flush(); atlas_.clear(); tile_regions_ = {};
     field_history_.reset();
     gpu_depth_.clear();
     fb_.clear();
@@ -1970,6 +2030,7 @@ void RDPRenderer::fit_aspect(int outer_w, int outer_h, float aspect, int &x, int
 }
 
 void RDPRenderer::set_internal_resolution_scale(int scale) {
+    flush();
     scale = std::clamp(scale, 1, 8);
     if (internal_scale_ == scale)
         return;
@@ -2070,7 +2131,7 @@ void RDPRenderer::draw_final_present() {
     glUseProgram(final_present_program_);
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, post_color_);
-    glUniform1i(uniform(final_present_program_, "postColor"), 0);
+    uniform_1i(uniform(final_present_program_, "postColor"), 0);
 
     glBindVertexArray(vao_);
     glDrawArrays(GL_TRIANGLES, 0, 3);
@@ -2078,14 +2139,42 @@ void RDPRenderer::draw_final_present() {
 
 void RDPRenderer::upload_tile(const RDPState &s, std::uint8_t ti, unsigned unit) {
     auto sig = tile_sig(s, ti);
-    if (sig == tile_signature_[unit]) {
-        glActiveTexture(GL_TEXTURE0 + (unit < 2 ? unit : unit + 4));
-        glBindTexture(GL_TEXTURE_2D, tile_texture_[unit]);
+    const bool framebuffer_tile = fb_.find_containing(s.texture_image.address) != nullptr ||
+        gpu_depth_.find(s.texture_image.address) != nullptr;
+    if (framebuffer_tile) ++stats_.framebuffer_tiles;
+    if (sig == tile_signature_[unit] && !(framebuffer_tile && tile_regions_[unit][2])) {
         return;
     }
     auto d = rdp_decode_tile(s, ti);
     if (d.rgba.empty())
         return;
+    if (!framebuffer_tile && int(d.width) <= atlas_.size && int(d.height) <= atlas_.size) {
+        const auto key = TextureAtlas::key(d.width, d.height, d.rgba);
+        if (const auto *entry = atlas_.find(key, d.width, d.height, d.rgba)) {
+            tile_regions_[unit] = entry->region;
+            tile_signature_[unit] = sig;
+            ++stats_.atlas_hits;
+            return;
+        }
+        auto region = atlas_.allocate(int(d.width), int(d.height));
+        if (!region[2]) {
+            // Keep earlier mip levels valid for this primitive. Recycle only
+            // at the next primitive boundary; this tile uses standalone storage.
+            atlas_full_ = true;
+        } else {
+        glActiveTexture(GL_TEXTURE4);
+        glBindTexture(GL_TEXTURE_2D, atlas_texture_);
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+        glTexSubImage2D(GL_TEXTURE_2D, 0, region[0], region[1], region[2], region[3], GL_RGBA, GL_UNSIGNED_BYTE, d.rgba.data());
+        atlas_.insert(key, region, std::move(d.rgba));
+        tile_regions_[unit] = region; tile_signature_[unit] = sig; ++stats_.atlas_uploads;
+        return;
+        }
+    }
+    flush();
+    tile_regions_[unit] = {};
+    standalone_tiles_ = true;
+    ++stats_.standalone_uploads;
     const auto &t = s.tiles[ti & 7];
     glActiveTexture(GL_TEXTURE0 + (unit < 2 ? unit : unit + 4));
     glBindTexture(GL_TEXTURE_2D, tile_texture_[unit]);
@@ -2153,18 +2242,17 @@ void RDPRenderer::configure_rdp_program(GLuint active_program, const GLFramebuff
                                         bool depth_acceptance_enable, bool raw_z_fill,
                                         std::uint32_t primitive_noise_seed,
                                         bool combined_depth_color) {
-    glUseProgram(active_program);
     auto loc = [&](const char *name) { return uniform(active_program, name); };
 
     // Probe, Z and color passes share the same stable RDP configuration.
     // Only pass selection and the primitive noise seed change on every draw.
-    glUniform1i(loc("depth_state_pass"), depth_state_pass);
-    glUniform1i(loc("combined_depth_color"), combined_depth_color);
-    glUniform1i(loc("depth_acceptance_enable"), depth_acceptance_enable);
-    glUniform1i(loc("raw_z_fill"), raw_z_fill);
-    glUniform1ui(loc("noise_seed"), primitive_noise_seed);
+    uniform_1i(loc("depth_state_pass"), depth_state_pass);
+    uniform_1i(loc("combined_depth_color"), combined_depth_color);
+    uniform_1i(loc("depth_acceptance_enable"), depth_acceptance_enable);
+    uniform_1i(loc("raw_z_fill"), raw_z_fill);
+    uniform_1ui(loc("noise_seed"), primitive_noise_seed);
     const bool scissor_valid = s.scissor_xl > s.scissor_xh && s.scissor_yl > s.scissor_yh;
-    glUniform4i(loc("alpha_scissor_pixels"), scissor_valid ? s.scissor_xh >> 2 : 0,
+    uniform_4i(loc("alpha_scissor_pixels"), scissor_valid ? s.scissor_xh >> 2 : 0,
                 scissor_valid ? s.scissor_yh >> 2 : 0,
                 scissor_valid ? int((s.scissor_xl + 3) >> 2) : target.native_width,
                 scissor_valid ? int((s.scissor_yl + 3) >> 2) : target.native_height);
@@ -2182,60 +2270,60 @@ void RDPRenderer::configure_rdp_program(GLuint active_program, const GLFramebuff
             (unsigned(max_mip_level_) << 16) | (std::uint64_t(s.blend.a) << 24),
         glrdp_shader_config_key(config_)};
     if (cycle_type == 2)
-        glUniform1f(loc("copy_start_x"), float(std::max(bounds_x_, int(s.scissor_xh) >> 2)));
-    auto previous = configuration_values_.find(active_program);
+        uniform_1f(loc("copy_start_x"), float(std::max(bounds_x_, int(s.scissor_xh) >> 2)));
+    auto previous = configuration_values_.find(0);
     if (previous != configuration_values_.end() && previous->second == configuration) {
         set_combiner_uniforms(s, active_program);
         return;
     }
-    configuration_values_[active_program] = configuration;
-    glUniform1i(loc("coverage_mode"), config_.coverage);
-    glUniform1i(loc("fast_blending"), config_.blending == GLRDP_ARITHMETIC_FAST);
-    glUniform1i(loc("fast_combiner"), config_.combiner == GLRDP_ARITHMETIC_FAST);
-    glUniform1i(loc("accurate_texcoords"), config_.accurate_texcoords);
-    glUniform1i(loc("accurate_shading"), config_.accurate_shading);
+    configuration_values_[0] = configuration;
+    uniform_1i(loc("coverage_mode"), config_.coverage);
+    uniform_1i(loc("fast_blending"), config_.blending == GLRDP_ARITHMETIC_FAST);
+    uniform_1i(loc("fast_combiner"), config_.combiner == GLRDP_ARITHMETIC_FAST);
+    uniform_1i(loc("accurate_texcoords"), config_.accurate_texcoords);
+    uniform_1i(loc("accurate_shading"), config_.accurate_shading);
 
     const int alpha_compare_mode = int(s.other_modes & 3);
     const int texture_filter_mode = config_.texture_filter ? int((s.other_modes >> 44) & 3) : 0;
     const int texture_detail_mode = int((s.other_modes >> 49) & 3);
 
-    glUniform2f(loc("viewport"), float(target.native_width), float(target.native_height));
-    glUniform1f(loc("internalScale"), std::max(fragment_internal_scale, 1.0f));
+    uniform_2f(loc("viewport"), float(target.native_width), float(target.native_height));
+    uniform_1f(loc("internalScale"), std::max(fragment_internal_scale, 1.0f));
     const float lod_derivative_scale = std::max(fragment_internal_scale, 1.0f);
-    glUniform1f(loc("lodDerivativeScale"), lod_derivative_scale);
-    glUniform1i(loc("triangle_coverage"), triangle_coverage_);
-    glUniform1i(loc("cycle_type"), cycle_type);
-    glUniform1i(loc("alpha_compare_mode"), alpha_compare_mode);
-    glUniform1i(loc("texture_filter_mode"), texture_filter_mode);
-    glUniform1i(loc("coverage_destination"), int((s.other_modes >> 8) & 3));
-    glUniform1i(loc("color_on_coverage"), (s.other_modes >> 7) & 1);
-    glUniform1i(loc("texture_enable"), textured ? 1 : 0);
-    glUniform1i(loc("texture1_enable"), rdp_uses_second_texel(s));
-    glUniform1i(loc("lod_fraction_used"), config_.texture_lod && rdp_uses_lod_fraction(s));
-    glUniform1i(loc("tex0_framebuffer"), texture_is_framebuffer ? 1 : 0);
-    glUniform1i(loc("tex1_framebuffer"), texture_is_framebuffer ? 1 : 0);
-    glUniform1i(loc("max_mip_level"), max_mip_level_);
-    glUniform1i(loc("lod_enable"), config_.texture_lod && ((s.other_modes >> 48) & 1));
-    glUniform1i(loc("texture_sharpen"), (texture_detail_mode & 1) ? 1 : 0);
-    glUniform1i(loc("texture_detail"), (texture_detail_mode & 2) ? 1 : 0);
-    glUniform1i(loc("framebuffer_rgba16"), s.color_image.size == RDPImageSize::Bits16 &&
+    uniform_1f(loc("lodDerivativeScale"), lod_derivative_scale);
+    uniform_1i(loc("triangle_coverage"), triangle_coverage_);
+    uniform_1i(loc("cycle_type"), cycle_type);
+    uniform_1i(loc("alpha_compare_mode"), alpha_compare_mode);
+    uniform_1i(loc("texture_filter_mode"), texture_filter_mode);
+    uniform_1i(loc("coverage_destination"), int((s.other_modes >> 8) & 3));
+    uniform_1i(loc("color_on_coverage"), (s.other_modes >> 7) & 1);
+    uniform_1i(loc("texture_enable"), textured ? 1 : 0);
+    uniform_1i(loc("texture1_enable"), rdp_uses_second_texel(s));
+    uniform_1i(loc("lod_fraction_used"), config_.texture_lod && rdp_uses_lod_fraction(s));
+    uniform_1i(loc("tex0_framebuffer"), texture_is_framebuffer ? 1 : 0);
+    uniform_1i(loc("tex1_framebuffer"), texture_is_framebuffer ? 1 : 0);
+    uniform_1i(loc("max_mip_level"), max_mip_level_);
+    uniform_1i(loc("lod_enable"), config_.texture_lod && ((s.other_modes >> 48) & 1));
+    uniform_1i(loc("texture_sharpen"), (texture_detail_mode & 1) ? 1 : 0);
+    uniform_1i(loc("texture_detail"), (texture_detail_mode & 2) ? 1 : 0);
+    uniform_1i(loc("framebuffer_rgba16"), s.color_image.size == RDPImageSize::Bits16 &&
                                                s.color_image.format == RDPImageFormat::RGBA);
-    glUniform1i(loc("image_read_enable"), ((s.other_modes >> 6) & 1) ? 1 : 0);
-    glUniform1i(loc("antialias_enable"), ((s.other_modes >> 3) & 1) ? 1 : 0);
-    glUniform1i(loc("force_blend"), ((s.other_modes >> 14) & 1) ? 1 : 0);
-    glUniform4i(loc("dither_modes"), config_.color_dither ? (s.other_modes >> 38) & 3 : 3,
+    uniform_1i(loc("image_read_enable"), ((s.other_modes >> 6) & 1) ? 1 : 0);
+    uniform_1i(loc("antialias_enable"), ((s.other_modes >> 3) & 1) ? 1 : 0);
+    uniform_1i(loc("force_blend"), ((s.other_modes >> 14) & 1) ? 1 : 0);
+    uniform_4i(loc("dither_modes"), config_.color_dither ? (s.other_modes >> 38) & 3 : 3,
                 config_.alpha_dither ? (s.other_modes >> 36) & 3 : 3, (s.other_modes >> 38) & 3, 0);
-    glUniform1i(loc("color_key_enable"), ((s.other_modes >> 40) & 1) ? 1 : 0);
-    glUniform1i(loc("coverage_times_alpha"), ((s.other_modes >> 12) & 1) ? 1 : 0);
-    glUniform1i(loc("alpha_coverage_select"), ((s.other_modes >> 13) & 1) ? 1 : 0);
-    glUniform1i(loc("z_compare_enable"), ((s.other_modes >> 4) & 1u) ? 1 : 0);
-    glUniform1i(loc("z_update_enable"), ((s.other_modes >> 5) & 1u) ? 1 : 0);
-    glUniform1i(loc("primitive_z_source"), ((s.other_modes >> 2) & 1u) ? 1 : 0);
-    glUniform1i(loc("z_mode"), int((s.other_modes >> 10) & 3u));
-    glUniform1ui(loc("primitive_z_fixed"), GLuint(s.primitive_z));
-    glUniform1ui(loc("primitive_dz_fixed"), GLuint(s.primitive_dz));
-    glUniform1ui(loc("fill_color_word"), GLuint(s.fill_color));
-    glUniform1i(loc("alpha_threshold_fixed"), int(s.blend.a));
+    uniform_1i(loc("color_key_enable"), ((s.other_modes >> 40) & 1) ? 1 : 0);
+    uniform_1i(loc("coverage_times_alpha"), ((s.other_modes >> 12) & 1) ? 1 : 0);
+    uniform_1i(loc("alpha_coverage_select"), ((s.other_modes >> 13) & 1) ? 1 : 0);
+    uniform_1i(loc("z_compare_enable"), ((s.other_modes >> 4) & 1u) ? 1 : 0);
+    uniform_1i(loc("z_update_enable"), ((s.other_modes >> 5) & 1u) ? 1 : 0);
+    uniform_1i(loc("primitive_z_source"), ((s.other_modes >> 2) & 1u) ? 1 : 0);
+    uniform_1i(loc("z_mode"), int((s.other_modes >> 10) & 3u));
+    uniform_1ui(loc("primitive_z_fixed"), GLuint(s.primitive_z));
+    uniform_1ui(loc("primitive_dz_fixed"), GLuint(s.primitive_dz));
+    uniform_1ui(loc("fill_color_word"), GLuint(s.fill_color));
+    uniform_1i(loc("alpha_threshold_fixed"), int(s.blend.a));
 
     const auto rgba5551 = [](std::uint16_t value) {
         const auto e5 = [](unsigned v) { return int((v << 3) | (v >> 2)); };
@@ -2244,35 +2332,101 @@ void RDPRenderer::configure_rdp_program(GLuint active_program, const GLFramebuff
     };
     const auto fill_even = rgba5551(std::uint16_t(s.fill_color >> 16));
     const auto fill_odd = rgba5551(std::uint16_t(s.fill_color));
-    glUniform1i(loc("fill_16bit_mode"),
+    uniform_1i(loc("fill_16bit_mode"),
                 (cycle_type == 3 && s.color_image.size == RDPImageSize::Bits16) ? 1 : 0);
-    glUniform1i(loc("fill_image_format"), int(s.color_image.format));
-    glUniform1i(loc("fill_image_size"), int(s.color_image.size));
-    glUniform4i(loc("fill_color_even"), fill_even[0], fill_even[1], fill_even[2], fill_even[3]);
-    glUniform4i(loc("fill_color_odd"), fill_odd[0], fill_odd[1], fill_odd[2], fill_odd[3]);
+    uniform_1i(loc("fill_image_format"), int(s.color_image.format));
+    uniform_1i(loc("fill_image_size"), int(s.color_image.size));
+    uniform_4i(loc("fill_color_even"), fill_even[0], fill_even[1], fill_even[2], fill_even[3]);
+    uniform_4i(loc("fill_color_odd"), fill_odd[0], fill_odd[1], fill_odd[2], fill_odd[3]);
 
     set_combiner_uniforms(s, active_program);
 }
 
-void RDPRenderer::issue_geometry(const std::vector<GLVertex> &vertices, bool /*rectangle*/) {
+void RDPRenderer::primitive_geometry(const std::vector<GLVertex> &v) {
+    uniform_4f(uniform(program_, "rdp_bounds"), float(bounds_x_), float(bounds_y_),
+               float(bounds_x_ + bounds_w_), float(bounds_y_ + bounds_h_));
+    const auto &a = v.front();
+    uniform_4f(uniform(program_, "rdp_color"), a.r, a.g, a.b, a.a);
+    uniform_4f(uniform(program_, "rdp_uv"), a.u * a.inverse_w, a.v * a.inverse_w, a.inverse_w, 0);
+}
+void RDPRenderer::submit_records(const PrimitiveUniforms::Slot *records, unsigned count, GLuint shader) {
+    glUseProgram(shader);
     glBindVertexArray(vao_);
-    glBindBuffer(GL_ARRAY_BUFFER, vbo_);
-    // One quad per RDP primitive avoids replaying overlapping conservative
-    // boxes for each triangle in its two tessellated trapezoids.
-    if (vertices.empty())
-        return;
-    auto corner = [&](float x, float y) {
-        auto vertex = vertices.front();
-        vertex.x = x;
-        vertex.y = y;
-        vertex.z = 0.0f;
-        return vertex;
-    };
-    const float x0 = float(bounds_x_), x1 = float(bounds_x_ + bounds_w_);
-    const float y0 = float(bounds_y_), y1 = float(bounds_y_ + bounds_h_);
-    const GLVertex corners[] = {corner(x0, y0), corner(x1, y0), corner(x0, y1), corner(x1, y1)};
-    glBufferData(GL_ARRAY_BUFFER, sizeof(corners), corners, GL_STREAM_DRAW);
-    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    glBindBuffer(GL_UNIFORM_BUFFER, primitive_ubo_);
+    const auto stride = primitive_uniforms_.values.size() * sizeof(PrimitiveUniforms::Slot);
+    // Stream into fresh, aligned ranges. Orphan only on wrap, so in-flight
+    // draws never depend on bytes overwritten by a later batch.
+    if (ubo_offset_ == ubo_slot_bytes_ * 64) {
+        glBufferData(GL_UNIFORM_BUFFER, ubo_slot_bytes_ * 64, nullptr, GL_STREAM_DRAW);
+        ubo_offset_ = 0;
+    }
+    glBufferSubData(GL_UNIFORM_BUFFER, ubo_offset_, stride * count, records);
+    glBindBufferRange(GL_UNIFORM_BUFFER, 0, primitive_ubo_, ubo_offset_, stride * primitive_uniforms_.capacity);
+    ubo_offset_ += ubo_slot_bytes_;
+    glDrawArraysInstanced(GL_TRIANGLE_STRIP, 0, 4, GLsizei(count));
+    ++stats_.draws;
+}
+void RDPRenderer::bind_tiles() {
+    glActiveTexture(GL_TEXTURE4);
+    glBindTexture(GL_TEXTURE_2D, atlas_texture_);
+    if (standalone_tiles_)
+        for (unsigned level = 0; level < 8; ++level) {
+            glActiveTexture(GL_TEXTURE0 + (level < 2 ? level : level + 4));
+            glBindTexture(GL_TEXTURE_2D, tile_texture_[level < current_tile_count_ ? level : 0]);
+        }
+}
+void RDPRenderer::issue_geometry(const std::vector<GLVertex> &vertices, bool /*rectangle*/) {
+    if (vertices.empty()) return;
+    primitive_geometry(vertices);
+    bind_tiles();
+    submit_records(primitive_uniforms_.values.data(), 1, program_);
+}
+void RDPRenderer::flush() {
+    if (batch_bounds_.empty()) return;
+    auto &target = *batch_target_;
+    PrimitiveBounds bounds = batch_bounds_.front();
+    for (const auto &b : batch_bounds_) {
+        const int x = std::min(bounds.x, b.x), y = std::min(bounds.y, b.y);
+        bounds.w = std::max(bounds.x + bounds.w, b.x + b.w) - x;
+        bounds.h = std::max(bounds.y + bounds.h, b.y + b.h) - y;
+        bounds.x = x; bounds.y = y;
+    }
+    glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+    glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
+    glDisable(GL_CULL_FACE); glDisable(GL_STENCIL_TEST); glDisable(GL_DITHER);
+    glDisable(GL_MULTISAMPLE); glDisable(GL_BLEND);
+    if (batch_depth_) {
+        gpu_depth_.begin_pass(*batch_depth_, bounds.x, target.native_height - bounds.y - bounds.h,
+                              bounds.w, bounds.h, true);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT2, GL_TEXTURE_2D, target.color, 0);
+        const GLenum buffers[] = {GL_COLOR_ATTACHMENT2, GL_NONE, GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1};
+        glDrawBuffers(4, buffers);
+        glEnable(GL_DEPTH_TEST); glDepthFunc(GL_ALWAYS); glDepthMask(GL_TRUE);
+        glActiveTexture(GL_TEXTURE3);
+        glBindTexture(GL_TEXTURE_2D, gpu_depth_.source_state_texture(*batch_depth_));
+    } else {
+        if (batch_reads_color_) {
+            const int saved[] = {bounds_x_, bounds_y_, bounds_w_, bounds_h_};
+            bounds_x_ = bounds.x; bounds_y_ = bounds.y; bounds_w_ = bounds.w; bounds_h_ = bounds.h;
+            update_feedback(target, true);
+            bounds_x_ = saved[0]; bounds_y_ = saved[1]; bounds_w_ = saved[2]; bounds_h_ = saved[3];
+        }
+        glBindFramebuffer(GL_FRAMEBUFFER, target.fbo);
+        const GLenum color = GL_COLOR_ATTACHMENT0; glDrawBuffers(1, &color);
+        glDisable(GL_DEPTH_TEST); glDepthMask(GL_FALSE);
+    }
+    glViewport(0, 0, target.width, target.height);
+    // Each quad is already clipped to both its primitive bounds and scissor.
+    glDisable(GL_SCISSOR_TEST);
+    glActiveTexture(GL_TEXTURE2);
+    glBindTexture(GL_TEXTURE_2D, batch_depth_ || !batch_reads_color_ ? target.color : current_feedback_texture_);
+    glActiveTexture(GL_TEXTURE4); glBindTexture(GL_TEXTURE_2D, atlas_texture_);
+    submit_records(batch_records_.data(), unsigned(batch_bounds_.size()), batch_program_);
+    if (batch_depth_) gpu_depth_.finish_pass(*batch_depth_, batch_writes_z_);
+    ++stats_.batches; stats_.batched_primitives += batch_bounds_.size();
+    batch_bounds_.clear(); batch_records_.clear();
+    batch_target_ = nullptr; batch_depth_ = nullptr;
+    batch_writes_z_ = batch_reads_color_ = false;
 }
 
 bool RDPRenderer::render_gpu_depth(const std::vector<GLVertex> &vertices, bool textured,
@@ -2332,25 +2486,25 @@ void RDPRenderer::set_combiner_uniforms(const RDPState &s, GLuint shader_program
             (std::uint64_t(s.key.scale_g) << 32) | (std::uint64_t(s.key.scale_b) << 40),
         std::uint16_t(s.convert.k[4]) | (std::uint64_t(std::uint16_t(s.convert.k[5])) << 16),
         unsigned(s.primitive_min_lod) | (unsigned(s.primitive_lod_fraction) << 8)};
-    auto previous = combiner_values_.find(shader_program);
+    auto previous = combiner_values_.find(0);
     if (previous != combiner_values_.end() && previous->second == values)
         return;
-    combiner_values_[shader_program] = values;
+    combiner_values_[0] = values;
     int r0[4], a0v[4], r1[4], a1v[4];
     decode_combine(s.combine, r0, a0v, r1, a1v);
     auto loc = [&](const char *n) { return uniform(shader_program, n); };
 
-    glUniform4i(loc("rgb0"), r0[0], r0[1], r0[2], r0[3]);
-    glUniform4i(loc("alpha0"), a0v[0], a0v[1], a0v[2], a0v[3]);
-    glUniform4i(loc("rgb1"), r1[0], r1[1], r1[2], r1[3]);
-    glUniform4i(loc("alpha1"), a1v[0], a1v[1], a1v[2], a1v[3]);
+    uniform_4i(loc("rgb0"), r0[0], r0[1], r0[2], r0[3]);
+    uniform_4i(loc("alpha0"), a0v[0], a0v[1], a0v[2], a0v[3]);
+    uniform_4i(loc("rgb1"), r1[0], r1[1], r1[2], r1[3]);
+    uniform_4i(loc("alpha1"), a1v[0], a1v[1], a1v[2], a1v[3]);
 
     const unsigned bm = unsigned((s.other_modes >> 16) & 0xffff);
     const int b0[4] = {int((bm >> 14) & 3), int((bm >> 10) & 3), int((bm >> 6) & 3),
                        int((bm >> 2) & 3)};
     const int b1[4] = {int((bm >> 12) & 3), int((bm >> 8) & 3), int((bm >> 4) & 3), int(bm & 3)};
-    glUniform4i(loc("blender0"), b0[0], b0[1], b0[2], b0[3]);
-    glUniform4i(loc("blender1"), b1[0], b1[1], b1[2], b1[3]);
+    uniform_4i(loc("blender0"), b0[0], b0[1], b0[2], b0[3]);
+    uniform_4i(loc("blender1"), b1[0], b1[1], b1[2], b1[3]);
 
     auto color = [](RDPColor c) {
         return std::array<float, 4>{c.r / 255.f, c.g / 255.f, c.b / 255.f, c.a / 255.f};
@@ -2360,25 +2514,25 @@ void RDPRenderer::set_combiner_uniforms(const RDPState &s, GLuint shader_program
     const auto fog = color(s.fog);
     const auto blend = color(s.blend);
 
-    glUniform4f(loc("primitive_color"), primitive[0], primitive[1], primitive[2], primitive[3]);
-    glUniform4f(loc("environment_color"), environment[0], environment[1], environment[2],
+    uniform_4f(loc("primitive_color"), primitive[0], primitive[1], primitive[2], primitive[3]);
+    uniform_4f(loc("environment_color"), environment[0], environment[1], environment[2],
                 environment[3]);
-    glUniform4f(loc("fog_color"), fog[0], fog[1], fog[2], fog[3]);
-    glUniform4f(loc("blend_color"), blend[0], blend[1], blend[2], blend[3]);
+    uniform_4f(loc("fog_color"), fog[0], fog[1], fog[2], fog[3]);
+    uniform_4f(loc("blend_color"), blend[0], blend[1], blend[2], blend[3]);
 
-    glUniform4f(loc("key_center"), s.key.center_r / 255.f, s.key.center_g / 255.f,
+    uniform_4f(loc("key_center"), s.key.center_r / 255.f, s.key.center_g / 255.f,
                 s.key.center_b / 255.f, 1.0f);
-    glUniform4f(loc("key_scale"), s.key.scale_r / 255.f, s.key.scale_g / 255.f,
+    uniform_4f(loc("key_scale"), s.key.scale_r / 255.f, s.key.scale_g / 255.f,
                 s.key.scale_b / 255.f, 1.0f);
 
     // RGB-B selects signed K4; RGB-C selects signed K5. Keep these as
     // integer uniforms so the signed 9-bit conversion constants are not
     // accidentally clamped through the normalized color path.
-    glUniform1i(loc("convert_k4_fixed"), int(s.convert.k[4]));
-    glUniform1i(loc("convert_k5_fixed"), int(s.convert.k[5]));
+    uniform_1i(loc("convert_k4_fixed"), int(s.convert.k[4]));
+    uniform_1i(loc("convert_k5_fixed"), int(s.convert.k[5]));
 
-    glUniform1f(loc("primitive_lod_fraction"), s.primitive_lod_fraction / 255.f);
-    glUniform1i(loc("primitive_min_lod"), s.primitive_min_lod);
+    uniform_1f(loc("primitive_lod_fraction"), s.primitive_lod_fraction / 255.f);
+    uniform_1i(loc("primitive_min_lod"), s.primitive_min_lod);
 }
 void RDPRenderer::primitive_scissor(const GLFramebuffer &target, const RDPState &state, int scale) {
     int x0 = bounds_x_, x1 = bounds_x_ + bounds_w_;
@@ -2397,12 +2551,12 @@ void RDPRenderer::draw_vertices(const std::vector<GLVertex> &v, bool textured, c
                                 std::uint8_t ti, bool rectangle) {
     if (v.empty())
         return;
-    glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
-    glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
-    glDisable(GL_CULL_FACE);
-    glDisable(GL_STENCIL_TEST);
-    glDisable(GL_DITHER);
-
+    if (atlas_full_) {
+        flush(); atlas_.clear(); tile_signature_.fill(~0ull);
+        atlas_full_ = false; ++stats_.atlas_resets;
+    }
+    standalone_tiles_ = false;
+    ++stats_.primitives;
     rdp_w_ = std::max<int>(s.color_image.width, 1);
     rdp_h_ = std::max(1, int(s.scissor_yl >> 2));
     if (rdp_h_ <= 1)
@@ -2413,7 +2567,15 @@ void RDPRenderer::draw_vertices(const std::vector<GLVertex> &v, bool textured, c
         old && old->gpu_dirty &&
         (old->native_width != int(s.color_image.width) || old->native_height != rdp_h_))
         fb_read(old->address);
+    if (batch_target_ && (batch_target_->address != s.color_image.address ||
+        batch_target_->format != s.color_image.format || batch_target_->size != s.color_image.size ||
+        batch_target_->native_width != rdp_w_ || batch_target_->native_height != rdp_h_ ||
+        batch_target_->z_address != s.z_image_address || batch_target_->cpu_dirty ||
+        batch_program_ != program_)) flush();
     const int writing_cycle = int((s.other_modes >> 52) & 3);
+    const bool incoming_depth = (writing_cycle < 2 && (s.other_modes & 0x30u)) ||
+        (writing_cycle == 3 && s.color_image.size == RDPImageSize::Bits16 && s.color_image.address == s.z_image_address);
+    if (batch_target_ && (bool(batch_depth_) != incoming_depth || (batch_depth_ && writing_cycle >= 2))) flush();
     const bool raw16_fill = writing_cycle == 3 && s.color_image.size == RDPImageSize::Bits16 &&
                             s.color_image.address == s.z_image_address;
     const auto destination_bytes =
@@ -2421,12 +2583,13 @@ void RDPRenderer::draw_vertices(const std::vector<GLVertex> &v, bool textured, c
     if (writing_cycle >= 2 && !raw16_fill && memory_ &&
         gpu_depth_.flush_range(s.color_image.address, std::uint32_t(destination_bytes), *memory_))
         fb_.depth_written_to_ram(s.color_image.address, std::uint32_t(destination_bytes));
-    auto &target = fb_.bind_color_image(s.color_image, rdp_h_, s.z_image_address, internal_scale_);
+    auto &target = fb_.bind_color_image(s.color_image, rdp_h_, s.z_image_address, internal_scale_, false);
     current_color_ = s.color_image;
     if (!target.fbo || !target.color || target.width <= 0 || target.height <= 0)
         return;
 
     if (target.cpu_dirty && memory_) {
+        flush();
         // Merge pending GPU pixels with CPU/DMA writes before importing RAM.
         if (target.gpu_dirty && !target.raw_z)
             fb_.download_to_rdram(target, *memory_);
@@ -2463,14 +2626,14 @@ void RDPRenderer::draw_vertices(const std::vector<GLVertex> &v, bool textured, c
     const unsigned tile_count = mipmapped
                                     ? std::min(8u, unsigned(max_mip_level_) + (detail ? 2u : 1u))
                                     : (cycle == 1 ? 2u : 1u);
+    current_tile_count_ = tile_count;
     const GLuint draw_program = program_;
-    glUseProgram(draw_program);
     if (rectangle)
-        glUniform4f(uniform(draw_program, "rectangle_bounds"), min_x, min_y, max_x, max_y);
+        uniform_4f(uniform(draw_program, "rectangle_bounds"), min_x, min_y, max_x, max_y);
     if (textured) {
-        glUniform4i(uniform(draw_program, "convert_coefficients"), 2 * s.convert.k[0] + 1,
+        uniform_4i(uniform(draw_program, "convert_coefficients"), 2 * s.convert.k[0] + 1,
                     2 * s.convert.k[1] + 1, 2 * s.convert.k[2] + 1, 2 * s.convert.k[3] + 1);
-        glUniform4i(uniform(draw_program, "texture_convert_modes"), (s.other_modes >> 43) & 1,
+        uniform_4i(uniform(draw_program, "texture_convert_modes"), (s.other_modes >> 43) & 1,
                     (s.other_modes >> 42) & 1, (s.other_modes >> 41) & 1,
                     ((s.other_modes >> 45) & 1) | (((s.other_modes >> 51) & 1) << 1));
     }
@@ -2491,26 +2654,35 @@ void RDPRenderer::draw_vertices(const std::vector<GLVertex> &v, bool textured, c
                                                      (linear ? 16 : 0),
                                                  int(tile.clamp_t) | (int(tile.mirror_t) << 1) |
                                                      (linear ? int(tile.line) << 2 : 0)};
-                auto &cached = tile_uniforms_[draw_program][level];
+                const std::array<float, 4> clamp = {
+                    float(int(tile.sh) - int(tile.sl)) / 4.0f,
+                    float(int(tile.th) - int(tile.tl)) / 4.0f,
+                    float(((tile.sh >> 2) - (tile.sl >> 2)) & 0x3ff),
+                    float(((tile.th >> 2) - (tile.tl >> 2)) & 0x3ff)};
+                auto &cached = tile_uniforms_[0][level];
                 if (!cached.valid || cached.transform != transform) {
                     const auto name = "tile_transform[" + std::to_string(level) + "]";
-                    glUniform4f(uniform(draw_program, name.c_str()), transform[0], transform[1],
+                    uniform_4f(uniform(draw_program, name.c_str()), transform[0], transform[1],
                                 transform[2], transform[3]);
                 }
                 if (!cached.valid || cached.wrap != wrap) {
                     const auto name = "tile_wrap[" + std::to_string(level) + "]";
-                    glUniform4i(uniform(draw_program, name.c_str()), wrap[0], wrap[1], wrap[2],
+                    uniform_4i(uniform(draw_program, name.c_str()), wrap[0], wrap[1], wrap[2],
                                 wrap[3]);
                 }
-                cached = {transform, wrap, true};
+                if (!cached.valid || cached.clamp != clamp) {
+                    const auto name = "tile_clamp[" + std::to_string(level) + "]";
+                    uniform_4f(uniform(draw_program, name.c_str()), clamp[0], clamp[1], clamp[2], clamp[3]);
+                }
+                cached = {transform, wrap, clamp, true};
             }
             if (textured) {
                 if (level < tile_count)
                     upload_tile(s, std::uint8_t((ti + level) & 7), level);
-                else {
-                    glActiveTexture(GL_TEXTURE0 + (level < 2 ? level : level + 4));
-                    glBindTexture(GL_TEXTURE_2D, tile_texture_[0]);
-                }
+                const auto &region = tile_regions_[selected];
+                const auto name = "tile_region[" + std::to_string(level) + "]";
+                uniform_4i(uniform(draw_program, name.c_str()), region[0], region[1], region[2], region[3]);
+                standalone_tiles_ |= region[2] == 0;
             }
         }
 
@@ -2528,12 +2700,13 @@ void RDPRenderer::draw_vertices(const std::vector<GLVertex> &v, bool textured, c
     // before changing ownership; subsequent texture reads must use the color
     // target and must not overwrite it with stale depth ping-pong contents.
     if (target.raw_z && !fill_writes_z_image && target.gpu_dirty) {
+        flush();
         gpu_depth_.store_to_rdram(target.address, *memory_);
         // A depth readback is a renderer write, not a later CPU modification.
         // Refresh the color snapshot so it cannot suppress the new color copy.
         fb_.upload_from_rdram(target, *memory_);
     }
-    if (needs_depth && s.z_image_address)
+    if (needs_depth && s.z_image_address && !batch_depth_)
         fb_.commit_color_range(s.z_image_address, std::uint32_t(std::uint64_t(target.native_width) *
                                                                 target.native_height * 2u));
 
@@ -2544,6 +2717,29 @@ void RDPRenderer::draw_vertices(const std::vector<GLVertex> &v, bool textured, c
     // The in-place depth barrier also makes prior colour writes visible.
     const bool combined = depth_surface && target.internal_scale == 1 && cycle_type < 2 &&
                           target.address != s.z_image_address;
+    const bool can_batch = !standalone_tiles_ && !fill_writes_z_image && target.address != target.z_address &&
+        (!needs_depth || (combined && glrdp_texture_barrier));
+    if (can_batch) {
+        const PrimitiveBounds bounds{bounds_x_, bounds_y_, bounds_w_, bounds_h_};
+        if ((batch_target_ && (batch_target_ != &target || batch_depth_ != depth_surface)) ||
+            batch_bounds_.size() >= primitive_uniforms_.capacity ||
+            std::any_of(batch_bounds_.begin(), batch_bounds_.end(), [&](const auto &b) { return b.intersects(bounds); }))
+            flush();
+        configure_rdp_program(program_, target, s, textured, texture_is_framebuffer, cycle_type,
+                              float(target.internal_scale), depth_surface != nullptr, false, false,
+                              primitive_noise_seed, depth_surface != nullptr);
+        primitive_geometry(v);
+        batch_records_.insert(batch_records_.end(), primitive_uniforms_.values.begin(), primitive_uniforms_.values.end());
+        batch_bounds_.push_back(bounds); batch_target_ = &target; batch_depth_ = depth_surface;
+        batch_program_ = program_; batch_writes_z_ |= (s.other_modes & 0x20u) != 0;
+        batch_reads_color_ |= rdp_reads_color_memory(s);
+        target.raw_z = false; target.gpu_dirty = true;
+        return;
+    }
+    flush();
+    glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+    glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
+    glDisable(GL_CULL_FACE); glDisable(GL_STENCIL_TEST); glDisable(GL_DITHER);
     update_feedback(target, rdp_reads_color_memory(s), combined);
     combined_depth_color_ = false;
     const bool gpu_depth_active =
@@ -2627,15 +2823,14 @@ void RDPRenderer::draw_triangle(const RDPTriangle &t, const RDPState &s) {
         v.insert(v.end(), {a, b, c, a, c, d});
     }
     const GLuint shader = program_;
-    glUseProgram(shader);
-    glUniform4i(uniform(shader, "edge_y"), e.yh, e.ym, e.yl, e.right_major);
-    glUniform4i(uniform(shader, "edge_x"), e.xh, e.xm, e.xl, 0);
-    glUniform4i(uniform(shader, "edge_slope"), e.dxhdy, e.dxmdy, e.dxldy, 0);
-    glUniform2f(uniform(shader, "triangle_origin"), f16(e.xh), fy(e.yh & ~3));
-    glUniform1i(uniform(shader, "triangle_shade_enable"), t.shade_enabled);
+    uniform_4i(uniform(shader, "edge_y"), e.yh, e.ym, e.yl, e.right_major);
+    uniform_4i(uniform(shader, "edge_x"), e.xh, e.xm, e.xl, 0);
+    uniform_4i(uniform(shader, "edge_slope"), e.dxhdy, e.dxmdy, e.dxldy, 0);
+    uniform_2f(uniform(shader, "triangle_origin"), f16(e.xh), fy(e.yh & ~3));
+    uniform_1i(uniform(shader, "triangle_shade_enable"), t.shade_enabled);
     for (unsigned i = 0; i < 4; ++i) {
         const auto name = "triangle_shade_fixed[" + std::to_string(i) + "]";
-        glUniform4i(uniform(shader, name.c_str()), t.shade.value[i], t.shade.dx[i], t.shade.de[i],
+        uniform_4i(uniform(shader, name.c_str()), t.shade.value[i], t.shade.dx[i], t.shade.de[i],
                     t.shade.dy[i]);
     }
     // Fit no attribute plane from near-degenerate tessellation corners.
@@ -2646,16 +2841,16 @@ void RDPRenderer::draw_triangle(const RDPTriangle &t, const RDPState &s) {
         const double divisor = perspective ? (i == 2 ? 65536.0 : 64.0) : (65536.0 * 32.0);
         const auto name = "triangle_texture_plane[" + std::to_string(i) + "]";
         const auto fixed = "triangle_texture_fixed[" + std::to_string(i) + "]";
-        glUniform4i(uniform(shader, fixed.c_str()), t.texture.value[i], t.texture.dx[i],
+        uniform_4i(uniform(shader, fixed.c_str()), t.texture.value[i], t.texture.dx[i],
                     t.texture.de[i], t.texture.dy[i]);
 
         if (i == 2 && !perspective)
-            glUniform4f(uniform(shader, name.c_str()), 1, 0, 0, 0);
+            uniform_4f(uniform(shader, name.c_str()), 1, 0, 0, 0);
         else
-            glUniform4f(uniform(shader, name.c_str()), float(t.texture.value[i] / divisor),
+            uniform_4f(uniform(shader, name.c_str()), float(t.texture.value[i] / divisor),
                         float(t.texture.dx[i] / divisor), float(t.texture.dy[i] / divisor), 0);
     }
-    glUniform4i(uniform(shader, "triangle_z_fixed"), t.depth.z, t.depth.dzdx, t.depth.dzde,
+    uniform_4i(uniform(shader, "triangle_z_fixed"), t.depth.z, t.depth.dzdx, t.depth.dzde,
                 t.depth.dzdy);
     // Raw interpolated Z is Z18.13; avoid a lossy vertex-depth fit,
     // especially for nearly degenerate triangles and saturated corners.
@@ -2667,7 +2862,7 @@ void RDPRenderer::draw_triangle(const RDPTriangle &t, const RDPState &s) {
         return (value & 0x8000u) ? ((~value) & 0x7fffu) : value;
     };
     const unsigned dz_sum = dz_magnitude(t.depth.dzdx) + dz_magnitude(t.depth.dzdy);
-    glUniform4f(uniform(shader, "triangle_z_plane"),
+    uniform_4f(uniform(shader, "triangle_z_plane"),
                 t.z_enabled ? float(double(std::uint32_t(t.depth.z)) / z_plane_scale) : 0.0f,
                 t.z_enabled ? float(double(t.depth.dzdx) / z_plane_scale) : 0.0f,
                 t.z_enabled ? float(double(t.depth.dzdy) / z_plane_scale) : 0.0f,
@@ -2699,14 +2894,13 @@ void RDPRenderer::draw_texture_rectangle(const RDPTextureRectangle &r, const RDP
         d.u = u1;
         d.v = v0;
     }
-    glUseProgram(program_);
-    glUniform2f(uniform(program_, "triangle_origin"), cycle == 2 ? std::floor(x0) : x0,
+    uniform_2f(uniform(program_, "triangle_origin"), cycle == 2 ? std::floor(x0) : x0,
                 std::floor(y0));
-    glUniform4f(uniform(program_, "triangle_texture_plane[0]"), u0, r.flipped ? 0 : ds,
+    uniform_4f(uniform(program_, "triangle_texture_plane[0]"), u0, r.flipped ? 0 : ds,
                 r.flipped ? ds : 0, 0);
-    glUniform4f(uniform(program_, "triangle_texture_plane[1]"), v0, r.flipped ? dt : 0,
+    uniform_4f(uniform(program_, "triangle_texture_plane[1]"), v0, r.flipped ? dt : 0,
                 r.flipped ? 0 : dt, 0);
-    glUniform4f(uniform(program_, "triangle_texture_plane[2]"), 1, 0, 0, 0);
+    uniform_4f(uniform(program_, "triangle_texture_plane[2]"), 1, 0, 0, 0);
     draw_vertices({a, b, c, a, c, d}, true, s, r.tile, true);
 }
 void RDPRenderer::draw_fill_rectangle(const RDPFillRectangle &r, const RDPState &s) {
@@ -2733,6 +2927,7 @@ void RDPRenderer::present(const RDPState &state, std::uint32_t vi_status, std::u
                           std::uint32_t width, std::uint32_t hstart, std::uint32_t vstart,
                           std::uint32_t xscale, std::uint32_t yscale, std::uint32_t vsync,
                           std::uint32_t current) {
+    flush();
     const auto scanout = glrdp_scanout_config(config_);
     glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
     glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
@@ -2845,24 +3040,24 @@ void RDPRenderer::present(const RDPState &state, std::uint32_t vi_status, std::u
     glUseProgram(present_program_);
     // Seed a newly entered mode from the first field; subsequent fields weave
     // into the persistent target. Bob explicitly refreshes both sibling rows.
-    glUniform4f(uniform(present_program_, "fieldState"), interlaced, float(field_history_.lower),
+    uniform_4f(uniform(present_program_, "fieldState"), interlaced, float(field_history_.lower),
                 preserve_field && !scanout.vi_bob, 0);
 
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, source->color);
-    glUniform1i(uniform(present_program_, "source"), 0);
-    glUniform1i(uniform(present_program_, "framebuffer_rgba32"),
+    uniform_1i(uniform(present_program_, "source"), 0);
+    uniform_1i(uniform(present_program_, "framebuffer_rgba32"),
                 source->size == RDPImageSize::Bits32);
-    glUniform1i(uniform(present_program_, "framebuffer_rgba16"),
+    uniform_1i(uniform(present_program_, "framebuffer_rgba16"),
                 source->size == RDPImageSize::Bits16 && source->format == RDPImageFormat::RGBA);
 
-    glUniform2f(uniform(present_program_, "sourceSize"), float(source->width),
+    uniform_2f(uniform(present_program_, "sourceSize"), float(source->width),
                 float(source->height));
-    glUniform1f(uniform(present_program_, "internalScale"), float(source->internal_scale));
-    glUniform2f(uniform(present_program_, "fieldSize"), 640.0f, pal ? 288.0f : 240.0f);
-    glUniform2f(uniform(present_program_, "timingOrigin"), pal ? 128.0f : 108.0f,
+    uniform_1f(uniform(present_program_, "internalScale"), float(source->internal_scale));
+    uniform_2f(uniform(present_program_, "fieldSize"), 640.0f, pal ? 288.0f : 240.0f);
+    uniform_2f(uniform(present_program_, "timingOrigin"), pal ? 128.0f : 108.0f,
                 pal ? 44.0f : 34.0f);
-    glUniform2f(uniform(present_program_, "outputSize"), float(post_w_), float(post_h_));
+    uniform_2f(uniform(present_program_, "outputSize"), float(post_w_), float(post_h_));
 
     const std::uint32_t byte_offset = origin >= source->address ? origin - source->address : 0u;
     std::uint32_t pixel_offset = 0;
@@ -2881,29 +3076,29 @@ void RDPRenderer::present(const RDPState &state, std::uint32_t vi_status, std::u
         break;
     }
     const unsigned source_stride = std::max<unsigned>(width, 1u);
-    glUniform2f(uniform(present_program_, "sourceLayout"), float(source_stride),
+    uniform_2f(uniform(present_program_, "sourceLayout"), float(source_stride),
                 float(pixel_offset));
-    glUniform1f(uniform(present_program_, "hStart"), float((hstart >> 16) & 0x3ff));
-    glUniform1f(uniform(present_program_, "hEnd"), float(hstart & 0x3ff));
-    glUniform1f(uniform(present_program_, "vStart"), float((vstart >> 16) & 0x3ff));
-    glUniform1f(uniform(present_program_, "vEnd"), float(vstart & 0x3ff));
-    glUniform1f(uniform(present_program_, "xScale"), float(xscale & 0xfff) / 1024.0f);
-    glUniform1f(uniform(present_program_, "xOffset"), float((xscale >> 16) & 0xfff) / 1024.0f);
-    glUniform1f(uniform(present_program_, "yScale"), float(yscale & 0xfff) / 1024.0f);
-    glUniform1f(uniform(present_program_, "yOffset"), float((yscale >> 16) & 0xfff) / 1024.0f);
+    uniform_1f(uniform(present_program_, "hStart"), float((hstart >> 16) & 0x3ff));
+    uniform_1f(uniform(present_program_, "hEnd"), float(hstart & 0x3ff));
+    uniform_1f(uniform(present_program_, "vStart"), float((vstart >> 16) & 0x3ff));
+    uniform_1f(uniform(present_program_, "vEnd"), float(vstart & 0x3ff));
+    uniform_1f(uniform(present_program_, "xScale"), float(xscale & 0xfff) / 1024.0f);
+    uniform_1f(uniform(present_program_, "xOffset"), float((xscale >> 16) & 0xfff) / 1024.0f);
+    uniform_1f(uniform(present_program_, "yScale"), float(yscale & 0xfff) / 1024.0f);
+    uniform_1f(uniform(present_program_, "yOffset"), float((yscale >> 16) & 0xfff) / 1024.0f);
 
     const int vi_aa_mode = int(glrdp_vi_aa_mode(scanout, vi_status));
     const bool restore = scanout.vi_restore && (vi_status & 0x10000u) != 0;
-    glUniform1i(uniform(present_program_, "aaFull"), scanout.vi_aa == GLRDP_VI_AA_FULL);
-    glUniform1i(uniform(present_program_, "resampleEnable"), scanout.vi_resample);
-    glUniform1i(uniform(present_program_, "aaMode"), vi_aa_mode);
-    glUniform1i(uniform(present_program_, "blankOutput"), vi_type == 0 ? 1 : 0);
-    glUniform1i(uniform(present_program_, "divotEnable"),
+    uniform_1i(uniform(present_program_, "aaFull"), scanout.vi_aa == GLRDP_VI_AA_FULL);
+    uniform_1i(uniform(present_program_, "resampleEnable"), scanout.vi_resample);
+    uniform_1i(uniform(present_program_, "aaMode"), vi_aa_mode);
+    uniform_1i(uniform(present_program_, "blankOutput"), vi_type == 0 ? 1 : 0);
+    uniform_1i(uniform(present_program_, "divotEnable"),
                 scanout.vi_divot && (vi_status & 0x10u) != 0);
-    glUniform1i(uniform(present_program_, "restoreEnable"), restore);
-    glUniform1i(uniform(present_program_, "gammaEnable"),
+    uniform_1i(uniform(present_program_, "restoreEnable"), restore);
+    uniform_1i(uniform(present_program_, "gammaEnable"),
                 scanout.vi_gamma && (vi_status & 0x08u) != 0);
-    glUniform1i(uniform(present_program_, "gammaDitherEnable"),
+    uniform_1i(uniform(present_program_, "gammaDitherEnable"),
                 scanout.vi_gamma_dither && (vi_status & 0x04u) != 0);
 
     // Reconstruct once at source resolution rather than repeating six/eight
@@ -2915,7 +3110,7 @@ void RDPRenderer::present(const RDPState &state, std::uint32_t vi_status, std::u
         glViewport(0, 0, vi_w_, vi_h_);
         glActiveTexture(GL_TEXTURE0);
         glBindTexture(GL_TEXTURE_2D, source->color);
-        glUniform1i(uniform(present_program_, "viPass"), 1);
+        uniform_1i(uniform(present_program_, "viPass"), 1);
         glBindVertexArray(vao_);
         glDrawArrays(GL_TRIANGLES, 0, 3);
         glBindFramebuffer(GL_FRAMEBUFFER, post_fbo_);
@@ -2928,7 +3123,7 @@ void RDPRenderer::present(const RDPState &state, std::uint32_t vi_status, std::u
         glActiveTexture(GL_TEXTURE0);
         glBindTexture(GL_TEXTURE_2D, source->color);
     }
-    glUniform1i(uniform(present_program_, "viPass"), precomputed ? 2 : 0);
+    uniform_1i(uniform(present_program_, "viPass"), precomputed ? 2 : 0);
     glBindVertexArray(vao_);
     glDrawArrays(GL_TRIANGLES, 0, 3);
 
@@ -2938,6 +3133,14 @@ void RDPRenderer::present(const RDPState &state, std::uint32_t vi_status, std::u
 }
 
 void RDPRenderer::fb_read(std::uint32_t address) {
+    if (batch_target_) {
+        const auto color_bytes = (std::uint64_t(batch_target_->native_width) * batch_target_->native_height *
+                                  (4u << unsigned(batch_target_->size)) + 7) / 8;
+        const bool color = address >= batch_target_->address && std::uint64_t(address) < batch_target_->address + color_bytes;
+        const bool depth = batch_depth_ && address >= batch_depth_->address &&
+            std::uint64_t(address) < std::uint64_t(batch_depth_->address) + std::uint64_t(batch_depth_->width) * batch_depth_->height * 2;
+        if (color || depth) { GLStateGuard guard; flush(); }
+    }
     if (!memory_)
         return;
     auto *framebuffer = fb_.find_containing(address);
@@ -2952,12 +3155,14 @@ void RDPRenderer::fb_read(std::uint32_t address) {
         glPixelStorei(GL_PACK_ALIGNMENT, 1);
         fb_.download_to_rdram(*framebuffer, *memory_);
     }
+    ++stats_.framebuffer_readbacks;
     // Commit visible compressed Z/DZ and the internal hidden-bit sidecar.
     gpu_depth_.store_to_rdram(address, *memory_);
 }
 
 void RDPRenderer::fb_write(std::uint32_t address, std::uint32_t size) {
     GLStateGuard guard;
+    flush();
     size = std::max(size, 1u);
     fb_.invalidate_cpu_write(address, size);
     // Flush untouched pending depth before invalidating. Explicit store bytes
@@ -2975,6 +3180,7 @@ void RDPRenderer::read_screen(void *destination, int *width, int *height) {
         return;
 
     GLStateGuard state_guard;
+    flush();
     glBindFramebuffer(GL_READ_FRAMEBUFFER, output_fbo_);
     glReadBuffer(output_fbo_ ? GL_COLOR_ATTACHMENT0 : GL_BACK);
     glPixelStorei(GL_PACK_ALIGNMENT, 1);
@@ -2986,6 +3192,7 @@ void RDPRenderer::capture_bmp(const char *path) {
         return;
 
     GLStateGuard state_guard;
+    flush();
     glBindFramebuffer(GL_READ_FRAMEBUFFER, output_fbo_);
     glReadBuffer(output_fbo_ ? GL_COLOR_ATTACHMENT0 : GL_BACK);
     glPixelStorei(GL_PACK_ALIGNMENT, 1);

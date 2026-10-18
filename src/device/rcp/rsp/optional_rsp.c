@@ -485,6 +485,16 @@ unsigned int optional_rsp_timing_replay(const char *path, char *family,
         }
     }
     timing_probe_active = 0;
+    if (getenv("HLE_TIMING_GSP_DUMP")) {
+        unsigned int size = rdp_emit_hle_state_size();
+        void *state = malloc(size);
+        if (state) {
+            FILE *out = fopen(getenv("HLE_TIMING_GSP_DUMP"), "wb");
+            rdp_emit_hle_save(state);
+            if (out) { fwrite(state, size, 1, out); fclose(out); }
+            free(state);
+        }
+    }
     optional_rsp_load(snapshot);
     rdp_emit_set_backend(&backend);
     probe_ram = probe_dmem = NULL;
