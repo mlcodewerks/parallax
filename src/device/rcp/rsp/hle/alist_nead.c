@@ -230,18 +230,21 @@ static void ADPCM(struct hle_t* hle, uint32_t w1, uint32_t w2)
             (hle->alist_nead.count + 0x1f) & ~0x1f,
             hle->alist_nead.table,
             hle->alist_nead.loop,
-            address);
+            address, 0);
 }
 
 static void CLEARBUFF(struct hle_t* hle, uint32_t w1, uint32_t w2)
 {
     uint16_t dmem  = w1 + nead_dmem_base;
-    uint16_t count = w2 & 0xfff;
+    uint32_t count = w2 & 0xffffu;
 
     if (count == 0)
         return;
 
-    alist_clear(hle, dmem, count);
+    /* Two SDVs precede the loop test in each NEAD revision: a partial
+     * last block still clears sixteen bytes, with DMEM address wrapping.
+     * Keep the rounded 65536-byte extent wider than a halfword. */
+    alist_clear(hle, dmem, (count + 15u) & ~15u);
 }
 
 static void LOADBUFF(struct hle_t* hle, uint32_t w1, uint32_t w2)
@@ -607,7 +610,8 @@ static void POLEF(struct hle_t* hle, uint32_t w1, uint32_t w2)
             hle->alist_nead.count,
             gain,
             hle->alist_nead.table,
-            address);
+            address,
+            0);
 }
 
 
@@ -684,6 +688,9 @@ void alist_process_nead_sfj(struct hle_t* hle)
     nead_dmem_base = 0;
     nead_setbuff_store = 0x320;
     nead_loop_offset = 16;
+    /* Like the older MK resident, this initialization loop repeatedly
+     * stores zero to the same word; it does not advance the address. */
+    *nead_s16(hle, 0x320) = *nead_s16(hle, 0x322) = 0;
     alist_nead_walk(hle, ABI, 0x20, 0x340, 128);
     rsp_break(hle, SP_STATUS_TASKDONE);
 }
@@ -828,8 +835,11 @@ void alist_process_nead_mm(struct hle_t* hle)
     nead_env_style = NEAD_ENV_OOT;
     nead_resample_old = 0;
     nead_seed(hle, 0);
+    /* The resident stores TASK_DRAM_STACK at t8+12, with t8=0x2e0. */
+    *nead_s16(hle, 0x2ec) = (int16_t)(*dmem_u32(hle, TASK_DRAM_STACK) >> 16);
+    *nead_s16(hle, 0x2ee) = (int16_t)*dmem_u32(hle, TASK_DRAM_STACK);
     nead_dmem_base = 0;
-    nead_setbuff_store = 0x2d0;
+    nead_setbuff_store = 0x2e0;
     nead_loop_offset = 8;
     alist_nead_walk(hle, ABI, 0x18, 0x2f0, 64);
     rsp_break(hle, SP_STATUS_TASKDONE);
@@ -878,8 +888,10 @@ void alist_process_nead_ac(struct hle_t* hle)
     nead_env_style = NEAD_ENV_OOT;
     nead_resample_old = 0;
     nead_seed(hle, 0);
+    *nead_s16(hle, 0x2ec) = (int16_t)(*dmem_u32(hle, TASK_DRAM_STACK) >> 16);
+    *nead_s16(hle, 0x2ee) = (int16_t)*dmem_u32(hle, TASK_DRAM_STACK);
     nead_dmem_base = 0;
-    nead_setbuff_store = 0x2d0;
+    nead_setbuff_store = 0x2e0;
     nead_loop_offset = 8;
     alist_nead_walk(hle, ABI, 0x18, 0x2f0, 8);
     rsp_break(hle, SP_STATUS_TASKDONE);

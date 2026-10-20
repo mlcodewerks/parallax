@@ -14,6 +14,8 @@
 #include "rdp_emit_f3dex2.h"
 #include "rdp_emit_s2dex.h"
 #include "rdp_emit_f3d.h"
+#include "rdp_emit_rsp.h"
+#include <string.h>
 
 /* F3DEX2 command bytes (high byte of w0) */
 #define F3DEX2_VTX        0x01
@@ -77,27 +79,182 @@ static unsigned int s_half1;
 /* Which microcode class the walker is currently interpreting. Kirby 64
  * switches between F3DEX2 (3D), L3DEX2 (lines) and S2DEX2 (sprites)
  * mid-display-list with gSPLoadUcodeL; the low opcode space means
- * entirely different things per class. Identified by the first text
- * words of the loaded microcode (word 1 distinguishes the 2.04
- * builds: c81f201b = L3DEX2_2.04H, c81f2018 = S2DEX2_2.04; anything
- * else is treated as the F3DEX2 family). */
+ * entirely different things per class. Probe FIFO 2.05's complete program
+ * before the older word-1 signatures: its c81f201b instruction collides
+ * with L3DEX2_2.04H. c81f2018 identifies S2DEX2_2.04; other builds use the
+ * F3DEX2 family. Arithmetic feature bits share the existing serialized class
+ * word and preserve the base class's low-opcode dispatch. */
 #define UCODE_F3DEX2 0
 #define UCODE_L3DEX2 1
 #define UCODE_S2DEX2 2
 #define UCODE_S2DEX1 3
+#define UCODE_F3DEX205 4
+#define UCODE_TEXRECIP 0x100
+#define UCODE_LIT_ALPHA 0x200
+#define UCODE_CBFD_NORMAL 0x400
+#define UCODE_DMA_INLINE 0x800
+#define UCODE_OM_COALESCE 0x1000
+#define UCODE_REJRECIP 0x2000
 static int s_ucode_class;
 
-static int probe_ucode_class(const unsigned char *r, unsigned int text)
+int f3dex205_ucode_match(const unsigned char *r, unsigned int size,
+                        unsigned int text)
 {
-    unsigned int w1;
-    if (text == 0 || text + 8 > s_rdram_size)
+    unsigned int i, hash = 2166136261u;
+    if (r == 0 || text == 0 || text > size || 0xf80u > size - text)
+        return 0;
+    /* The 2.05 F3DEX build shares its second instruction with L3DEX2
+     * 2.04H. Fingerprint the resident program, not that one-word alias or
+     * the shared data segment (which also contains a neighbouring Rej ID).
+     * Canonical-byte FNV-1a; captured text SHA256 ff3fce27...0a3a3c3. */
+    if (rd_u32_be(r, text + 4u) != 0xc81f201bu)
+        return 0;
+    for (i = 0; i < 0xf80u; ++i)
+        hash = (hash ^ r[(text + i) ^ 3u]) * 16777619u;
+    return hash == 0x8ee883e2u;
+}
+
+int f3dex2_native_texrecip(void)
+{
+    if(s_ucode_class&UCODE_REJRECIP)return 2;
+    return (s_ucode_class & 0xff) == UCODE_F3DEX205 || (s_ucode_class & UCODE_TEXRECIP) != 0;
+}
+
+static int probe_texture_reciprocal(const unsigned char *r, unsigned int text)
+{
+    unsigned int offset, i;
+    if (text > s_rdram_size || 0xf80u > s_rdram_size - text) return 0;
+    for (offset = 0; offset + 44u <= 0xf80u; offset += 4u)
+    {
+        if(rd_u32_be(r,text+offset)==0x4b184772u &&
+           rd_u32_be(r,text+offset+4u)==0x4b384131u &&
+           rd_u32_be(r,text+offset+8u)==0x4a790150u &&
+           rd_u32_be(r,text+offset+12u)==0x4b004632u &&
+           rd_u32_be(r,text+offset+20u)==0x4b04cf45u &&
+           rd_u32_be(r,text+offset+24u)==0x4b042f4cu &&
+           rd_u32_be(r,text+offset+32u)==0x4b18294eu &&
+           rd_u32_be(r,text+offset+40u)==0x4b18ce4fu)return 2;
+        unsigned int hash = 2166136261u;
+        if (rd_u32_be(r, text + offset) != 0x4b1b4772u ||
+            rd_u32_be(r, text + offset + 4u) != 0x4b3b42b1u) continue;
+        /* Complete 11-instruction DIV/MAC normalizer, including operand
+         * registers. Shared by the captured BAR, DK64 and FIFO 2.05 builds.
+         * No ROM identity or version-name heuristic selects this math. */
+        for (i = 0; i < 44u; ++i)
+            hash = (hash ^ r[(text + offset + i) ^ 3u]) * 16777619u;
+        if (hash == 0x71592df1u) return 1;
+    }
+    return 0;
+}
+
+static int probe_lit_alpha(const unsigned char *r, unsigned int text, unsigned int data)
+{
+    unsigned int at;
+    if (text > s_rdram_size || 0xf80u > s_rdram_size - text
+        || data > s_rdram_size || 0x1000u > s_rdram_size - data) return 0;
+    {
+        unsigned int load = rd_u32_be(r, text + 4u);
+        unsigned int row = (load & 0x7fu) * 16u;
+        if ((load & 0xffffff80u) != 0xc81f2000u || row + 16u > 0x1000u
+            || (rd_u32_be(r, data + row + 12u) & 0xffffu) != 0x7fffu) return 0;
+    }
+    /* Rejection builds keep this lighting loop resident instead of
+     * installing it through the standard overlay descriptor. */
+    for(at=28u;at+16u<=0xf80u;at+=4u) {
+        const unsigned int *p=(const unsigned int *)(r+text+at);
+        if(p[0]==0x4bffef40u && p[1]==0x4a952748u &&
+           (p[2]&0xffff0000u)==0x156d0000u && p[3]==0x4a9c1f48u &&
+           rd_u32_be(r,text+at-28u)==0x48802300u &&
+           rd_u32_be(r,text+at-20u)==0x48802700u)
+            return UCODE_LIT_ALPHA;
+    }
+    /* Locate the lighting overlay through the native boot relocation,
+     * rather than scanning unrelated code adjacent to the program. */
+    for (at = 0; at + 40u <= 0x180u; at += 4u) {
+        const unsigned int *w = (const unsigned int *)(r + text + at);
+        unsigned int desc, source, bytes, k;
+        if ((w[0] & 0xffff0000u) != 0x8c040000u
+            || (w[1] & 0xffff0000u) != 0x8c050000u
+            || w[6] != 0x00812020u || w[7] != 0x00a12820u) continue;
+        desc = w[0] & 0xffffu;
+        if ((desc & 3u) || desc > 0xff8u) continue;
+        source = rd_u32_be(r, data + desc);
+        bytes = (rd_u32_be(r, data + desc + 4u) >> 16) + 1u;
+        if ((source & 7u) || bytes > 0x1000u || source > s_rdram_size - text
+            || bytes > s_rdram_size - text - source) continue;
+        source += text;
+        for (k = 28; k + 16u <= bytes; k += 4u) {
+            const unsigned int *p = (const unsigned int *)(r + source + k);
+            /* RGB MAC lanes have zeroed alpha; VMULF also scales the
+             * merged source alpha by v31[15] before the packed store. */
+            if (p[0] == 0x4bffef40u && p[1] == 0x4a952748u
+                && (p[2] & 0xffff0000u) == 0x156d0000u && p[3] == 0x4a9c1f48u
+                && rd_u32_be(r, source + k - 28u) == 0x48802300u
+                && rd_u32_be(r, source + k - 20u) == 0x48802700u)
+                return UCODE_LIT_ALPHA;
+        }
+    }
+    return 0;
+}
+
+static int probe_ucode_class(const unsigned char *r, unsigned int text, unsigned int data)
+{
+    unsigned int w1, attributes;
+    if (r == 0 || text == 0 || text > s_rdram_size || 8u > s_rdram_size - text)
         return UCODE_F3DEX2;
     w1 = rd_u32_be(r, text + 4);
-    if (w1 == 0xc81f201bu)
-        return UCODE_L3DEX2;
+    if (f3dex205_ucode_match(r, s_rdram_size, text))
+        return UCODE_F3DEX205;
+    {
+        int reciprocal=probe_texture_reciprocal(r,text);
+        attributes=(reciprocal==2?UCODE_REJRECIP:reciprocal?UCODE_TEXRECIP:0)
+                  |probe_lit_alpha(r,text,data);
+    }
+    {
+        unsigned int at;
+        for(at=0;at+60u<=0x1800u && at+60u<=s_rdram_size-text;at+=4u)
+            if(rd_u32_be(r,text+at)==0x8d610078u &&
+               (rd_u32_be(r,text+at+36u)&0xffff0000u)==0x83790000u &&
+               rd_u32_be(r,text+at+44u)==0x13600004u &&
+               rd_u32_be(r,text+at+52u)==0x232c0047u &&
+               rd_u32_be(r,text+at+56u)==0x318c00feu) {
+                attributes|=UCODE_OM_COALESCE;break;
+            }
+    }
+    if (0x198u <= s_rdram_size - text &&
+        rd_u32_be(r,text+0x168u)==0x37330000u &&
+        rd_u32_be(r,text+0x16cu)==0x00139a00u &&
+        rd_u32_be(r,text+0x170u)==0x00139942u &&
+        rd_u32_be(r,text+0x174u)==0x0013e022u &&
+        rd_u32_be(r,text+0x178u)==0x24140a50u &&
+        rd_u32_be(r,text+0x194u)==0)
+        attributes |= UCODE_DMA_INLINE;
+    if (data<=s_rdram_size && 0x6b0u<=s_rdram_size-data &&
+        rd_u32_be(r,data+0x6acu)==0x038712d8u) {
+        unsigned int offset=rd_u32_be(r,data+0x6a8u);
+        if(offset<=s_rdram_size-text && 0x11cu<=s_rdram_size-text-offset &&
+            rd_u32_be(r,text+offset)==0x900b023cu &&
+            rd_u32_be(r,text+offset+0x100u)==0xe808201bu &&
+            rd_u32_be(r,text+offset+0x10cu)==0x81c20007u &&
+            rd_u32_be(r,text+offset+0x118u)==0x848a0512u)
+            attributes|=UCODE_CBFD_NORMAL;
+    }
+    if (w1 == 0xc81f201bu) {
+        unsigned int at;
+        /* The constant-row load also occurs in triangle microcodes.
+         * Identify the line writer's paired Y loads and register clears
+         * before selecting its opcode 08 and unlit vertex path. This
+         * must also work after a mid-list LOAD_UCODE. */
+        for(at=0;at+16u<=0xf80u && at+16u<=s_rdram_size-text;at+=4u)
+            if(rd_u32_be(r,text+at)==0x8447001au &&
+               rd_u32_be(r,text+at+4u)==0x4bff00adu &&
+               rd_u32_be(r,text+at+8u)==0x8468001au &&
+               rd_u32_be(r,text+at+12u)==0x4bff00edu)
+                return UCODE_L3DEX2 | attributes;
+    }
     if (w1 == 0xc81f2018u)
         return UCODE_S2DEX2;
-    return UCODE_F3DEX2;
+    return UCODE_F3DEX2 | attributes;
 }
 
 /* Conker's Bad Fur Day runs a custom F3DEX2 build, "F3DEXBG.NoN". It packs
@@ -185,7 +342,8 @@ static unsigned int s_stream_pc;
 
 /* end the current display-list level: pop the caller, or stop the walk */
 #define DL_RETURN() \
-    do { if (s_dl_sp > 0) pc = s_dl_stack[--s_dl_sp]; else running = 0; } while (0)
+    do { if (fifo->fetch_dl) fifo->fetch_dl(~0u, 0); \
+         if (s_dl_sp > 0) pc = s_dl_stack[--s_dl_sp]; else running = 0; } while (0)
 
 static void seg_reset(void)
 {
@@ -212,7 +370,7 @@ static void seg_reset(void)
      * boxes). Seed the S2DEX1 default; F3DEX2 / S2DEX2 keep the bare
      * 1-cycle reset, matching their own data-segment defaults. */
     s_othermode_h = (0x2fu << 24)
-                  | (s_ucode_class == UCODE_S2DEX1 ? 0x3fu : 0x00u);
+                  | ((s_ucode_class & 0xff) == UCODE_S2DEX1 ? 0x3fu : 0x00u);
     s_othermode_l = 0u;
 }
 
@@ -230,6 +388,8 @@ void f3dex2_set_othermode_init(unsigned int h, unsigned int l)
     s_zbuffered = (((s_othermode_l >> 4) & 1u) ||
                    ((s_othermode_l >> 5) & 1u)) ? 1 : 0;
 }
+
+unsigned int f3dex2_othermode_high(void) { return s_othermode_h; }
 
 void f3dex2_seg_reset(void)
 {
@@ -250,10 +410,10 @@ static unsigned char *s_rdram_base = 0;
 /* Identify the task's own microcode at task start (the task itself can be
  * S2DEX2 or L3DEX2, and any mid-list gSPLoadUcodeL switch from the previous
  * task must not leak in). */
-void f3dex2_set_task_ucode(const unsigned char *rdram, unsigned int text)
+void f3dex2_set_task_ucode(const unsigned char *rdram, unsigned int text, unsigned int data)
 {
-    s_ucode_class = probe_ucode_class(rdram, text);
-    s2dex_set_version2(s_ucode_class == UCODE_S2DEX2);
+    s_ucode_class = probe_ucode_class(rdram, text, data);
+    s2dex_set_version2((s_ucode_class & 0xff) == UCODE_S2DEX2);
     s_variant_cbfd = 0;
     s_variant_acclaim = 0;
 }
@@ -264,7 +424,26 @@ void f3dex2_set_task_ucode(const unsigned char *rdram, unsigned int text)
 void f3dex2_set_variant_cbfd(const unsigned char *rdram, unsigned int ud,
                              unsigned int uds)
 {
-    s_variant_cbfd = cbfd_ucode_match(rdram, ud, uds) ? 1 : 0;
+    /* c81f201b is a relocated constant-row load, shared by L3DEX2 and
+     * F3DEX/F3DLX XBUS 2.06..2.08. Resolve that collision from the primary
+     * ucode ID; combined SDK objects may carry a second L3DEX name. */
+    if ((s_ucode_class & 0xff) == UCODE_L3DEX2 && rdram && ud < s_rdram_size)
+    {
+        static const char prefix[] = "RSP Gfx ucode ";
+        unsigned int i, limit = uds && uds < 0x1000u ? uds : 0x1000u;
+        if (limit > s_rdram_size-ud) limit=s_rdram_size-ud;
+        for (i=0;i+sizeof(prefix)+3u<=limit;++i)
+        {
+            unsigned int j;
+            for (j=0;j<sizeof(prefix)-1u;++j)
+                if (rdram[(ud+i+j)^3u]!=(unsigned char)prefix[j]) break;
+            if (j!=sizeof(prefix)-1u) continue;
+            if (rdram[(ud+i+j)^3u]=='F' && rdram[(ud+i+j+1u)^3u]=='3' && rdram[(ud+i+j+2u)^3u]=='D')
+                s_ucode_class=(s_ucode_class & ~0xff) | UCODE_F3DEX2;
+            break;
+        }
+    }
+    s_variant_cbfd = (s_ucode_class&UCODE_CBFD_NORMAL)?2:cbfd_ucode_match(rdram, ud, uds)?1:0;
 }
 
 /* Acclaim's four F3DEX2 titles (Turok 2 - Seeds of Evil, Turok 3, Armorines -
@@ -318,7 +497,7 @@ void f3dex2_import_segments(const unsigned int *src)
  * GBI 1 sprite class here, after the text probe has run. */
 void f3dex2_force_class_s2dex1(void)
 {
-    s_ucode_class = UCODE_S2DEX1;
+    s_ucode_class = (s_ucode_class & ~0xff) | UCODE_S2DEX1;
     s2dex_set_version2(0);
 }
 
@@ -327,7 +506,7 @@ void f3dex2_force_class_s2dex1(void)
  * threaded-rasterizer SET_TEXTURE_IMAGE barrier to the S2DEX BG path. */
 int f3dex2_class_is_s2dex(void)
 {
-    return (s_ucode_class == UCODE_S2DEX1 || s_ucode_class == UCODE_S2DEX2)
+    return ((s_ucode_class & 0xff) == UCODE_S2DEX1 || (s_ucode_class & 0xff) == UCODE_S2DEX2)
            ? 1 : 0;
 }
 
@@ -345,6 +524,16 @@ void rdp_fifo_init(RdpFifo *f, unsigned char *storage,
     f->cap     = cap;
     f->flush   = 0;
     f->time    = 0;
+    f->write   = 0;
+    f->spnoop  = 0;
+    f->store_indices = 0;
+    f->fetch_dl = 0;
+    f->dl_end = 0;
+    f->drain = 0;
+    f->read_staging = 0;
+    f->group = 0;
+    f->load_ucode = 0;
+    f->dmem = 0;
 }
 
 static int s_dl_has_fullsync;
@@ -356,12 +545,26 @@ void rdp_fifo_fullsync_reset(void)
 
 void rdp_fifo_fullsync_note(void)
 {
-    s_dl_has_fullsync = 1;
+    s_dl_has_fullsync |= 1;
 }
 
 int rdp_fifo_fullsync_seen(void)
 {
-    return s_dl_has_fullsync;
+    return (s_dl_has_fullsync & 1) != 0;
+}
+
+int rdp_fifo_fullsync_pending(void)
+{
+    return s_dl_has_fullsync == 1;
+}
+
+void rdp_fifo_fullsync_append(RdpFifo *f, unsigned int w0, unsigned int w1)
+{
+    int32_t words[2];
+    words[0] = (int32_t)w0;
+    words[1] = (int32_t)w1;
+    s_dl_has_fullsync = 3;
+    rdp_fifo_append(f, words, 2);
 }
 
 void rdp_fifo_append(RdpFifo *f, const int32_t *words, int count)
@@ -382,9 +585,6 @@ void rdp_fifo_append(RdpFifo *f, const int32_t *words, int count)
         if (f->used + (unsigned int)count * 4u > f->cap)
             return;
     }
-    /* Timestamp after any overflow flush: the new packet belongs to the next
-     * batch. RSP production can overlap DP work while rendering stays batched. */
-    if (count > 0 && f->time) f->time(words, (unsigned int)count);
     off = f->used;
     for (i = 0; i < count; i++)
     {
@@ -394,6 +594,12 @@ void rdp_fifo_append(RdpFifo *f, const int32_t *words, int count)
          * (the overlay fetch mirrors rdram_read_idx32); store native. */
         *(int32_t *)(f->storage + a) = (int32_t)w;
     }
+    if (count > 0 && f->write)
+        f->write((int32_t *)(f->storage + off), (unsigned int)count);
+    /* Timestamp the actual native packet after any overflow flush and
+     * retained-word reconstruction. Rendering still uses one host batch. */
+    if (count > 0 && f->time)
+        f->time((const int32_t *)(f->storage + off), (unsigned int)count);
     f->used += (unsigned int)count * 4u;
 }
 
@@ -440,19 +646,25 @@ void f3dex2_run_dl(GSPState *gsp, RdpFifo *fifo, unsigned int addr,
 {
     int guard = 0;
     unsigned int pc = addr;
+    unsigned int inline_end = 0, inline_return = 0;
     int running = 1;
     /* render-state is shared module-wide (see s_textured/s_zbuffered) so it
      * persists across DL recursion; the textured/z_buffered arguments only
      * seed it when non-zero (callers pass the current state down). */
     if (textured)   s_textured  = textured;
     if (z_buffered) s_zbuffered = z_buffered;
+    if(!rsp_graphics_sdk_one(5) || !rsp_graphics_sdk_one(7))
+        gsp_sdk_vertex_memory(fifo->dmem,rd_u32_be(fifo->dmem,0x1bcu)>>16);
 
     /* Non-resuming walks start with an empty DL stack; a streaming resume
      * keeps the stack saved when the walk was suspended. */
     if (s_stream_resume)
         s_stream_resume = 0;
-    else
+    else {
         s_dl_sp = 0;
+        if ((s_ucode_class & 0xff) == UCODE_S2DEX2 || (s_ucode_class & 0xff) == UCODE_S2DEX1)
+            s2dex_seed_scissor(fifo->dmem);
+    }
 
     while (running && guard++ < 100000)
     {
@@ -462,13 +674,76 @@ void f3dex2_run_dl(GSPState *gsp, RdpFifo *fifo, unsigned int addr,
 
         if (r == 0)
             return;
+        if (inline_end && pc == inline_end) {
+            pc = inline_return;
+            inline_end = 0;
+        }
 
         w0 = rd_u32_be(r, pc);
         w1 = rd_u32_be(r, pc + 4);
+        if (fifo->fetch_dl && !inline_end) fifo->fetch_dl(pc, w0);
         pc += 8;
         cmd = (int)((w0 >> 24) & 0xff);
+#ifdef HLE_GBI_OBSERVE
+        HLE_GBI_OBSERVE(pc - 8u, w0, w1, gsp);
+#endif
         hle_timing_graphics_family("gfx_f3dex2");
-        hle_timing_add(HLE_WORK_COMMAND, 1);
+        hle_timing_command(cmd);
+        if(fifo->dmem && (!rsp_graphics_sdk_one(5)||!rsp_graphics_sdk_one(7))) {
+            unsigned char *dm=fifo->dmem;
+            unsigned int high=s_othermode_h|0xef000000u;
+            memcpy(dm+0xc8u,&high,4);memcpy(dm+0xccu,&s_othermode_l,4);
+            memcpy(dm+0x1ecu,&gsp->geometry_mode,4);
+            memcpy(dm+0xf4u,&gsp->mtx_stack_ptr,4);
+            dm[0xdeu^3u]=(unsigned char)(s_dl_sp*4u);
+            if(cmd==F3DEX2_MOVEMEM && fifo->matrix_dma_table) {
+                unsigned int at=(fifo->matrix_dma_table+(w0&0xfeu))&0xfffu;
+                unsigned int dest,bytes=((w0>>16)&255u)+8u,source=seg_addr(w1)&~7u;
+#ifndef MSB_FIRST
+                at^=2u;
+#endif
+                dest=(*(const unsigned short *)(dm+at)+(w0>>5))&0xff8u;
+                if(bytes<=0x1000u-dest && addr_in_range(source,bytes))memcpy(dm+dest,r+source,bytes);
+            }
+            if(cmd==F3DEX2_MOVEWORD) {
+                unsigned int at=(0x2feu+((w0>>16)&255u))&0xfffu,dest;
+#ifndef MSB_FIRST
+                at^=2u;
+#endif
+                dest=(*(const unsigned short *)(dm+at)+w0)&0xfffu;
+                {unsigned int k;for(k=0;k<4;k++)dm[((dest+k)&0xfffu)^3u]=(unsigned char)(w1>>(24-8*k));}
+            }
+            if(cmd==F3DEX2_TEXTURE) {
+                memcpy(dm+0x1e4u,&w0,4);memcpy(dm+0x1e8u,&w1,4);
+            }
+        }
+
+        /* G_RDPHALF_0 also prefixes conditional display-list calls/branches.
+         * It supplies SID, the low address half and flag; SELECT_DL supplies
+         * the upper address half, push bit and mask. Decode the pair before
+         * the shared E4 texture-rectangle path can consume it as geometry. */
+        if (((s_ucode_class & 0xff) == UCODE_S2DEX1 || (s_ucode_class & 0xff) == UCODE_S2DEX2) &&
+            cmd == 0xe4 && addr_in_range(pc, 8u))
+        {
+            unsigned int select = rd_u32_be(r, pc);
+            unsigned int select_op = select >> 24;
+            unsigned int expected = (s_ucode_class & 0xff) == UCODE_S2DEX1 ? 0xb0u : 0x04u;
+            if (select_op == expected)
+            {
+                unsigned int mask = rd_u32_be(r, pc + 4u);
+                unsigned int target = ((select & 0xffffu) << 16) | (w0 & 0xffffu);
+                hle_timing_command(select_op);
+                pc += 8u;
+                if (s2dex_select_dl((w0 >> 16) & 0xffu, w1, mask))
+                {
+                    if (!(select & 0x00010000u) && s_dl_sp < DL_MAX_DEPTH)
+                        s_dl_stack[s_dl_sp++] = pc;
+                    pc = seg_addr(target);
+                    if (fifo->fetch_dl) fifo->fetch_dl(~0u, 0);
+                }
+                continue;
+            }
+        }
 
 
 
@@ -477,7 +752,7 @@ void f3dex2_run_dl(GSPState *gsp, RdpFifo *fifo, unsigned int addr,
          * those before the F3DEX2 interpretation; the shared flow-control
          * and RDP-passthrough opcodes (0xD7..0xFF minus the class
          * differences) fall through to the main switch. */
-        if (s_ucode_class == UCODE_S2DEX1)
+        if ((s_ucode_class & 0xff) == UCODE_S2DEX1)
         {
             /* Standalone S2DEX 1.06 (GBI 1) is the F3DEX command set with the
              * 2D object commands overlaid: the low opcodes 0x01/0x03/0x04/0x06
@@ -488,6 +763,8 @@ void f3dex2_run_dl(GSPState *gsp, RdpFifo *fifo, unsigned int addr,
             if (cmd == 0xaf)   /* G_LOAD_UCODE (GBI1): mid-list ucode swap */
             {
                 unsigned int t = seg_addr(w1);
+                if (fifo->load_ucode)
+                    fifo->load_ucode(fifo, t, seg_addr(s_half1), (w0 & 0xffffu) + 1u);
                 /* S2DEX 1.06 lists (Yoshi's Story title) hot-swap to an
                  * F3DEX.NoN build to draw geometry, then swap back. When the
                  * loaded microcode is an F3D vertex-family build, route the
@@ -501,12 +778,19 @@ void f3dex2_run_dl(GSPState *gsp, RdpFifo *fifo, unsigned int addr,
                     f3d_set_variant(1);          /* n<<10 vtx / x2 indices */
                     f3d_set_line_variant(0);
                     f3d_set_variant_wr64(0);
+                    {
+                        unsigned int data=seg_addr(s_half1);
+                        if(addr_in_range(data,0x120u) && (rd_u32_be(r,data+0x118u)>>24)==0xefu)
+                            f3d_set_othermode_init(rd_u32_be(r,data+0x118u),rd_u32_be(r,data+0x11cu));
+                    }
                     f3d_import_segments(s_seg_table);
                     f3d_set_stop_on_ucode(1);
                     f3d_run_dl(gsp, fifo, pc, s_textured, s_zbuffered);
                     f3d_set_stop_on_ucode(0);
-                    if (f3d_stopped_at_ucode())
+                    if (f3d_stopped_at_ucode()) {
                         pc = f3d_get_resume_pc();
+                        s_half1 = f3d_get_half1();
+                    }
                     else
                     {
                         /* The inline F3DEX.NoN run hit G_ENDDL, not a swap-back:
@@ -514,6 +798,17 @@ void f3dex2_run_dl(GSPState *gsp, RdpFifo *fifo, unsigned int addr,
                          * display list level too. */
                         DL_RETURN();
                     }
+                } else {
+                    /* GBI1 reloads the entire data image, including the
+                     * other-mode defaults, before resuming the list. */
+                    f3dex2_set_task_ucode(r,t,seg_addr(s_half1));
+                    if (s2dex1_ucode_match(r,s_rdram_size,seg_addr(s_half1),(w0&0xffffu)+1u))
+                        f3dex2_force_class_s2dex1();
+                    s2dex_reset();
+                    s2dex_seed_scissor(fifo->dmem);
+                    if (fifo->dmem && (rd_u32_be(fifo->dmem,0xc8u)>>24)==0xefu)
+                        f3dex2_set_othermode_init(rd_u32_be(fifo->dmem,0xc8u),
+                                                 rd_u32_be(fifo->dmem,0xccu));
                 }
                 continue;
             }
@@ -530,27 +825,29 @@ void f3dex2_run_dl(GSPState *gsp, RdpFifo *fifo, unsigned int addr,
                 /* w0 bit0 = G_DL_NOPUSH (branch) */
                 if (w0 & 0x00010000u)
                 {
-                    if (addr_in_range(da, 8u))
+                    if (addr_in_range(da, 8u)) {
                         pc = da;
-                    else
+                        if (fifo->fetch_dl) fifo->fetch_dl(~0u, 0);
+                    } else
                         DL_RETURN();
                 }
                 else if (addr_in_range(da, 8u) && s_dl_sp < DL_MAX_DEPTH)
                 {
                     s_dl_stack[s_dl_sp++] = pc;
                     pc = da;
+                    if (fifo->fetch_dl) fifo->fetch_dl(~0u, 0);
                 }
                 break;
             }
             case 0xc1:                          /* G_OBJ_LOADTXTR */
-                s2dex_obj_loadtxtr(r, s_rdram_size, seg_addr(w1), fifo, seg_addr);
+                s2dex_obj_loadtxtr(r, s_rdram_size, seg_addr(w1), fifo, gsp_seg_addr_rsp);
                 break;
             case 0xc2:                          /* G_OBJ_LDTX_SPRITE (txtr+sprite) */
-                s2dex_obj_loadtxtr(r, s_rdram_size, seg_addr(w1), fifo, seg_addr);
+                s2dex_obj_loadtxtr(r, s_rdram_size, seg_addr(w1), fifo, gsp_seg_addr_rsp);
                 s2dex_obj_sprite(gsp, r, s_rdram_size, seg_addr(w1) + 24u, fifo);
                 break;
             case 0xc3:                          /* G_OBJ_LDTX_RECT (txtr+rect) */
-                s2dex_obj_loadtxtr(r, s_rdram_size, seg_addr(w1), fifo, seg_addr);
+                s2dex_obj_loadtxtr(r, s_rdram_size, seg_addr(w1), fifo, gsp_seg_addr_rsp);
                 s2dex_obj_rectangle(gsp, r, s_rdram_size, seg_addr(w1) + 24u, fifo);
                 break;
             case 0xb1:                          /* G_OBJ_RENDERMODE */
@@ -578,14 +875,19 @@ void f3dex2_run_dl(GSPState *gsp, RdpFifo *fifo, unsigned int addr,
                     mask = ((1u << length) - 1u) << shift;
                 if (cmd == 0xba)
                     s_othermode_h = (s_othermode_h & ~mask)
-                                  | ((unsigned int)w1 & mask)
+                                  | (unsigned int)w1
                                   | (0x2fu << 24);
                 else
                     s_othermode_l = (s_othermode_l & ~mask)
-                                  | ((unsigned int)w1 & mask);
-                two[0] = (int32_t)(s_othermode_h | (0x2fu << 24));
+                                  | (unsigned int)w1;
+                two[0] = (int32_t)(s_othermode_h | (0xefu << 24));
                 two[1] = (int32_t)s_othermode_l;
-                rdp_fifo_append(fifo, two, 2);
+                /* Native secondary-prefix lookahead emits only the final
+                 * B9/BA update in a run, and cannot cross a DMA refill. */
+                if (!((s_ucode_class & UCODE_OM_COALESCE) && pc < fifo->dl_end &&
+                    ((rd_u32_be(r,pc) >> 24) == 0xb9u ||
+                     (rd_u32_be(r,pc) >> 24) == 0xbau)))
+                    rdp_fifo_append(fifo, two, 2);
                 break;
             }
             case 0xbc:                          /* G_MOVEWORD (GBI 1) */
@@ -624,8 +926,8 @@ void f3dex2_run_dl(GSPState *gsp, RdpFifo *fifo, unsigned int addr,
                 }
                 else if (index == G_MW_FOG)
                 {
-                    gsp_set_fog(gsp, (int)(short)((w1 >> 16) & 0xffffu),
-                                     (int)(short)(w1 & 0xffffu));
+                    /* S2DEX reuses this index for G_MW_GENSTAT. */
+                    s2dex_set_status(off, w1);
                 }
                 else if (index == G_MW_NUMLIGHT)
                 {
@@ -636,14 +938,16 @@ void f3dex2_run_dl(GSPState *gsp, RdpFifo *fifo, unsigned int addr,
                 break;
             }
             case 0xc4:                          /* G_OBJ_LDTX_RECT_R: load + rect_R */
-                s2dex_obj_loadtxtr(r, s_rdram_size, seg_addr(w1), fifo, seg_addr);
+                s2dex_obj_loadtxtr(r, s_rdram_size, seg_addr(w1), fifo, gsp_seg_addr_rsp);
                 s2dex_obj_rectangle_r(gsp, r, s_rdram_size, seg_addr(w1) + 24u, fifo);
                 break;
-            case 0xb0:                          /* G_SELECT_DL (not modelled) */
+            case 0xb4:                          /* G_RDPHALF_1: ucode data pointer */
+                s_half1=w1;
+                break;
+            case 0xb0:                          /* G_SELECT_DL handled with HALF_0 above */
             case 0xb2:                          /* G_OBJ_RECTANGLE_R (rotated; TODO) */
             case 0xbb:                          /* G_TEXTURE (sprite tile sets scale) */
             case 0xb3:                          /* G_RDPHALF_2 (texrect tail) */
-            case 0xb4:                          /* G_RDPHALF_1 (texrect tail) */
             case 0xb6:                          /* G_(CLEAR)GEOMETRYMODE (unused 2D) */
             case 0xb7:
                 break;
@@ -665,6 +969,8 @@ void f3dex2_run_dl(GSPState *gsp, RdpFifo *fifo, unsigned int addr,
                 unsigned int c0;
                 int32_t tr[4];
                 c0 = rd_u32_be(r, pc);
+                if(fifo->fetch_dl && ((c0>>24)==0xb4u || (c0>>24)==0xb3u))
+                    fifo->fetch_dl(pc,c0);
                 if (((c0 >> 24) & 0xffu) == 0xb4u)        /* s, t */
                 {
                     st = rd_u32_be(r, pc + 4);
@@ -676,6 +982,8 @@ void f3dex2_run_dl(GSPState *gsp, RdpFifo *fifo, unsigned int addr,
                     pc += 8;
                 }
                 c0 = rd_u32_be(r, pc);
+                if(fifo->fetch_dl && ((c0>>24)==0xb4u || (c0>>24)==0xb3u))
+                    fifo->fetch_dl(pc,c0);
                 if (((c0 >> 24) & 0xffu) == 0xb4u)
                 {
                     st = rd_u32_be(r, pc + 4);
@@ -731,6 +1039,7 @@ void f3dex2_run_dl(GSPState *gsp, RdpFifo *fifo, unsigned int addr,
                      * already does this; the GBI1 path was missing it. */
                     if (rdp_id == 0x2d)
                         s2dex_set_scissor(w0, w1);
+                    if(rdp_id==0x27 && fifo->dmem)fifo->dmem[0xd2u^3u]=0;
                     /* SET_COLOR_IMAGE (0x3f), SET_Z_IMAGE (0x3e) and
                      * SET_TEXTURE_IMAGE (0x3d) carry a DRAM pointer in w1
                      * that may be segmented; the S2DEX microcode resolves it
@@ -748,7 +1057,7 @@ void f3dex2_run_dl(GSPState *gsp, RdpFifo *fifo, unsigned int addr,
             }
             continue;
         }
-        if (s_ucode_class == UCODE_S2DEX2)
+        if ((s_ucode_class & 0xff) == UCODE_S2DEX2)
         {
             int s2 = 1;
             switch (cmd)
@@ -787,9 +1096,8 @@ void f3dex2_run_dl(GSPState *gsp, RdpFifo *fifo, unsigned int addr,
             case 0xDC:                  /* G_OBJ_MOVEMEM (object matrix) */
                 s2dex_obj_movemem(r, s_rdram_size, w0, seg_addr(w1));
                 break;
-            case 0x04:                  /* G_SELECT_DL / G_RDPHALF_0: consume */
-                /* Not modelled; consume so the rest of the list is not
-                 * mis-read as F3DEX2 packets. */
+            case 0x04:                  /* G_SELECT_DL handled with HALF_0 above */
+                /* A standalone selector has no latched HALF_0 operand. */
                 break;
             default:
                 s2 = 0;
@@ -798,14 +1106,36 @@ void f3dex2_run_dl(GSPState *gsp, RdpFifo *fifo, unsigned int addr,
             if (s2)
                 continue;
         }
-        else if (s_ucode_class == UCODE_L3DEX2 && cmd == 0x08)
+        else if ((s_ucode_class & 0xff) == UCODE_L3DEX2 && cmd == 0x08)
         {
-            /* G_LINE3D: consumed; line rasterisation is not modeled yet. */
+            int32_t packet[46]={0};int n;
+            if(fifo->read_staging)fifo->read_staging(0,packet,46);
+            gsp->line_native=8|(s_textured?2:0);
+            gsp->line_clip_3d=1;
+            n=gsp_line(gsp,packet,(w0>>17)&127,(w0>>9)&127,(signed char)w0);
+            gsp->line_native=0;
+            if(n)rdp_fifo_append(fifo,packet,n);
             continue;
         }
 
         switch (cmd)
         {
+        case 0xd5:
+            if (s_ucode_class & UCODE_DMA_INLINE) {
+                unsigned int bytes = (w0 & 0xffffffu) * 8u;
+                unsigned int source = w1 & 0xffffffu;
+                /* The secondary DMA list uses gp as its negative byte
+                 * counter; k0/k1 and the ordinary call stack stay live. */
+                if (bytes && bytes <= 0xa50u && addr_in_range(source, bytes)) {
+                    inline_return = pc;
+                    inline_end = source + bytes;
+                    pc = source;
+                    if (fifo->dmem)
+                        memcpy(fifo->dmem + 0xa50u - bytes, r + (source & ~7u), bytes);
+                }
+            } else
+                gsp_combine_matrices(gsp);
+            break;
         case F3DEX2_MTX:
         {
             int param = (int)((w0 & 0xff) ^ MTX_PUSH);
@@ -813,8 +1143,19 @@ void f3dex2_run_dl(GSPState *gsp, RdpFifo *fifo, unsigned int addr,
             int load = (param & MTX_LOAD) ? 1 : 0;
             int push = (param & MTX_PUSH) ? 1 : 0;
             unsigned int ma = seg_addr(w1);
-            if (addr_in_range(ma, 64u))     /* 16 s16 ints + 16 u16 fracs */
+            if (addr_in_range(ma, 64u)) {   /* 16 s16 ints + 16 u16 fracs */
+                if(fifo->dmem && fifo->matrix_dma_table) {
+                    unsigned int at=(fifo->matrix_dma_table+(w0&0xfeu))&0xfffu;
+                    unsigned int dest;
+#ifndef MSB_FIRST
+                    at^=2u;
+#endif
+                    dest=(*(const unsigned short *)(fifo->dmem+at)+(w0>>5))&0xff8u;
+                    if(dest<=0xfc0u)memcpy(fifo->dmem+dest,r+(ma&~7u),64);
+                }
                 gsp_matrix_load(gsp, r, ma, projection, load, push);
+                gsp_sdk_matrix_store(gsp);
+            }
             break;
         }
         case F3DEX2_POPMTX:
@@ -829,6 +1170,17 @@ void f3dex2_run_dl(GSPState *gsp, RdpFifo *fifo, unsigned int addr,
             break;
         }
 
+        case 0x00:
+            /* The verified FIFO builds dispatch SPNoOp through a two-word
+             * RDP copy handler (2.05 IMEM 0x20c). Keep the actual stream. */
+            if (fifo->spnoop || f3dex2_native_texrecip())
+            {
+                int32_t nop[2];
+                nop[0] = (int32_t)w0; nop[1] = (int32_t)w1;
+                rdp_fifo_append(fifo, nop, 2);
+            }
+            break;
+
         case F3DEX2_VTX:
         {
             int n  = (int)((w0 >> 12) & 0xff);
@@ -837,7 +1189,35 @@ void f3dex2_run_dl(GSPState *gsp, RdpFifo *fifo, unsigned int addr,
             gsp->cbfd = s_variant_cbfd;
             gsp->acclaim = s_variant_acclaim;
             if (n > 0 && addr_in_range(va, (unsigned int)n * 16u))
-                gsp_vertex(gsp, r, va, n, v0);
+            {
+                int i;
+                unsigned int geometry=gsp->geometry_mode;
+                if(fifo->dmem && (!rsp_graphics_sdk_one(5)||!rsp_graphics_sdk_one(7))) {
+                    if(!gsp->combined_valid)fifo->dmem[0x1d9u^3u]=(unsigned char)w0;
+                    if(!gsp->lights_valid && (geometry&0x20000u))fifo->dmem[0x1dcu^3u]=(unsigned char)w0;
+                }
+                if((s_ucode_class&0xff)==UCODE_L3DEX2)gsp->geometry_mode&=~0x20000u;
+                if (s_variant_cbfd && fifo->dmem)
+                    gsp_vertex_cbfd(gsp,r,fifo->dmem,va,n,v0);
+                else
+                    gsp_vertex(gsp, r, va, n, v0);
+                gsp->geometry_mode=geometry;
+                /* FIFO 2.05's lighting overlay merges the source alpha into
+                 * v29, then VMULF by 0x7fff (0x434/0x4cc) before SUV stores
+                 * the byte. The RGB-only light helper must not leave alpha
+                 * unscaled. Fog subsequently replaces alpha; MODIFYVTX RGBA
+                 * writes are already-final bytes and must stay untouched. */
+                if (((s_ucode_class & 0xff) == UCODE_F3DEX205 || (s_ucode_class & UCODE_LIT_ALPHA)) &&
+                    (gsp->geometry_mode & 0x00020000u) &&
+                    !(gsp->geometry_mode & 0x00010000u))
+                    for (i = 0; i < n; ++i)
+                        if (v0 + i >= 0 && v0 + i < GSP_MAX_VERTICES) {
+                            GSPVertex *v = &gsp->vtx[v0 + i];
+                            unsigned int alpha = (unsigned int)v->a >> 16;
+                            v->a = (int32_t)((alpha * 0x7fffu + 0x80u) >> 15) << 16;
+                        }
+                for(i=0;i<n;i++)if(v0+i>=0)gsp_sdk_vertex_store(gsp,(unsigned int)(v0+i));
+            }
             break;
         }
 
@@ -881,31 +1261,41 @@ void f3dex2_run_dl(GSPState *gsp, RdpFifo *fifo, unsigned int addr,
              * high bits in w0, two low bits in w1); the other eleven indices
              * are packed 5 bits each. Only active on the CBFD build -- every
              * other F3DEX2 title leaves 0x10..0x1f as unused no-ops. */
-            if (s_variant_cbfd)
+            if (s_variant_cbfd&1)
             {
                 int idx[4][3];
                 int t;
-                idx[0][0] = (int)((w0 >> 23) & 0x1f);
-                idx[0][1] = (int)((w0 >> 18) & 0x1f);
-                idx[0][2] = (int)((((w0 >> 15) & 0x07) << 2)
+                /* Native 0x994..0xa64 consumes w1 high, w1 low, w0 low,
+                 * then the triangle split across the two words. */
+                idx[3][0] = (int)((w0 >> 23) & 0x1f);
+                idx[3][1] = (int)((w0 >> 18) & 0x1f);
+                idx[3][2] = (int)((((w0 >> 15) & 0x07) << 2)
                                   | ((w1 >> 30) & 0x03));
-                idx[1][0] = (int)((w0 >> 10) & 0x1f);
-                idx[1][1] = (int)((w0 >>  5) & 0x1f);
-                idx[1][2] = (int)((w0 >>  0) & 0x1f);
-                idx[2][0] = (int)((w1 >> 25) & 0x1f);
-                idx[2][1] = (int)((w1 >> 20) & 0x1f);
-                idx[2][2] = (int)((w1 >> 15) & 0x1f);
-                idx[3][0] = (int)((w1 >> 10) & 0x1f);
-                idx[3][1] = (int)((w1 >>  5) & 0x1f);
-                idx[3][2] = (int)((w1 >>  0) & 0x1f);
+                idx[2][0] = (int)((w0 >> 10) & 0x1f);
+                idx[2][1] = (int)((w0 >>  5) & 0x1f);
+                idx[2][2] = (int)((w0 >>  0) & 0x1f);
+                idx[0][0] = (int)((w1 >> 25) & 0x1f);
+                idx[0][1] = (int)((w1 >> 20) & 0x1f);
+                idx[0][2] = (int)((w1 >> 15) & 0x1f);
+                idx[1][0] = (int)((w1 >> 10) & 0x1f);
+                idx[1][1] = (int)((w1 >>  5) & 0x1f);
+                idx[1][2] = (int)((w1 >>  0) & 0x1f);
                 for (t = 0; t < 4; t++)
                 {
+                    if(fifo->store_indices) {
+                        int32_t old=0;
+                        if(fifo->read_staging)fifo->read_staging(4u,&old,1u);
+                        fifo->store_indices(((unsigned int)old&0xff000000u)
+                            |((unsigned int)idx[t][0]<<17)
+                            |((unsigned int)idx[t][1]<<9)
+                            |((unsigned int)idx[t][2]<<1));
+                    }
                     int32_t cmdw[GSP_TRI_CMD_WORDS];
                     int nc;
                     if (idx[t][0] == idx[t][1] && idx[t][0] == idx[t][2])
                         continue;   /* degenerate padding slot */
-                    nc = gsp_triangle(gsp, cmdw, idx[t][0], idx[t][1],
-                                      idx[t][2], s_textured, s_zbuffered);
+                    nc = gsp_triangle_with_texrecip(gsp, cmdw, idx[t][0], idx[t][1],
+                                      idx[t][2], s_textured, s_zbuffered, f3dex2_native_texrecip());
                     if (nc > 0) rdp_fifo_append(fifo, cmdw, nc);
                 }
             }
@@ -918,7 +1308,9 @@ void f3dex2_run_dl(GSPState *gsp, RdpFifo *fifo, unsigned int addr,
             int b = (int)((w0 >> 9) & 0x7f);
             int c = (int)((w0 >> 1) & 0x7f);
             int32_t cmdw[GSP_TRI_CMD_WORDS];
-            int nc = gsp_triangle(gsp, cmdw, a, b, c, s_textured, s_zbuffered);
+            int nc;
+            if (fifo->store_indices) fifo->store_indices(w0);
+            nc = gsp_triangle_with_texrecip(gsp, cmdw, a, b, c, s_textured, s_zbuffered, f3dex2_native_texrecip());
             if (nc > 0) rdp_fifo_append(fifo, cmdw, nc);
             break;
         }
@@ -938,9 +1330,17 @@ void f3dex2_run_dl(GSPState *gsp, RdpFifo *fifo, unsigned int addr,
              * jals tri_to_rdp before falling through to the G_TRI1 path
              * for the first triangle: the microcode emits the SECOND
              * triangle of the pair first. */
-            nc = gsp_triangle(gsp, cmdw, a1, b1, c1, s_textured, s_zbuffered);
+            if(gsp->clip_reject) {
+                /* Rej's paired vector halves emit the first half first. */
+                int tmp=a0;a0=a1;a1=tmp;
+                tmp=b0;b0=b1;b1=tmp;
+                tmp=c0;c0=c1;c1=tmp;
+            }
+            if (fifo->store_indices) fifo->store_indices(w1);
+            nc = gsp_triangle_with_texrecip(gsp, cmdw, a1, b1, c1, s_textured, s_zbuffered, f3dex2_native_texrecip());
             if (nc > 0) rdp_fifo_append(fifo, cmdw, nc);
-            nc = gsp_triangle(gsp, cmdw, a0, b0, c0, s_textured, s_zbuffered);
+            if (fifo->store_indices) fifo->store_indices(w0);
+            nc = gsp_triangle_with_texrecip(gsp, cmdw, a0, b0, c0, s_textured, s_zbuffered, f3dex2_native_texrecip());
             if (nc > 0) rdp_fifo_append(fifo, cmdw, nc);
             break;
         }
@@ -961,17 +1361,21 @@ void f3dex2_run_dl(GSPState *gsp, RdpFifo *fifo, unsigned int addr,
                     s_stream_stalled = 1;
                     running = 0;
                 }
-                else if (addr_in_range(da, 8u))
+                else if (addr_in_range(da, 8u)) {
                     pc = da;
-                else
+                    if (fifo->fetch_dl) fifo->fetch_dl(~0u, 0);
+                } else
                     DL_RETURN();        /* invalid branch ended the list */
             }
             else if (addr_in_range(da, 8u))
             {
                 if (s_dl_sp < DL_MAX_DEPTH)
                 {
+                    if(fifo->dmem && (!rsp_graphics_sdk_one(5)||!rsp_graphics_sdk_one(7)))
+                        memcpy(fifo->dmem+0x138u+s_dl_sp*4u,&pc,4);
                     s_dl_stack[s_dl_sp++] = pc;
                     pc = da;
+                    if (fifo->fetch_dl) fifo->fetch_dl(~0u, 0);
                 }
                 /* at the depth bound the call is dropped, as the old
                  * recursion guard did */
@@ -986,7 +1390,22 @@ void f3dex2_run_dl(GSPState *gsp, RdpFifo *fifo, unsigned int addr,
              * MOVEWORD indices (numlight, fog, clip, ...) don't affect address
              * resolution here, so ignore them. */
             int index = (int)((w0 >> 16) & 0xff);
-            if (index == G_MW_SEGMENT)
+            if (s_variant_cbfd && fifo->dmem && index<=0x10 && !(index&1)) {
+                unsigned int table=0x560u+(unsigned int)index;
+                unsigned int destination;
+#ifndef MSB_FIRST
+                table^=2u;
+#endif
+                /* The resident's MOVEWORD handler reads this base table.
+                 * Preserve both paired coordinate/light copies in DMEM. */
+                destination=(*(const unsigned short *)(fifo->dmem+table)+(w0&0xffffu))&0xfffu;
+                if (!(destination&3u)) memcpy(fifo->dmem+destination,&w1,4);
+            }
+            if ((s_ucode_class & 0xff) == UCODE_S2DEX2 && index == G_MW_FOG)
+            {
+                s2dex_set_status(w0 & 0xffffu, w1);
+            }
+            else if (index == G_MW_SEGMENT)
             {
                 unsigned int seg = (w0 >> 2) & 0x0fu;
                 s_seg_table[seg] = w1;
@@ -1039,8 +1458,9 @@ void f3dex2_run_dl(GSPState *gsp, RdpFifo *fifo, unsigned int addr,
                  * last light, so index == numlights recolors the ambient
                  * with no special casing. */
                 unsigned int ofs = w0 & 0xffffu;
-                if ((ofs % 24u) == 0)
-                    gsp_set_light_color(gsp, (int)(ofs / 24u),
+                unsigned int stride=s_variant_cbfd?48u:24u;
+                if ((ofs % stride) == 0)
+                    gsp_set_light_color(gsp, (int)(ofs / stride),
                                         (int32_t)((w1 >> 24) & 0xffu),
                                         (int32_t)((w1 >> 16) & 0xffu),
                                         (int32_t)((w1 >> 8) & 0xffu));
@@ -1086,7 +1506,8 @@ void f3dex2_run_dl(GSPState *gsp, RdpFifo *fifo, unsigned int addr,
             else if (index == 0x10 && s_variant_cbfd)
             {
                 /* Conker G_MW_COORD_MOD: the vertex-position modifier the CBFD
-                 * point-light path uses. w0 bit 3 set is a no-op; bits 1..2
+                 * point-light path uses. Bit 3 selects the second vertex's
+                 * copy, retained above in native DMEM; bits 1..2
                  * index the row; w0 & 0x30 selects which pair of rows the two
                  * s16 halves of w1 write: 0x00 -> integer offset rows 0/1,
                  * 0x10 -> 16.16 scale rows 4/5 and the combined rows 12/13
@@ -1191,12 +1612,25 @@ void f3dex2_run_dl(GSPState *gsp, RdpFifo *fifo, unsigned int addr,
                 unsigned int coff = (w0 >> 5) & 0x3fffu;
                 int cn = (int)(coff / 48u);
                 unsigned int cla = seg_addr(w1);
-                if (addr_in_range(cla, 24u))
+                const unsigned char *light_memory = r;
+                unsigned int light_address = cla;
+                int light_valid = addr_in_range(cla,cn>=2?48u:16u);
+                gsp->cbfd = 1;
+                if (fifo->dmem) {
+                    unsigned int bytes=(((w0>>19)&31u)+1u)*8u;
+                    unsigned int destination=0x260u+coff;
+                    if (destination<=0x1000u && bytes<=0x1000u-destination && addr_in_range(cla,bytes))
+                        memcpy(fifo->dmem+destination,r+cla,bytes);
+                    light_memory=fifo->dmem;
+                    light_address=destination;
+                    light_valid=destination<=0x1000u && (cn>=2?48u:16u)<=0x1000u-destination;
+                }
+                if (light_valid)
                 {
                     if (cn >= 2)
-                        gsp_set_light(gsp, r, cla, cn - 2);
+                        gsp_set_light(gsp, light_memory, light_address, cn - 2);
                     else
-                        gsp_set_lookat(gsp, r, cla, cn);
+                        gsp_set_lookat(gsp, light_memory, light_address, cn);
                 }
             }
             else if (index == G_MV_VIEWPORT)
@@ -1259,13 +1693,6 @@ void f3dex2_run_dl(GSPState *gsp, RdpFifo *fifo, unsigned int addr,
             break;
         }
 
-        case 0xD5:                       /* G_SPECIAL_1: recompute the MVP */
-            /* 2.04H-era gbi: forces the combined modelview*projection
-             * product to be rebuilt immediately, so following
-             * gSPInsertMatrix patches apply to fresh values. */
-            gsp_combine_matrices(gsp);
-            break;
-
         case 0xE1:                       /* G_RDPHALF_1: stage branch target */
             s_half1 = w1;
             break;
@@ -1302,16 +1729,21 @@ void f3dex2_run_dl(GSPState *gsp, RdpFifo *fifo, unsigned int addr,
              * staged the data address. The RSP swaps the running
              * microcode; the walker swaps its opcode interpretation. */
             unsigned int text = seg_addr(w1);
-            s_ucode_class = probe_ucode_class(r, text);
+            if (fifo->load_ucode)
+                fifo->load_ucode(fifo, text, seg_addr(s_half1), (w0 & 0xffffu) + 1u);
+            s_ucode_class = probe_ucode_class(r, text, seg_addr(s_half1));
+            s2dex_set_version2((s_ucode_class & 0xff) == UCODE_S2DEX2);
+            f3dex2_set_variant_cbfd(r,seg_addr(s_half1),(w0&0xffffu)+1u);
             /* The microcode reload re-DMAs the data segment, restoring
              * the S2DEX scissor/status defaults. The data address was
              * staged by the preceding G_RDPHALF_1; re-detect the clip
              * profile from it, since titles like Excitebike 64 swap
              * between microcode builds with different clip schemes
              * mid-list. */
-            if (s_ucode_class == UCODE_S2DEX2)
+            if ((s_ucode_class & 0xff) == UCODE_S2DEX2) {
                 s2dex_reset();
-            else
+                s2dex_seed_scissor(fifo->dmem);
+            } else
                 gsp_detect_ucode_params(gsp, r, s_rdram_size,
                                         seg_addr(s_half1), text);
             break;
@@ -1360,8 +1792,10 @@ void f3dex2_run_dl(GSPState *gsp, RdpFifo *fifo, unsigned int addr,
                 int32_t lhs = gsp->branch_z_mode
                             ? gsp->vtx[bv].scr_z
                             : (gsp->vtx[bv].cw >> 16);
-                if (lhs < (int32_t)w1)
+                if (lhs < (int32_t)w1) {
                     pc = ba;
+                    if (fifo->fetch_dl) fifo->fetch_dl(~0u, 0);
+                }
             }
             break;
         }
@@ -1408,6 +1842,7 @@ void f3dex2_run_dl(GSPState *gsp, RdpFifo *fifo, unsigned int addr,
                 int32_t tr[4];
                 /* first RDPHALF */
                 c0 = rd_u32_be(r, pc);
+                hle_timing_command(c0 >> 24);
                 if (((c0 >> 24) & 0xff) == F3DEX2_RDPHALF_2)
                     h0 = rd_u32_be(r, pc + 4);
                 else if (((c0 >> 24) & 0xff) == F3DEX2_RDPHALF_1)
@@ -1415,6 +1850,7 @@ void f3dex2_run_dl(GSPState *gsp, RdpFifo *fifo, unsigned int addr,
                 pc += 8;
                 /* second RDPHALF */
                 c0 = rd_u32_be(r, pc);
+                hle_timing_command(c0 >> 24);
                 if (((c0 >> 24) & 0xff) == F3DEX2_RDPHALF_2)
                     h0 = rd_u32_be(r, pc + 4);
                 else if (((c0 >> 24) & 0xff) == F3DEX2_RDPHALF_1)
@@ -1424,6 +1860,11 @@ void f3dex2_run_dl(GSPState *gsp, RdpFifo *fifo, unsigned int addr,
                 tr[1] = (int32_t)w1;
                 tr[2] = (int32_t)h0; /* s, t   (RDPHALF_2) */
                 tr[3] = (int32_t)h1; /* dsdx, dtdy (RDPHALF_1) */
+                /* S2DEX FIFO 2.05's HALF_2 handler (low overlay 0x128)
+                 * restores the list scissor before issuing the rectangle.
+                 * BG/object commands can have left a narrower RDP scissor. */
+                if ((s_ucode_class & 0xff) == UCODE_S2DEX2)
+                    s2dex_emit_scissor(fifo);
                 rdp_fifo_append(fifo, tr, 4);
             }
             break;
@@ -1551,11 +1992,13 @@ void f3dex2_run_dl(GSPState *gsp, RdpFifo *fifo, unsigned int addr,
                 }
                 /* sniff Set Scissor (0xED -> 0x2d) for the S2DEX background
                  * renderer, mirroring the microcode's command splitter. */
-                if (rdp_id == 0x2d)
+                if (rdp_id == 0x2d) {
                     s2dex_set_scissor(w0, w1);
+                    gsp->scis_w0=w0;gsp->scis_w1=w1;gsp->scis_valid=1;
+                }
                 /* The S2DEX2 rectangle handler restores the display
                  * list's scissor before every G_TEXRECT it forwards. */
-                if (s_ucode_class == UCODE_S2DEX2 &&
+                if ((s_ucode_class & 0xff) == UCODE_S2DEX2 &&
                     (rdp_id == 0x24 || rdp_id == 0x25))
                     s2dex_emit_scissor(fifo);
                 /* sniff Set Tile (0xF5 -> 0x35) for the wrap masks: the
@@ -1569,15 +2012,10 @@ void f3dex2_run_dl(GSPState *gsp, RdpFifo *fifo, unsigned int addr,
                     gsp->tile_mask_t[ti] = (unsigned char)((w1 >> 14) & 0xf);
                     gsp->tile_mask_s[ti] = (unsigned char)((w1 >> 4) & 0xf);
                 }
-                /* 0x24..0x3f are the RDP non-triangle commands angrylion
-                 * implements; 0x31 (G_SETKEY*) is not, so skip it. SYNC_FULL
-                 * (0x29) is dropped here too: the activation appends exactly
-                 * one frame terminator, and forwarding the list's own trailing
-                 * G_RDPFULLSYNC as well would complete the frame twice. Its
-                 * presence is recorded so the activation knows the task asked
-                 * for a full sync at all. */
+                /* Preserve FullSync's original words and position. Its
+                 * ignored payload is still observable in the guest FIFO. */
                 if (rdp_id == 0x29)
-                    rdp_fifo_fullsync_note();
+                    rdp_fifo_fullsync_append(fifo, w0, w1);
                 if (rdp_id >= 0x24 && rdp_id <= 0x3f &&
                     rdp_id != 0x31 && rdp_id != 0x29)
                 {

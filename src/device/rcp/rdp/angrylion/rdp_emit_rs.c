@@ -42,6 +42,14 @@
 extern void rdp_fifo_append(RdpFifo *f, const int32_t *words, int count);
 extern void rdp_fifo_fullsync_note(void);
 
+static void rs_append(RdpFifo *fifo, const int32_t *words, int count)
+{
+    unsigned int op = count ? ((unsigned int)words[0] >> 24) & 63u : 0;
+    rdp_fifo_append(fifo, words, count);
+    /* The resident triangle return drains its complete primitive batch. */
+    if (op >= 8u && op <= 15u && fifo->drain) fifo->drain();
+}
+
 static unsigned char *s_rdram;
 static unsigned int   s_rdram_size;
 
@@ -242,7 +250,7 @@ static void rs_emit_othermode(RdpFifo *fifo)
     int32_t two[2];
     two[0] = (int32_t)(s_rs_om_h | (0x2fu << 24));
     two[1] = (int32_t)s_rs_om_l;
-    rdp_fifo_append(fifo, two, 2);
+    rs_append(fifo, two, 2);
 }
 
 static int rs_zbuffered(void)
@@ -529,6 +537,7 @@ void rs_run_dl(GSPState *gsp, RdpFifo *fifo, unsigned int dl_addr)
     {
         unsigned int w0, w1, op;
         unsigned int size = 8u;
+        if (fifo->drain) fifo->drain();
 
         if (s_rs_streaming && guard >= 400000)
         {
@@ -575,7 +584,7 @@ void rs_run_dl(GSPState *gsp, RdpFifo *fifo, unsigned int dl_addr)
 
         w0 = rs_read_u32(pc);
         w1 = rs_read_u32(pc + 4u);
-        hle_timing_add(HLE_WORK_COMMAND, 1);
+        hle_timing_command(w0 >> 24);
         op = w0 >> 24;
         /* Resident b4..d4 indexes the same DMEM dispatch entries for
          * these compact opcodes and their negated high-byte aliases.
@@ -608,7 +617,7 @@ void rs_run_dl(GSPState *gsp, RdpFifo *fifo, unsigned int dl_addr)
                 s_rs_tile_w = (int)(((w1 >> 12) & 0xfffu) / 4u) + 1;
                 s_rs_tile_h = (int)((w1 & 0xfffu) / 4u) + 1;
             }
-            rdp_fifo_append(fifo, words, nw);
+            rs_append(fifo, words, nw);
             pc += size;
             continue;
         }
@@ -652,12 +661,12 @@ void rs_run_dl(GSPState *gsp, RdpFifo *fifo, unsigned int dl_addr)
             }
             rsp_tri_factor5_seed_fraction(fraction);
             words[0]=0x2e000000;words[1]=(int32_t)(((uint32_t)(gsp->vtx[slot].scr_z>>11)&0xffffu)<<16);
-            rdp_fifo_append(fifo,words,2);
-            words[0]=0x3a000000;words[1]=(int32_t)w1;rdp_fifo_append(fifo,words,2);
+            rs_append(fifo,words,2);
+            words[0]=0x3a000000;words[1]=(int32_t)w1;rs_append(fifo,words,2);
             if(s_rs_geom&0x10000u){
                 words[0]=0x38000000;
                 words[1]=(int32_t)((rs_read_u32(pc+8u)&0xffffff00u)|(gsp->vtx[slot].a>>16&255));
-                rdp_fifo_append(fifo,words,2);
+                rs_append(fifo,words,2);
             }
             for(lane=0;lane<2;lane++){if(lo[lane]<0)lo[lane]=0;if(hi[lane]<0)hi[lane]=0;}
             if(hi[0]>lo[0]&&hi[1]>lo[1]){
@@ -665,7 +674,7 @@ void rs_run_dl(GSPState *gsp, RdpFifo *fifo, unsigned int dl_addr)
                 words[1]=(int32_t)(((gsp->tex_tile&7u)<<24)|((uint32_t)lo[0]<<12)|(uint32_t)lo[1]);
                 words[2]=(int32_t)(((uint32_t)(uint16_t)anchor[0]<<16)|(uint16_t)anchor[1]);
                 words[3]=(int32_t)(((uint32_t)(uint16_t)step[0]<<16)|(uint16_t)step[1]);
-                rdp_fifo_append(fifo,words,4);
+                rs_append(fifo,words,4);
             }
             break;
         }
@@ -760,7 +769,7 @@ void rs_run_dl(GSPState *gsp, RdpFifo *fifo, unsigned int dl_addr)
                         int b=(first^pass)?1:3,c=(first^pass)?3:2;
                         if(!rs_cull(gsp,0,b,c)){
                             nw=gsp_triangle(gsp,cmd,0,b,c,s_rs_tex_on,rs_zbuffered());
-                            if(nw>0)rdp_fifo_append(fifo,cmd,nw);
+                            if(nw>0)rs_append(fifo,cmd,nw);
                         }
                     }
                 }
@@ -1204,7 +1213,7 @@ void rs_run_dl(GSPState *gsp, RdpFifo *fifo, unsigned int dl_addr)
                                               tc[node], s_rs_tex_on,
                                               rs_zbuffered());
                             if (nw > 0)
-                                rdp_fifo_append(fifo, cmd, nw);
+                                rs_append(fifo, cmd, nw);
                         }
                     }
                 }
@@ -1387,14 +1396,14 @@ void rs_run_dl(GSPState *gsp, RdpFifo *fifo, unsigned int dl_addr)
                 nw = gsp_triangle(gsp, cmd, i0, i1, i2,
                                   s_rs_tex_on, rs_zbuffered());
                 if (nw > 0)
-                    rdp_fifo_append(fifo, cmd, nw);
+                    rs_append(fifo, cmd, nw);
             }
             if (quad && !rs_cull(gsp, i0, i2, i3))
             {
                 nw = gsp_triangle(gsp, cmd, i0, i2, i3,
                                   s_rs_tex_on, rs_zbuffered());
                 if (nw > 0)
-                    rdp_fifo_append(fifo, cmd, nw);
+                    rs_append(fifo, cmd, nw);
             }
             break;
         }

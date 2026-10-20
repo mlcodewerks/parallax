@@ -214,6 +214,12 @@ static void process_dpc_commands(struct rdp_core* dp, int from_rsp)
     dp->dpc_regs[DPC_STATUS_REG] |= DPC_STATUS_CBUF_READY;
 
     /* Only SyncFull raises a DP edge. Preserve already pending interrupts. */
+#ifdef RDP_TIMING_OBSERVE_QUEUE
+    if (sync.seen)
+        RDP_TIMING_OBSERVE_QUEUE(0, dp->mi->r4300->cp0.count_clock,
+            sync.deadline, dp->timing.deadline, dp_pending,
+            get_event(&dp->mi->r4300->cp0.q, DP_INT) != NULL);
+#endif
     if (!dp_pending && (dp->mi->regs[MI_INTR_REG] & MI_INTR_DP))
     {
         if (from_rsp || dp->vi_regs)
@@ -343,6 +349,10 @@ void read_dpc_regs(void* opaque, uint32_t address, uint32_t* value)
         dp->dpc_regs[DPC_CLOCK_REG] = dpc_clock_now(dp, 0);
 
     *value = dp->dpc_regs[reg];
+#ifdef RDP_TIMING_OBSERVE_READ
+    RDP_TIMING_OBSERVE_READ(reg, 0, dp->mi->r4300->cp0.count_clock,
+        dp->timing.deadline, *value);
+#endif
 }
 
 void read_rsp_dpc_regs(void* opaque, uint32_t address, uint32_t* value)
@@ -351,6 +361,11 @@ void read_rsp_dpc_regs(void* opaque, uint32_t address, uint32_t* value)
     if (dpc_reg(address) == DPC_CLOCK_REG)
         dp->dpc_regs[DPC_CLOCK_REG] = dpc_clock_now(dp, 1);
     *value = dp->dpc_regs[dpc_reg(address)];
+#if defined(RDP_TIMING_OBSERVE_READ) && defined(HAVE_PARALLEL_RSP)
+    RDP_TIMING_OBSERVE_READ(dpc_reg(address), 1, dp->sp->slice_start_clock +
+        rsp_count_ticks(rsp_submission_cycles(), dp->sp->slice_overhang),
+        dp->timing.deadline, *value);
+#endif
 }
 
 static void write_dpc_regs_from(void* opaque, uint32_t address, uint32_t value, uint32_t mask, int from_rsp)
@@ -423,6 +438,10 @@ void rdp_interrupt_event(void* opaque)
 {
     struct rdp_core* dp = (struct rdp_core*)opaque;
 
+#ifdef RDP_TIMING_OBSERVE_QUEUE
+    RDP_TIMING_OBSERVE_QUEUE(1, dp->mi->r4300->cp0.count_clock,
+        0, dp->timing.deadline, dp->mi->regs[MI_INTR_REG] & MI_INTR_DP, 0);
+#endif
     raise_rcp_interrupt(dp->mi, MI_INTR_DP);
 }
 

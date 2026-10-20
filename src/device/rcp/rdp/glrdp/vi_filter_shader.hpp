@@ -5,10 +5,10 @@
 // or arrays. Reconstruction can run once per source pixel before resampling.
 namespace glrdp_vi {
 inline constexpr const char *filter = R"(
-void vi_extreme(vec4 sample, inout vec3 hi, inout vec3 hi2, inout vec3 lo, inout vec3 lo2) {
-    if (sample.a < 0.99)
+void vi_extreme(vec4 tap, inout vec3 hi, inout vec3 hi2, inout vec3 lo, inout vec3 lo2) {
+    if (tap.a < 0.99)
         return;
-    vec3 rgb = floor(sample.rgb * 255.0 + 0.5);
+    vec3 rgb = floor(tap.rgb * 255.0 + 0.5);
     hi2 = max(hi2, min(hi, rgb));
     hi = max(hi, rgb);
     lo2 = min(lo2, max(lo, rgb));

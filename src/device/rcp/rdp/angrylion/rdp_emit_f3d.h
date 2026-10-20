@@ -30,6 +30,8 @@ extern "C" {
 unsigned int f3d_xlate_geom(unsigned int m);
 int  f3d_is_ucode(const unsigned char *rdram, unsigned int rdram_size,
                   unsigned int text);
+int f3d_is_early_ucode(const unsigned char *rdram, unsigned int rdram_size, unsigned int text);
+void f3d_set_variant_early(int enabled);
 
 void f3d_seg_reset(void);
 void f3d_set_rdram(unsigned char *rdram);
@@ -74,6 +76,7 @@ void f3d_run_dl(GSPState *gsp, RdpFifo *fifo, unsigned int addr,
  * at the next G_LOAD_UCODE so the host list can resume. */
 void f3d_set_stop_on_ucode(int on);
 unsigned int f3d_get_resume_pc(void);
+unsigned int f3d_get_half1(void);
 int f3d_stopped_at_ucode(void);
 void f3d_import_segments(const unsigned int *src);
 

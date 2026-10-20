@@ -2,8 +2,35 @@
 #define RDP_EMIT_RSP_H
 
 #include <stdint.h>
+void rsp_clip_spill_words(uint32_t on_rgba, uint32_t on_st,
+                          uint32_t off_rgba, uint32_t off_st, uint32_t words[4]);
+void rsp_set_clip_lerp_gbi1(void);
+void rsp_vertex_spill_reset(void);
+void rsp_vertex_spill_position(int32_t z, int ratio, int32_t matrix_z);
+int rsp_vertex_spill_take(uint32_t words[4]);
+void rsp_vertex_spill_cull(int y0,int y1,int y2,int degenerate);
+void rsp_vertex_spill_screen(unsigned int vertex,int32_t x,int32_t y,int32_t z);
+void rsp_set_vtx_z_signed(int on);
+void rsp_vertex_spill_clip(int32_t x,int32_t y,int32_t z);
+void rsp_rej_project(unsigned int vertex,unsigned int alpha);
+void rsp_rej_prologue(uint32_t words[4], unsigned char alpha[2]);
+void rsp_four_pair_begin(void);
+int rsp_s2dex_rect_axis(int obj, int scale, int extent, int base_scale,
+                        int trans, const int16_t correction[6], int flip,
+                        int clip_min, int clip_max, int frac_scale, int truncate, int out[4]);
+void rsp_s2dex_sprite_triangle(int32_t packet[24], const int16_t h[4],
+    const int16_t m[4], const int16_t l[4], unsigned int tile);
+void rsp_s2dex_sprite_corners(int16_t out[4][4],const int obj[6],
+    const int32_t matrix[6],unsigned int mode,unsigned int flags);
+int rsp_tri_take_base_spill(unsigned int *packet_words, unsigned int *offset,
+                             int32_t words[16]);
 
 int32_t rsp_rcp32(int32_t in32);
+void rsp_graphics_entry_carry(unsigned int carry);
+void rsp_graphics_sdk_boot(int on);
+void rsp_vertex_pair_half(unsigned int half);
+int rsp_graphics_sdk_one(unsigned int lane);
+void rsp_sdk_triangle_xl(const int32_t *x);
 int32_t rsp_rcp32_dp(int32_t in32);
 int32_t rsp_rcp16(int32_t in16);
 int32_t rsp_rs_billboard_size(int32_t size, int32_t invw, int32_t norm, int32_t viewport, int32_t projection);
@@ -11,6 +38,10 @@ int32_t rsp_rs_billboard_step(int32_t size, int32_t extent, uint16_t fraction);
 int32_t rsp_rsq32(int32_t in32);
 void rsp_light_dir_xfrm_one(const int32_t mv[4][4],
                             const int32_t dir[3], int32_t out[3]);
+void rsp_light_dir_xfrm_four(const int32_t mv[4][4],const int32_t dir[3],int32_t out[4]);
+void rsp_light_dir_xfrm_cached(const int32_t mv[4][4],const int32_t dir[3],int32_t out[4]);
+void rsp_light_vtx_legacy(const int32_t normal[3],const int32_t ambient[3],
+    const int32_t (*rgb)[3],const int32_t (*dirs)[3],int num,int32_t out[3]);
 void rsp_zsort_light_xfrm(const uint16_t mi[3][4], const uint16_t mf[3][4],
                           const int32_t dir[3], unsigned char out[4]);
 int32_t rsp_clip_scale_w(int32_t w, int ratio);
@@ -43,6 +74,7 @@ void rsp_set_vtx_z_quant(int on);
 void rsp_set_keep_degenerate(int on);
 void rsp_set_affine_tex(int on);
 void rsp_set_persp_skip(int on);
+int32_t rsp_z_gradient_min(int32_t gradient, unsigned int minimum);
 void rsp_set_attr_lowp(int on);
 void rsp_set_clip_lerp_wo64(int on);
 void rsp_set_clip_lerp_l3dex(int on);
@@ -60,6 +92,13 @@ int32_t rsp_light_point_factor(const int32_t mv[4][4], const int32_t n[3],
 void rsp_light_vtx(const int32_t n[3], const int32_t amb[3],
                    const int32_t (*rgb)[3], const int32_t (*dirs)[3],
                    int num, int32_t out[3]);
+void rsp_cbfd_light(const int32_t clip[4], const int32_t coord[16],
+    const int32_t (*positions)[4], const int32_t (*rgb)[3],
+    const int32_t *attenuation, int num, const int32_t source[3], int32_t out[3]);
+void rsp_cbfd_light_normal(const int32_t clip[4], const int32_t coord[16],
+    const int32_t (*positions)[4], const int32_t (*rgb)[3],
+    const int32_t *attenuation, int num, const int32_t source[3],
+    const int32_t normal[3], const int32_t (*directions)[3], int positional, int32_t out[3]);
 int32_t rsp_vtx_invw(int32_t w);
 int32_t rsp_vtx_fog(int32_t cz, int32_t cw, int32_t pn,
                     int32_t fog_m, int32_t fog_o);
@@ -113,6 +152,8 @@ typedef struct RspTriVtx
 
 /* dx_scale/idy_scale/frac_mask/vcr_bound are the per-microcode triangle
  * setup constants; see GSPState tri_dx_scale and friends. */
+int rsp_line_native(int32_t *cmd,const RspTriVtx *a,const RspTriVtx *b,
+    int width,unsigned int flags,unsigned int tile,const int32_t scissor[2]);
 int rsp_line_write(int32_t *cmd, const RspTriVtx *e0, const RspTriVtx *e1,
                    int width_q, int32_t dx_scale, int32_t idy_scale,
                    int32_t slope_mask, int32_t *xl_dmem, int zbuf);
@@ -126,5 +167,12 @@ int rsp_tri_write(int32_t *ew,
                   int tile, int level,
                   int32_t dx_scale, int32_t idy_scale,
                   int32_t frac_mask, int32_t vcr_bound);
+/* Verified FIFO DIV normalization also selects its latched gradient MACs. */
+int rsp_tri_write_with_texrecip(int32_t *ew,
+                  const RspTriVtx *v1c, const RspTriVtx *v2c,
+                  const RspTriVtx *v3c,
+                  int textured, int z_buffered, int shaded, int smooth,
+                  int tile, int level, int32_t dx_scale, int32_t idy_scale,
+                  int32_t frac_mask, int32_t vcr_bound, int native_texrecip);
 
 #endif

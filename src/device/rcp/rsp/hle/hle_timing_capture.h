@@ -11,6 +11,8 @@ static int timing_capture_incomplete;
 static uint16_t timing_capture_vco;
 static uint32_t timing_capture_t6;
 static uint32_t timing_capture_f5[7];
+static uint32_t timing_capture_rsp[PARALLEL_RSP_STATE_WORDS];
+static uint32_t timing_capture_cp0[16];
 static unsigned int timing_capture_skip, timing_capture_stride;
 #include "hle_capture_context.h"
 
@@ -73,6 +75,8 @@ static void timing_capture_begin(const uint32_t *task)
     timing_capture_vco=parallelRSPGetVCO();
     timing_capture_t6=parallelRSPGetT6();
     parallelRSPGetF5Context(timing_capture_f5);
+    parallelRSPSaveState(timing_capture_rsp);
+    capture_cp0(timing_capture_cp0);
     timing_capture_nranges = 0;
     timing_capture_incomplete = 0;
 }
@@ -100,6 +104,10 @@ static void timing_capture_end(unsigned int cycles)
             uint32_t pair[2]={HLE_CAPTURE_F5_MAGIC+i,timing_capture_f5[i]};
             fwrite(pair,sizeof(pair),1,timing_capture_file);
         }
+        { uint32_t tag[2]={HLE_CAPTURE_RSP_MAGIC,PARALLEL_RSP_STATE_WORDS};
+          fwrite(tag,sizeof(tag),1,timing_capture_file);
+          fwrite(timing_capture_rsp,sizeof(timing_capture_rsp),1,timing_capture_file); }
+        hle_capture_write_cp0(timing_capture_file,timing_capture_cp0);
     }
     fseek(timing_capture_file, 4, SEEK_SET);
     fwrite(&timing_capture_elapsed, sizeof(timing_capture_elapsed), 1, timing_capture_file);

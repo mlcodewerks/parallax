@@ -5,6 +5,7 @@
 #endif
 #include <stdint.h>
 #include "dpc_bridge.h"
+#include "hle_boot_probe.hpp"
 
 #include "m64p_plugin.h"
 #include "rsp_1.1.h"
@@ -32,6 +33,9 @@ int SP_STATUS_TIMEOUT;
 
 extern "C"
 {
+    uint32_t parallelRSPHleBootProbe(const uint32_t *imem,const uint32_t *dmem,
+        uint32_t *state,uint16_t *vco)
+    { return rsp_hle_boot_probe(imem,dmem,state,vco); }
     uint16_t parallelRSPGetVCO(void)
     {
         return (uint16_t)rsp_get_flags(RSP::cpu.get_state().cp2.flags[RSP::RSP_VCO].e);

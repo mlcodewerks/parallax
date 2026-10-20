@@ -596,7 +596,7 @@ bool retro_load_game(const struct retro_game_info *game)
 #ifdef HAVE_GLRDP
     if (renderer_settings.renderer == RENDERER_GLRDP && !request_gl_context())
     {
-        if (log_cb) log_cb(RETRO_LOG_ERROR, "GLRDP requires a GL3.3 or GLES2 frontend context; content load rejected.\n");
+        if (log_cb) log_cb(RETRO_LOG_ERROR, "GLRDP requires a GL3.3 or GLES3 frontend context; content load rejected.\n");
         return false;
     }
 #endif
@@ -1107,6 +1107,22 @@ EXPORT void retro_debug_vi(uint32_t out[14])
 }
 
 /* Read-only timing snapshot used by benchmarks/headless/benchmark.c. */
+/* Observe a physical RAM word through the matching cached KSEG0 line without
+ * filling, flushing or charging the guest cache. NULL output probes support. */
+EXPORT bool retro_debug_peek_word(uint32_t address, uint32_t *out)
+{
+    struct r4300_core *r = &g_dev.r4300;
+    if ((address & 3) || address >= 0x800000) return false;
+    if (out) {
+        unsigned index = (address >> 4) & 511;
+        if (r->cache_timing == 1 &&
+            (r->dcache_tags[index] & ~2u) == ((address & 0x1ffff000) | 1))
+            *out = r->dcache_words[index][(address >> 2) & 3];
+        else *out = g_dev.rdram.dram[address >> 2];
+    }
+    return true;
+}
+
 EXPORT void retro_debug_timing(uint32_t out[12])
 {
     struct r4300_core *r = &g_dev.r4300;

@@ -18,8 +18,12 @@ void parallelRSPSetDmaCallbacks(void* opaque,
     void (*write)(void*, uint32_t, uint32_t));
 unsigned int parallelRSPExecutedCycles(void);
 enum { PARALLEL_RSP_STATE_WORDS = 369 };
+/* Five scalar control words and 33 GPR words precede the vector bank. */
+enum { PARALLEL_RSP_STATE_VECTOR_OFFSET = 38, PARALLEL_RSP_STATE_FLAGS_OFFSET = 294 };
 void parallelRSPSaveState(uint32_t* words);
 void parallelRSPLoadState(const uint32_t* words);
+uint32_t parallelRSPHleBootProbe(const uint32_t *imem,const uint32_t *dmem,
+    uint32_t *state,uint16_t *vco);
 
 #ifdef __cplusplus
 }

@@ -1,6 +1,8 @@
 #include "gl_loader.hpp"
 #include <cstdio>
 #include <cstring>
+bool glrdp_gles3 = false;
+decltype(glad_glClearDepthf) glad_glClearDepthf = nullptr;
 GLRDPPrecisionQuery glrdp_precision_query = nullptr;
 GLRDPTextureBarrier glrdp_texture_barrier = nullptr;
 decltype(glad_glBufferSubData) glad_glBufferSubData = nullptr;
@@ -99,7 +101,7 @@ decltype(glad_glViewport) glad_glViewport = nullptr;
     glad_##name = reinterpret_cast<decltype(glad_##name)>(resolver(#name));                        \
     if (!glad_##name)                                                                              \
     return false
-bool load_gl33(retro_hw_get_proc_address_t resolver, bool gles2) {
+bool load_gl33(retro_hw_get_proc_address_t resolver, bool gles3) {
     if (!resolver)
         return false;
     LOAD(glGetString);
@@ -110,8 +112,9 @@ bool load_gl33(retro_hw_get_proc_address_t resolver, bool gles2) {
     int major = 0, minor = 0;
     if (std::sscanf(version + (is_es ? 10 : 0), "%d.%d", &major, &minor) != 2)
         return false;
-    if (gles2 ? (!is_es || major < 2) : (is_es || major < 3 || (major == 3 && minor < 3)))
+    if (gles3 ? (!is_es || major < 3) : (is_es || major < 3 || (major == 3 && minor < 3)))
         return false;
+    glrdp_gles3 = gles3;
     LOAD(glActiveTexture);
     LOAD(glAttachShader);
     LOAD(glBindAttribLocation);
@@ -168,11 +171,12 @@ bool load_gl33(retro_hw_get_proc_address_t resolver, bool gles2) {
     LOAD(glUniform2f);
     LOAD(glUniform4f);
     glrdp_precision_query =
-        gles2 ? reinterpret_cast<GLRDPPrecisionQuery>(resolver("glGetShaderPrecisionFormat"))
+        gles3 ? reinterpret_cast<GLRDPPrecisionQuery>(resolver("glGetShaderPrecisionFormat"))
               : nullptr;
-    if (gles2 && !glrdp_precision_query)
+    if (gles3 && !glrdp_precision_query)
         return false;
-    if (!gles2) {
+    glrdp_texture_barrier = nullptr;
+    if (!gles3) {
         // Optional on GL3.3. A non-null procedure alone does not imply support.
         glrdp_texture_barrier = nullptr;
         auto get_string = reinterpret_cast<PFNGLGETSTRINGIPROC>(resolver("glGetStringi"));
@@ -190,6 +194,8 @@ bool load_gl33(retro_hw_get_proc_address_t resolver, bool gles2) {
                     break;
             }
         }
+    }
+    {
         LOAD(glBufferSubData);
         LOAD(glGetUniformBlockIndex);
         LOAD(glUniformBlockBinding);
@@ -205,19 +211,21 @@ bool load_gl33(retro_hw_get_proc_address_t resolver, bool gles2) {
         LOAD(glBlendFuncSeparate);
         LOAD(glBlitFramebuffer);
         LOAD(glClearBufferuiv);
-        LOAD(glClearDepth);
+        if (gles3) { LOAD(glClearDepthf); }
+        else { LOAD(glClearDepth); }
         LOAD(glDeleteVertexArrays);
         LOAD(glDepthFunc);
         LOAD(glDepthMask);
-        LOAD(glDrawBuffer);
+        if (!gles3) { LOAD(glDrawBuffer); }
+        else glad_glDrawBuffer = nullptr;
         LOAD(glDrawBuffers);
         LOAD(glGenVertexArrays);
-        LOAD(glPolygonMode);
+        if (!gles3) { LOAD(glPolygonMode); }
+        else glad_glPolygonMode = nullptr;
         LOAD(glReadBuffer);
         LOAD(glUniform1ui);
         LOAD(glUniform4i);
-    } else
-        glrdp_texture_barrier = nullptr;
+    }
     return true;
 }
 #undef LOAD

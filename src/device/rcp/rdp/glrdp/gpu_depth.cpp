@@ -119,7 +119,7 @@ bool GPUDepthBuffer::allocate_surface(Surface &surface, std::uint32_t address, i
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
 
         glBindTexture(GL_TEXTURE_2D, surface.linear_depth_texture[i]);
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT24, width, height, 0, GL_DEPTH_COMPONENT,
+        glTexImage2D(GL_TEXTURE_2D, 0, (glrdp_gles3 ? GL_DEPTH_COMPONENT32F : GL_DEPTH_COMPONENT24), width, height, 0, GL_DEPTH_COMPONENT,
                      GL_FLOAT, nullptr);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
@@ -127,14 +127,15 @@ bool GPUDepthBuffer::allocate_surface(Surface &surface, std::uint32_t address, i
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
 
         glBindFramebuffer(GL_FRAMEBUFFER, surface.fbo[i]);
-        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D,
+        glFramebufferTexture2D(GL_FRAMEBUFFER, glrdp_depth_attachment(), GL_TEXTURE_2D,
                                surface.state_texture[i], 0);
-        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1, GL_TEXTURE_2D,
+        glFramebufferTexture2D(GL_FRAMEBUFFER, glrdp_acceptance_attachment(), GL_TEXTURE_2D,
                                surface.acceptance_texture[i], 0);
         glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D,
                                surface.linear_depth_texture[i], 0);
-        const GLenum draw_buffers[2] = {GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1};
-        glDrawBuffers(2, draw_buffers);
+        const GLenum draw_buffers[4] = {GL_NONE, GL_NONE, GL_COLOR_ATTACHMENT2, GL_COLOR_ATTACHMENT3};
+        const GLenum desktop_buffers[2] = {GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1};
+        glDrawBuffers(glrdp_gles3 ? 4 : 2, glrdp_gles3 ? draw_buffers : desktop_buffers);
         if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
             destroy_surface(surface);
             return false;
@@ -239,7 +240,7 @@ const GPUDepthBuffer::Surface *GPUDepthBuffer::find(std::uint32_t address) const
 }
 
 bool GPUDepthBuffer::begin_pass(Surface &surface, int x, int y, int width, int height,
-                                bool in_place) {
+                                bool in_place, bool combined_color) {
     if (!surface.initialized || !surface.fbo[0] || !surface.fbo[1])
         return false;
     const int src = surface.active;
@@ -257,18 +258,18 @@ bool GPUDepthBuffer::begin_pass(Surface &surface, int x, int y, int width, int h
         surface.changed_y = y0;
         surface.changed_w = x1 - x0;
         surface.changed_h = y1 - y0;
-        const GLenum shader_buffers[4] = {GL_NONE, GL_NONE, GL_COLOR_ATTACHMENT0,
-                                          GL_COLOR_ATTACHMENT1};
-        glDrawBuffers(4, shader_buffers);
+        const GLenum shader_buffers[4] = {GL_NONE, GL_NONE, glrdp_depth_attachment(),
+                                          glrdp_acceptance_attachment()};
+        if (!combined_color) glDrawBuffers(4, shader_buffers);
         return true;
     }
     const int dst = src ^ 1;
 
     glDisable(GL_SCISSOR_TEST);
     glBindFramebuffer(GL_READ_FRAMEBUFFER, surface.fbo[src]);
-    glReadBuffer(GL_COLOR_ATTACHMENT0);
+    glReadBuffer(glrdp_depth_attachment());
     glBindFramebuffer(GL_DRAW_FRAMEBUFFER, surface.fbo[dst]);
-    glDrawBuffer(GL_COLOR_ATTACHMENT0);
+    glrdp_draw_buffer(glrdp_depth_attachment());
     if (surface.changed_w && surface.changed_h) {
         const int x0 = surface.changed_x, y0 = surface.changed_y;
         const int x1 = x0 + surface.changed_w, y1 = y0 + surface.changed_h;
@@ -281,15 +282,22 @@ bool GPUDepthBuffer::begin_pass(Surface &surface, int x, int y, int width, int h
     surface.changed_h = height;
 
     glBindFramebuffer(GL_FRAMEBUFFER, surface.fbo[dst]);
-    const GLenum reset_buffers[2] = {GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1};
-    glDrawBuffers(2, reset_buffers);
-    glEnable(GL_SCISSOR_TEST);
-    glScissor(x, y, width, height);
-    const GLuint zero[4] = {0, 0, 0, 0};
-    glClearBufferuiv(GL_COLOR, 1, zero);
+    // Combined draws consume acceptance directly in the same invocation. They
+    // never sample the mask, so rejected pixels need no acceptance clear. The
+    // caller sets the combined MRT layout once after attaching its color image.
+    // Separate/upscaled passes still clear before exposing this mask to color.
+    if (!combined_color) {
+        const GLenum reset_buffers[4] = {GL_NONE, GL_NONE, GL_COLOR_ATTACHMENT2, GL_COLOR_ATTACHMENT3};
+        const GLenum desktop_buffers[2] = {GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1};
+        glDrawBuffers(glrdp_gles3 ? 4 : 2, glrdp_gles3 ? reset_buffers : desktop_buffers);
+        glEnable(GL_SCISSOR_TEST);
+        glScissor(x, y, width, height);
+        const GLuint zero[4] = {0, 0, 0, 0};
+        glClearBufferuiv(GL_COLOR, glrdp_gles3 ? 3 : 1, zero);
 
-    const GLenum shader_buffers[4] = {GL_NONE, GL_NONE, GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1};
-    glDrawBuffers(4, shader_buffers);
+        const GLenum shader_buffers[4] = {GL_NONE, GL_NONE, glrdp_depth_attachment(), glrdp_acceptance_attachment()};
+        glDrawBuffers(4, shader_buffers);
+    }
     return true;
 }
 
@@ -370,10 +378,16 @@ void GPUDepthBuffer::store_to_rdram(std::uint32_t address, N64Memory &memory,
 
     std::vector<std::uint32_t> states(pixels, kDefaultState);
     glBindFramebuffer(GL_READ_FRAMEBUFFER, surface->fbo[surface->active]);
-    glReadBuffer(GL_COLOR_ATTACHMENT0);
+    glReadBuffer(glrdp_depth_attachment());
     glPixelStorei(GL_PACK_ALIGNMENT, 1);
-    glReadPixels(0, 0, surface->width, surface->height, GL_RED_INTEGER, GL_UNSIGNED_INT,
-                 states.data());
+    if (glrdp_gles3) {
+        // RGBA_INTEGER/UNSIGNED_INT is the portable ES3 integer readback pair.
+        std::vector<std::uint32_t> rgba(pixels * 4);
+        glReadPixels(0, 0, surface->width, surface->height, GL_RGBA_INTEGER, GL_UNSIGNED_INT, rgba.data());
+        for (std::size_t i = 0; i < pixels; ++i) states[i] = rgba[i * 4];
+    } else {
+        glReadPixels(0, 0, surface->width, surface->height, GL_RED_INTEGER, GL_UNSIGNED_INT, states.data());
+    }
 
     for (int y = 0; y < surface->height; ++y) {
         const int gl_y = surface->height - 1 - y;

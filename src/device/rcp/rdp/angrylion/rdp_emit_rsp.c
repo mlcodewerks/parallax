@@ -14,6 +14,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <stdio.h>
+
 #include <string.h>
 #include "rdp_emit_rsp.h"
 
@@ -255,6 +256,22 @@ int32_t rsp_rsq32(int32_t in32)
 
 /* Per-lane 48-bit accumulator, kept sign-extended in 64 bits. */
 typedef int64_t RspAcc;
+static unsigned int s_graphics_carry,s_vertex_half;
+static int s_sdk_ones[8]={1,1,1,1,1,1,1,1};
+static int s_sdk_xl_active;
+static int32_t s_sdk_xl[3];
+void rsp_sdk_triangle_xl(const int32_t *x)
+{
+    s_sdk_xl_active=x!=0;if(x)memcpy(s_sdk_xl,x,sizeof(s_sdk_xl));
+}
+void rsp_graphics_entry_carry(unsigned int carry){s_graphics_carry=carry;}
+void rsp_graphics_sdk_boot(int on)
+{
+    unsigned int k;for(k=0;k<8;k++)s_sdk_ones[k]=1-(on?((s_graphics_carry>>k)&1u):0);
+    s_vertex_half=0;
+}
+void rsp_vertex_pair_half(unsigned int half){s_vertex_half=half&1u;}
+int rsp_graphics_sdk_one(unsigned int lane){return s_sdk_ones[lane&7u];}
 
 #define U16(x) ((int32_t)((x) & 0xffffu))
 #define S16(x) ((int32_t)(int16_t)(x))
@@ -366,7 +383,221 @@ static Rsp32 mac32(Rsp32 a, Rsp32 b, RspAcc *acc_out)
     return o;
 }
 
+/* S2DEX2 RECTANGLE_R, one independent X/Y lane group. The reciprocal
+ * folds, unsigned extent multiply, accumulator-low ALU writes and carry
+ * into the endpoint follow the resident d80/bb4/c50 vector chains. */
+int rsp_s2dex_rect_axis(int obj, int scale, int extent, int base_scale,
+                        int trans, const int16_t c[6], int flip,
+                        int clip_min, int clip_max, int frac_scale, int truncate, int out[4])
+{
+    Rsp32 base_rcp = mk32(rsp_rcp16(base_scale)), pos, eff, span, rcp, delta;
+    RspAcc acc;
+    int start, finish, step, tex, coord_frac, sum, lo, hi, frac;
+    acc = p_udn(1, base_rcp.i) + p_udn(base_rcp.f, 1);
+    base_rcp.f = acc_clamp_low(acc);
+    acc += p_udh(base_rcp.i, 1);
+    base_rcp.i = acc_clamp_mid(acc);
+    acc = p_udm(obj, 0x0800);
+    pos.i = acc_clamp_mid(acc); pos.f = acc_clamp_low(acc);
+    pos = mac32(pos, base_rcp, &acc);
+    coord_frac = pos.f;
+    acc = (acc & ~(RspAcc)0xffff) |
+        U16(clamp_s16(S16(trans) + c[2]) & U16(c[3]));
+    acc += p_udn(pos.i, 1);
+    start = S16(acc_clamp_low(acc));
+    acc = p_udm(base_scale, 0x40);
+    eff.i = acc_clamp_mid(acc); eff.f = acc_clamp_low(acc);
+    acc = p_udn(eff.f, scale) + p_udh(eff.i, scale);
+    step = S16(acc_clamp_mid(acc));
+    rcp = mk32(rsp_rcp16(step));
+    sum = U16(rcp.f) + U16(rcp.i);
+    rcp.f = U16(sum);
+    rcp.i = U16(clamp_s16(S16(rcp.i) + (sum >> 16)));
+    acc = p_udn(clamp_s16(S16(extent) - c[1]), 0x100);
+    delta.i = acc_clamp_mid(acc); delta.f = acc_clamp_low(acc);
+    span = mac32(delta, rcp, &acc);
+    sum = U16(coord_frac) + U16(span.f);
+    finish = clamp_s16(start + S16(span.i) + (truncate?0:(sum >> 16)));
+    if (finish > clip_max) finish = clip_max;
+    tex = c[0];
+    if (flip) {
+        acc = (acc & ~(RspAcc)0xffff) |
+            U16(clamp_s16(c[0] + clamp_s16(S16(extent) - c[1])));
+        tex = S16(acc_clamp_low(acc + p_udn(1,-1)));
+        step = S16(0 - step);
+    }
+    tex = clamp_s16(tex + c[4]);
+    lo = clamp_s16(start - clip_min);
+    if (start >= clip_min) lo = 0;
+    else start = clip_min;
+    if (start >= finish) return 0;
+    acc = p_udh(lo, step);
+    lo = (int)((uint64_t)acc >> 16) & 0xffff;
+    hi = (int)((uint64_t)acc >> 32) & 0xffff;
+    acc = p_udl(lo, -512) + p_udm(hi, -512) + p_udn(lo, -1);
+    acc += p_udn(1, tex);
+    tex = S16(acc_clamp_low(acc));
+    frac = U16(start) & U16(c[5]);
+    /* v30[7] selects lane 3 (zero) for X and lane 7 (0x200) for Y. */
+    frac = clamp_s16(frac * frac_scale);
+    acc = p_udm(step, frac);
+    tex = clamp_s16(tex - S16(acc_clamp_mid(acc)));
+    out[0] = start; out[1] = finish; out[2] = tex; out[3] = step;
+    return 1;
+}
+
 /* ---- vertex 1/w ------------------------------------------------------- */
+
+/* The sprite overlay has its own affine, unshaded triangle writer. Its
+ * four attributes are S, T, constant W and screen Y. In particular the
+ * fourth lane is observable even though the RDP does not sample it. */
+void rsp_s2dex_sprite_corners(int16_t out[4][4],const int obj[6],
+    const int32_t matrix[6],unsigned int mode,unsigned int flags)
+{
+    static const uint32_t corrections[8]={0,0x00100020,0x00200040,0x00300060,
+        0x0000fff4,0x00100014,0x00200034,0x00300054};
+    static const unsigned char order[4][8]={
+        {1,0,0,1,0,1,0,1},{0,1,1,0,0,1,0,1},
+        {0,1,1,0,1,0,1,0},{1,0,0,1,1,0,1,0}};
+    int xy[2][4],st[2][4],extent,span,origin,mask,axis,k,swap,j;
+    unsigned int select=(((uint32_t)matrix[2]>>31)^((uint32_t)matrix[3]>>31)) |
+        (((uint32_t)matrix[3]>>31)<<1);
+    uint32_t correction=corrections[(mode>>4)&7];
+    Rsp32 r,scaled;RspAcc a;
+    for(axis=0;axis<2;axis++) {
+        r=mk32(rsp_rcp16(obj[axis*3+1]));
+        k=U16(r.f)+U16(r.i);r.f=U16(k);
+        r.i=clamp_s16(S16(r.i)+(k>>16));
+        extent=clamp_s16(S16(obj[axis*3+2])-S16(correction));
+        a=p_udl(extent,r.f)+p_udm(extent,r.i);
+        scaled.i=acc_clamp_mid(a);scaled.f=acc_clamp_low(a);
+        a=p_udm(scaled.i,0x100)+p_udl(scaled.f,0x100);
+        span=acc_clamp_low(a);
+        origin=clamp_s16(S16(correction>>16)+((mode&8)?-16:0));
+        for(k=0;k<4;k++) {
+            mask=order[select][axis*4+k];
+            xy[axis][k]=S16(acc_clamp_mid(p_udh(1,obj[axis*3])+p_udh(mask,span)));
+            mask^=!!(flags&(axis?16:1));
+            st[axis][k]=S16(acc_clamp_mid(p_udh(1,origin)+p_udh(mask,extent)));
+        }
+    }
+    for(k=0;k<4;k++) {
+        out[k][0]=(int16_t)st[0][k];out[k][1]=(int16_t)st[1][k];
+        for(axis=0;axis<2;axis++) {
+            int trans=clamp_s16(S16(matrix[4+axis])+((mode&8)?0:1))&((mode&8)?0xffff:0xfffc);
+            int32_t x=matrix[axis*2],y=matrix[axis*2+1];
+            a=p_udh(1,trans)+p_udm(xy[0][k],x)+p_udh(xy[0][k],(uint32_t)x>>16);
+            a+=p_udm(xy[1][k],y)+p_udh(xy[1][k],(uint32_t)y>>16);
+            out[k][axis+2]=(int16_t)acc_clamp_mid(a);
+        }
+    }
+    /* The overlay sorts the two corner pairs by Y, carrying ST with XY. */
+    for(k=0;k<4;k+=2) {
+        swap=out[k][3]>=out[k+1][3];
+        if(swap)for(j=0;j<4;j++) {
+            int16_t v=out[k][j];out[k][j]=out[k+1][j];out[k+1][j]=v;
+        }
+    }
+}
+
+void rsp_s2dex_sprite_triangle(int32_t packet[24], const int16_t h[4],
+    const int16_t m[4], const int16_t l[4], unsigned int tile)
+{
+    int32_t hv[7], mv[7], lv[7], lh[7], mh[7], hm[7], lm[7];
+    Rsp32 edge_rcp[3], edge[3], dx[7], dy[7], de[7], base[7];
+    Rsp32 cross, inv, numer, temp;
+    RspAcc a, area;
+    int k, j, norm, sum, frac, offset, sign;
+    for (k=0;k<7;k++) {
+        hv[k]=k<3?h[2]:k==3?h[0]:k==4?h[1]:k==5?0x7fff:h[3];
+        mv[k]=k<3?m[2]:k==3?m[0]:k==4?m[1]:k==5?0x7fff:m[3];
+        lv[k]=k<3?l[2]:k==3?l[0]:k==4?l[1]:k==5?0x7fff:l[3];
+        lh[k]=clamp_s16(lv[k]-hv[k]);
+        mh[k]=clamp_s16(mv[k]-hv[k]);
+        hm[k]=clamp_s16(hv[k]-mv[k]);
+        lm[k]=clamp_s16(lv[k]-mv[k]);
+    }
+    area=p_udh(lh[2],mh[6])+p_udh(hm[2],lh[6]);
+    sign=((uint64_t)area>>47)&1;
+    norm=llabs(area>>32)<8?0x8000:0x100;
+    cross.i=((uint64_t)area>>32)&0xffff;
+    cross.f=((uint64_t)area>>16)&0xffff;
+    a=p_udl(cross.f,norm)+p_udm(cross.i,norm);
+    cross.i=acc_clamp_mid(a); cross.f=acc_clamp_low(a);
+    inv=mk32(rsp_rcp32(r32(cross)));
+    for(j=0;j<3;j++) {
+        int delta=j==0?lh[6]:j==1?mh[6]:lm[6];
+        edge_rcp[j]=mk32(rsp_rcp16(delta));
+        sum=U16(edge_rcp[j].f)+U16(edge_rcp[j].i);
+        edge_rcp[j].f=U16(sum);
+        edge_rcp[j].i=clamp_s16(S16(edge_rcp[j].i)+(sum>>16));
+        a=p_udn(edge_rcp[j].f,2);temp.f=acc_clamp_low(a);
+        a+=p_udh(edge_rcp[j].i,2);temp.i=acc_clamp_mid(a);
+        edge_rcp[j]=temp;
+        a=p_udl(temp.f,delta)+p_udm(temp.i,delta);
+        temp.i=acc_clamp_mid(a);temp.f=acc_clamp_low(a);
+        sum=0-U16(temp.f);
+        temp.f=U16(sum);
+        temp.i=clamp_s16(2-S16(temp.i)-(sum<0));
+        edge_rcp[j]=mac32(edge_rcp[j],temp,0);
+        a=p_udn(edge_rcp[j].f,j==0?lh[2]:j==1?mh[2]:lm[2]);
+        a+=p_udh(edge_rcp[j].i,j==0?lh[2]:j==1?mh[2]:lm[2]);
+        edge[j].i=((uint64_t)a>>32)&0xffff;
+        edge[j].f=((uint64_t)a>>16)&0xffff;
+    }
+    for(k=0;k<7;k++) {
+        a=p_udh(lh[k],mh[6])+p_udh(hm[k],lh[6]);
+        numer.i=((uint64_t)a>>32)&0xffff;
+        numer.f=((uint64_t)a>>16)&0xffff;
+        dx[k]=mac32(numer,inv,0);
+        a=p_udh(mh[k],lh[2])+p_udh(lh[k],hm[2]);
+        numer.i=((uint64_t)a>>32)&0xffff;
+        numer.f=((uint64_t)a>>16)&0xffff;
+        dy[k]=mac32(numer,inv,0);
+        a=p_udl(dx[k].f,norm)+p_udm(dx[k].i,norm);
+        dx[k].i=acc_clamp_mid(a);dx[k].f=acc_clamp_low(a);
+        a=p_udn(dx[k].f,8);dx[k].f=acc_clamp_low(a);
+        a+=p_udh(dx[k].i,8);dx[k].i=acc_clamp_mid(a);
+        a=p_udl(dy[k].f,norm)+p_udm(dy[k].i,norm);
+        dy[k].i=acc_clamp_mid(a);dy[k].f=acc_clamp_low(a);
+        a=p_udn(dy[k].f,8);dy[k].f=acc_clamp_low(a);
+        a+=p_udh(dy[k].i,8);dy[k].i=acc_clamp_mid(a);
+        mac32(dx[k],edge[0],&a);
+        a+=p_udn(dy[k].f,1);de[k].f=acc_clamp_low(a);
+        a+=p_udh(dy[k].i,1);de[k].i=acc_clamp_mid(a);
+        offset=-(hv[6]&3);
+        temp=mk32((int32_t)((uint32_t)offset*0x4000u));
+        a=p_udh(hv[k],1)+p_udl(de[k].f,temp.f)+p_udm(de[k].i,temp.f);
+        a+=p_udn(de[k].f,temp.i);base[k].f=acc_clamp_low(a);
+        a+=p_udh(de[k].i,temp.i);base[k].i=acc_clamp_mid(a);
+    }
+    packet[0]=(int32_t)(((0xa00u|(tile<<8)|(sign<<7))<<16)|(uint16_t)lv[6]);
+    packet[1]=(int32_t)(((uint32_t)(uint16_t)mv[6]<<16)|(uint16_t)hv[6]);
+    packet[2]=(int32_t)((uint32_t)mv[2]<<14);
+    packet[3]=r32(edge[2]);
+    temp=mac32(edge[0],(Rsp32){0,0x4000},0);
+    offset=-(hv[6]&3);
+    a=p_udn(0x4000,hv[2])+p_udn(temp.f,offset)+p_udh(temp.i,offset);
+    packet[4]=(int32_t)(((uint32_t)U16(acc_clamp_mid(a))<<16)|U16(acc_clamp_low(a)));
+    packet[5]=r32(edge[0]);
+    temp=mac32(edge[1],(Rsp32){0,0x4000},0);
+    a=p_udn(0x4000,hv[2])+p_udn(temp.f,offset)+p_udh(temp.i,offset);
+    sum=U16(acc_clamp_low(a))+(S16(edge[0].i)<0?0:1);
+    frac=U16(sum);
+    packet[6]=(int32_t)(((uint32_t)U16(clamp_s16(S16(acc_clamp_mid(a))+(sum>>16)))<<16)|frac);
+    packet[7]=r32(edge[1]);
+    for(j=0;j<4;j++) {
+        Rsp32 *v=j==0?base:j==1?dx:j==2?de:dy;
+        int at=8+(j/2)*8+(j%2)*2;
+        for(k=0;k<2;k++) {
+            packet[at+k]=(int32_t)(((uint32_t)U16(v[3+k*2].i)<<16)|U16(v[4+k*2].i));
+            packet[at+4+k]=(int32_t)(((uint32_t)U16(v[3+k*2].f)<<16)|U16(v[4+k*2].f));
+        }
+    }
+#ifdef S2DEX_ARITH_TRACE
+    for(k=3;k<7;k++)fprintf(stderr,"HLE %d dx=%08x dy=%08x de=%08x base=%08x\n",k,r32(dx[k]),r32(dy[k]),r32(de[k]),r32(base[k]));
+#endif
+}
 
 /* The vertex-processing reciprocal: raw vrcp32, then the microcode's
  * Newton-Raphson step r' = r * (4 - 4 * w * r) carried out with the exact
@@ -432,16 +663,16 @@ static int32_t acc_read_unsigned(RspAcc a)
  * normalizes, the result is scaled by 0x100, and the s8 the microcode
  * stores with spv is the top byte of the integer lane. mv is the s15.16
  * modelview matrix; dir/out are s8 triples. */
-void rsp_light_dir_xfrm_one(const int32_t mv[4][4],
-                            const int32_t dir[3], int32_t out[3])
+void rsp_light_dir_xfrm_four(const int32_t mv[4][4],
+                            const int32_t dir[3], int32_t out[4])
 {
-    int32_t t_mid[3], t_hi[3];
+    int32_t t_mid[4], t_hi[4];
     int32_t sq_lo[3], sq_mid[3];
     int32_t lo, ci, si;
     Rsp32 r;
     int L;
 
-    for (L = 0; L < 3; L++)
+    for (L = 0; L < 4; L++)
     {
         RspAcc acc = 0;
         int ax;
@@ -478,7 +709,7 @@ void rsp_light_dir_xfrm_one(const int32_t mv[4][4],
         si = clamp_s16(si + S16(sq_mid[2]) + carry);
     }
     r = mk32(rsp_rsq32((int32_t)(((uint32_t)U16(si) << 16) | (uint32_t)U16(lo))));
-    for (L = 0; L < 3; L++)
+    for (L = 0; L < 4; L++)
     {
         int32_t n_lo, n_mid;
         RspAcc acc = p_udl(t_mid[L], r.f);
@@ -493,6 +724,12 @@ void rsp_light_dir_xfrm_one(const int32_t mv[4][4],
         n_mid = acc_clamp_mid(acc);
         out[L] = (int32_t)(signed char)((n_mid >> 8) & 0xff);
     }
+}
+
+void rsp_light_dir_xfrm_one(const int32_t mv[4][4],const int32_t dir[3],int32_t out[3])
+{
+    int32_t all[4];int k;rsp_light_dir_xfrm_four(mv,dir,all);
+    for(k=0;k<3;k++)out[k]=all[k];
 }
 
 /* The ZSortBOSS TRANSFORMLIGHTS normalize (IMEM 0x570): like the F3DEX2
@@ -626,6 +863,36 @@ void rsp_light_vtx(const int32_t n[3], const int32_t amb[3],
     }
     for (c = 0; c < 3; c++)
         out[c] = (lt[c] >> 7) & 0xff;
+}
+
+/* Early lighting rounds each axis product before the two saturating
+ * VADDs, then rounds each light's colour contribution separately. */
+void rsp_light_vtx_legacy(const int32_t n[3],const int32_t amb[3],
+    const int32_t (*rgb)[3],const int32_t (*dirs)[3],int num,int32_t out[3])
+{
+#ifdef RSP_LIGHT_OBSERVE
+    RSP_LIGHT_OBSERVE(n,dirs,num);
+#endif
+    int i,c;
+    int32_t colour[3];
+    if(num>0)hle_timing_add(HLE_WORK_LIGHT,(unsigned int)num);
+    for(c=0;c<3;c++)colour[c]=(amb[c]&255)<<7;
+    for(i=num-1;i>=0;i--) {
+        int axis;
+        int32_t dot=0;
+        for(axis=0;axis<3;axis++) {
+            RspAcc acc=2*(RspAcc)(int16_t)((n[axis]&255)<<8)
+                *(int16_t)((dirs[i][axis]&255)<<8)+0x8000;
+            dot=clamp_s16(dot+S16(acc_read_signed(acc)));
+        }
+        for(c=0;c<3;c++) {
+            RspAcc acc=2*(RspAcc)((rgb[i][c]&255)<<7)*dot+0x8000;
+            int32_t contribution=S16(acc_read_signed(acc));
+            if(contribution<0)contribution=0;
+            colour[c]=clamp_s16(colour[c]+contribution);
+        }
+    }
+    for(c=0;c<3;c++)out[c]=(colour[c]>>7)&255;
 }
 
 /* ---- positional lighting (light_point) -------------------------------- */
@@ -805,7 +1072,7 @@ void rsp_texgen(const int32_t n[3], const int32_t l0[3], const int32_t l1[3],
     for (k = 0; k < 2; k++)
     {
         /* vmudh vOne, 0x4000 then vmacf mask, dot */
-        acc[k] = ((RspAcc)0x4000) << 16;
+        acc[k] = ((RspAcc)(0x4000*s_sdk_ones[2+k+4*(s_vertex_half^1u)])) << 16;
         acc[k] += 2 * (RspAcc)0x4000 * dot[k];
         st[k] = (int32_t)(int16_t)acc_read_signed(acc[k]);
     }
@@ -816,7 +1083,7 @@ void rsp_texgen(const int32_t n[3], const int32_t l0[3], const int32_t l1[3],
             int32_t st1, sq, v3;
             RspAcc a2;
             /* vmadh vOne, 0xC000: continue the accumulator with -0x4000 */
-            acc[k] += ((RspAcc)(int32_t)(int16_t)0xC000) << 16;
+            acc[k] += ((RspAcc)(-0x4000*s_sdk_ones[2+k+4*(s_vertex_half^1u)])) << 16;
             st1 = (int32_t)(int16_t)acc_read_signed(acc[k]);
             /* vmulf(st, st) */
             sq = (int32_t)(int16_t)acc_read_signed(
@@ -827,7 +1094,7 @@ void rsp_texgen(const int32_t n[3], const int32_t l0[3], const int32_t l1[3],
                                + 2 * (RspAcc)st1 * 0x6cb3);
             /* vmudh vOne, 0x4000 (accumulator reset, result discarded),
              * vmacf(st, 0x44D3), vmacf(sq, v3) */
-            a2 = ((RspAcc)0x4000) << 16;
+            a2 = ((RspAcc)(0x4000*s_sdk_ones[2+k+4*(s_vertex_half^1u)])) << 16;
             a2 += 2 * (RspAcc)st1 * 0x44d3;
             a2 += 2 * (RspAcc)sq * v3;
             st[k] = (int32_t)(int16_t)acc_read_signed(a2);
@@ -882,6 +1149,13 @@ void rsp_set_clip_lerp_l3dex(int on)
 {
     s_clip_lerp_l3dex = on ? 1 : 0;
     s_clip_lerp_seed3 = on ? 1 : 0;
+}
+void rsp_set_clip_lerp_gbi1(void)
+{
+    s_clip_lerp_l3dex=1;
+    /* Only the final factor multiply has the +3 seed. The shared divide
+     * routine re-latches the doubled reciprocal after its high term. */
+    s_clip_lerp_seed3=2;
 }
 
 static int s_vtx_invw_2rd = 0;
@@ -1004,6 +1278,10 @@ static int s_vtx_z_quant = 0;
 void rsp_set_vtx_z_quant(int on)
 {
     s_vtx_z_quant = on ? 1 : 0;
+}
+void rsp_set_vtx_z_signed(int on)
+{
+    s_vtx_z_quant=(s_vtx_z_quant&1)|(on?2:0);
 }
 
 /* Wipeout 64's clip build: the l3dex two-rounding fold without the +3
@@ -1128,7 +1406,7 @@ void rsp_clip_lerp(const int32_t on_pos[4], const int32_t off_pos[4],
      * F3DEX2 chain does not have. It is what keeps a generated vertex
      * on the inside of the plane it was clipped against, which in turn
      * decides the stored quarter-pixel at a screen edge. */
-    acc = (s_clip_lerp_seed3 && !s_tri_attr_dkr) ? 3 : 0;
+    acc = (s_clip_lerp_seed3==1 && !s_tri_attr_dkr) ? 3 : 0;
     acc += p_udl(v10[3], rcp_lo) + p_udm(v11[3], rcp_lo);
     v11[3] = acc_clamp_mid(acc);
     v10[3] = acc_clamp_low(acc);
@@ -1154,7 +1432,7 @@ void rsp_clip_lerp(const int32_t on_pos[4], const int32_t off_pos[4],
         r2_lo = acc_clamp_low(acc);
         acc += p_udh(r2_hi, 2);
         r2_hi = acc_clamp_mid(acc);
-        if (s_tri_attr_dkr) r2_lo = acc_clamp_low(acc);
+        if (s_tri_attr_dkr || s_clip_lerp_seed3==2) r2_lo = acc_clamp_low(acc);
         acc = p_udl(r2_lo, v10[3]) + p_udm(r2_hi, v10[3]);
         acc += p_udn(r2_lo, v11[3]);
         x_lo = acc_clamp_low(acc);
@@ -1223,6 +1501,12 @@ void rsp_clip_lerp(const int32_t on_pos[4], const int32_t off_pos[4],
         ne  = (ff != 1);
         vcc = (fi > 0) | ((fi == 0) & !(ne & cob));
         fade = vcc ? ff : 1;
+        if(s_clip_lerp_seed3==2) {
+            /* GBI1 uses VEQ(high,0), then VNE(low,0), rather than
+             * signed range comparisons. Negative high halves select FFFF. */
+            ff=fi==0?U16(v10[3]):0xffff;
+            fade=ff?ff:1;
+        }
     }
     acc = p_udn(fade, -1);
     onfade = acc_clamp_low(acc);            /* 0x10000 - fade, low half */
@@ -1500,6 +1784,7 @@ int rsp_vtx_screen_rs(int32_t cx, int32_t cy, int32_t cz, int32_t cw,
     return rsp_vtx_screen_refined(cx,cy,cz,cw,pn,vs,vt,sx,sy,sz,iw,0);
 }
 
+static uint16_t s_projection_i[3],s_projection_f[3];
 int rsp_vtx_screen(int32_t cx, int32_t cy, int32_t cz, int32_t cw,
                    int32_t pn,
                    int32_t vsx, int32_t vsy, int32_t vsz,
@@ -1513,9 +1798,6 @@ int rsp_vtx_screen(int32_t cx, int32_t cy, int32_t cz, int32_t cw,
     int32_t scr_i[3], scr_f[3];
     RspAcc acc;
     int lane;
-
-    if (cw <= 0)
-        return 0;
 
     pos[0] = mk32(cx);
     pos[1] = mk32(cy);
@@ -1577,7 +1859,7 @@ int rsp_vtx_screen(int32_t cx, int32_t cy, int32_t cz, int32_t cw,
     else
     {
         t = mac32(pw, r, 0);
-        acc = p_udh(1, 4);
+        acc = p_udh(s_sdk_ones[3+s_vertex_half*4], 4);
         acc += p_udn(t.f, -4);
         u.f = acc_clamp_low(acc);
         acc += p_udh(t.i, -4);
@@ -1586,6 +1868,11 @@ int rsp_vtx_screen(int32_t cx, int32_t cy, int32_t cz, int32_t cw,
     }
     if (invw_out)
         *invw_out = (int32_t)(((uint32_t)U16(iw.i) << 16) | (uint32_t)U16(iw.f));
+
+    /* VGE of the input W integer selects 7FFF for the projection's
+     * inverse-W high half behind the eye. The stored reciprocal above
+     * remains signed. The native pipeline also runs when W is zero. */
+    if(cw<0)iw.i=0x7fff;
 
     /* raw position x reciprocal, then x perspNorm, then viewport */
     for (lane = 0; lane < 3; lane++)
@@ -1613,6 +1900,10 @@ int rsp_vtx_screen(int32_t cx, int32_t cy, int32_t cz, int32_t cw,
         scr_i[lane] = acc_clamp_mid(acc);
     }
 
+    for(lane=0;lane<3;lane++) {
+        s_projection_i[lane]=(uint16_t)scr_i[lane];
+        s_projection_f[lane]=(uint16_t)scr_f[lane];
+    }
     *sx102 = (int32_t)(int16_t)scr_i[0];
     *sy102 = (int32_t)(int16_t)scr_i[1];
     if (s_vtx_y_round)
@@ -1638,10 +1929,10 @@ int rsp_vtx_screen(int32_t cx, int32_t cy, int32_t cz, int32_t cw,
      * fourth texture lane. */
     {
         int32_t zi = (int32_t)(int16_t)scr_i[2];
-        if (zi < 0)
+        if (zi < 0 && !(s_vtx_z_quant&2))
             zi = 0;
         *sz1616 = (int32_t)(((uint32_t)U16(zi) << 16) | (uint32_t)U16(scr_f[2]));
-        if (s_vtx_z_quant)
+        if (s_vtx_z_quant&1)
         {
             /* T3DUX: quantize the stored z to the nearest multiple of 4 in
              * the integer lane (fraction dropped) -- the low-precision
@@ -1774,6 +2065,11 @@ static Rsp32 sub32(Rsp32 a, Rsp32 b)
     o.i = clamp_s16(S16(a.i) - S16(b.i) - borrow) & 0xffff;
     return o;
 }
+static Rsp32 add32(Rsp32 a,Rsp32 b)
+{
+    Rsp32 o;int sum=U16(a.f)+U16(b.f);
+    o.f=U16(sum);o.i=clamp_s16(S16(a.i)+S16(b.i)+(sum>>16));return o;
+}
 
 /* vaddc/vadd 32-bit pair add (fraction wraps with carry out, integer
  * saturates). */
@@ -1784,6 +2080,85 @@ static Rsp32 addv32(Rsp32 a, Rsp32 b)
     o.f = (a.f + b.f) & 0xffff;
     o.i = clamp_s16(S16(a.i) + S16(b.i) + carry) & 0xffff;
     return o;
+}
+
+/* F3DEXBG's point-light overlay: clip-space coordinate modification,
+ * four-lane squared distance, table reciprocal, per-light signed clamp and
+ * the final VMULF/SUV colour modulation. The reserved final light slot does
+ * not contribute to RGB; the native loop processes the preceding pairs. */
+static void cbfd_light(const int32_t clip[4], const int32_t coord[16],
+    const int32_t (*positions)[4], const int32_t (*rgb)[3],
+    const int32_t *attenuation, int num, const int32_t source[3],
+    const int32_t *normal, const int32_t (*directions)[3], int positional, int32_t out[3])
+{
+    int32_t position[4], colour[3];
+    int32_t previous[3]={0,0,0};
+    int k, light;
+    for (k=0;k<4;k++) {
+        Rsp32 p=mk32(clip[k]), scale;
+        p.i=clamp_s16(S16(p.i)+S16(coord[8+k]));
+        scale.i=coord[k];scale.f=coord[4+k];
+        position[k]=S16(mac32(p,scale,0).i);
+    }
+    for (k=0;k<3;k++) colour[k]=(rgb[num][k]&255)<<7;
+    if (normal && num>0) {
+        RspAcc dot_acc=0x8000;
+        int32_t dot;
+        for(k=0;k<3;k++)
+            dot_acc+=(RspAcc)S16((normal[k]&255)<<8)*S16((directions[num-1][k]&255)<<8)*2;
+        /* The dominant light feeds VMACF without the point loop's 7fff
+         * mask. Its unsigned overflow value ffff is therefore signed -1. */
+        dot=S16(acc_read_unsigned(dot_acc));
+        for(k=0;k<3;k++)
+            colour[k]=S16(acc_clamp_mid((RspAcc)colour[k]*0x7fff*2+0x8000
+                +(RspAcc)((rgb[num-1][k]&255)<<7)*dot*2));
+    }
+    for (light=num-2;light>=0;--light) {
+        Rsp32 square[4], distance, reciprocal, ca, factor;
+        for (k=0;k<4;k++) {
+            int32_t d=clamp_s16(position[k]-S16(positions[light][k]));
+            uint32_t product=(uint32_t)(d*d);
+            square[k]=mk32((int32_t)product);
+        }
+        distance=addv32(addv32(square[0],square[1]),addv32(square[2],square[3]));
+        reciprocal=mk32(rsp_rcp32((int32_t)(((uint32_t)U16(distance.i)<<16)|U16(distance.f))));
+        ca=mk32((attenuation[light]&255)<<12);
+        factor=mac32(reciprocal,ca,0);
+        for (k=0;k<3;k++) {
+            int32_t limit=(rgb[light][k]&255)<<7;
+            RspAcc acc=p_udm(limit,factor.f)+p_udh(limit,factor.i);
+            int32_t contribution=S16(acc_clamp_mid(acc));
+            if (contribution>limit) contribution=limit;
+            if (normal && positional) {
+                if (light&1) previous[k]=contribution;
+                else {
+                    int32_t dot1=rsp_light_dot(normal,directions[light+1]);
+                    int32_t dot2=rsp_light_dot(normal,directions[light]);
+                    RspAcc fold=(RspAcc)S16(colour[k])*0x7fff*2+0x8000;
+                    fold+=(RspAcc)previous[k]*dot1*2+(RspAcc)contribution*dot2*2;
+                    colour[k]=S16(acc_clamp_mid(fold));
+                }
+            } else colour[k]=clamp_s16(colour[k]+contribution);
+        }
+    }
+    for (k=0;k<3;k++) {
+        RspAcc acc=(RspAcc)S16(colour[k])*((source[k]&255)<<7)*2+0x8000;
+        out[k]=(U16(acc_clamp_mid(acc))>>7)&255;
+    }
+}
+
+void rsp_cbfd_light(const int32_t clip[4], const int32_t coord[16],
+    const int32_t (*positions)[4], const int32_t (*rgb)[3],
+    const int32_t *attenuation, int num, const int32_t source[3], int32_t out[3])
+{
+    cbfd_light(clip,coord,positions,rgb,attenuation,num,source,0,0,0,out);
+}
+void rsp_cbfd_light_normal(const int32_t clip[4], const int32_t coord[16],
+    const int32_t (*positions)[4], const int32_t (*rgb)[3],
+    const int32_t *attenuation, int num, const int32_t source[3],
+    const int32_t normal[3], const int32_t (*directions)[3], int positional, int32_t out[3])
+{
+    cbfd_light(clip,coord,positions,rgb,attenuation,num,source,normal,directions,positional,out);
 }
 
 /* Rogue Squadron's clip intersection weights (clip overlay, live IMEM
@@ -1980,6 +2355,113 @@ int32_t rsp_clip_blend16_rs(int32_t a, int32_t b, int32_t wc, int32_t wt)
  * along-line interpolation carries the primitive's depth. Body
  * Harvest's line build interpolates all three on the RSP; this is the
  * linear approximation of its stream, not a transcription. */
+
+/* Affine L3DEX2 line setup. Keep all eight integer/fraction lanes: the
+ * texture block and depth are generated by the same attribute walks as
+ * shade, and even the affine W lane has a native half-unit fraction. */
+int rsp_line_native(int32_t *cmd,const RspTriVtx *a,const RspTriVtx *b,
+    int width,unsigned int flags,unsigned int tile,const int32_t scissor[2])
+{
+    const RspTriVtx *h=a,*l=b;
+    Rsp32 ah[8],al[8],delta[8],dx[8],dy[8],de[8],base[8];
+    Rsp32 rcp[2],dxy[2],slope[2],anchor,negative,wide;
+    int d[2],major,transpose,top,bottom,middle,k,j,n,left,wd=width+3;
+    RspAcc acc;
+    if(b->y<a->y){h=b;l=a;}
+    d[0]=clamp_s16(l->x-h->x);d[1]=clamp_s16(l->y-h->y);
+    major=abs(d[0])>abs(d[1]);
+    for(k=0;k<2;k++) {
+        rcp[k]=mk32(rsp_rcp16(d[k]));
+        acc=p_udl(rcp[k].f,8)+p_udm(rcp[k].i,8);
+        rcp[k].i=acc_clamp_mid(acc);rcp[k].f=acc_clamp_low(acc);
+        acc=p_udm(d[k],0x4000);
+        dxy[k].i=acc_clamp_mid(acc);dxy[k].f=acc_clamp_low(acc);
+    }
+    for(k=0;k<2;k++)slope[k]=mac32(dxy[k],rcp[1],0);
+    for(k=0;k<8;k++) {
+        int av=k==0?h->r:k==1?h->g:k==2?h->b:k==3?h->a:k==4?h->s:k==5?h->t:k==6?(h->t>>8)&255:h->z>>16;
+        int bv=k==0?l->r:k==1?l->g:k==2?l->b:k==3?l->a:k==4?l->s:k==5?l->t:k==6?(l->t>>8)&255:l->z>>16;
+        int af=k==7?U16(h->z):0x8000,bf=k==7?U16(l->z):0x8000;
+        int diff=bf-af;
+        ah[k].i=av;ah[k].f=af;al[k].i=bv;al[k].f=bf;
+        delta[k].f=U16(diff);delta[k].i=clamp_s16(S16(bv)-S16(av)-(diff<0));
+        dy[k]=mac32(delta[k],rcp[1],0);
+        dx[k]=major?mac32(delta[k],rcp[0],0):(Rsp32){0,0};
+        de[k]=dy[k];
+        if(k==6)dy[k]=de[k]=(Rsp32){0,0};
+    }
+    transpose=major && (a->y==b->y || abs(S16(slope[0].i))>1877);
+#ifdef LINE_ARITH_TRACE
+    fprintf(stderr,"LINE %d %d %08x %08x major=%d trans=%d\n",d[0],d[1],r32(rcp[1]),r32(slope[0]),major,transpose);
+#endif
+    left=major?(d[0]<0):0;
+    top=h->y;middle=bottom=l->y;
+    if(major) {
+        top=clamp_s16(h->y-wd);middle=clamp_s16(h->y+wd);bottom=clamp_s16(l->y+wd);
+        if(transpose){bottom=middle;left^=1;}
+    }
+    negative=mk32(-(int32_t)((uint32_t)U16(top)*0x4000u&0xffffu));
+    anchor=mac32(slope[0],negative,&acc);
+    acc=p_udn(h->x,0x4000)+p_udl(slope[0].f,negative.f)+p_udm(slope[0].i,negative.f)+p_udn(slope[0].f,negative.i);
+    anchor.f=acc_clamp_low(acc);acc+=p_udh(slope[0].i,negative.i);anchor.i=acc_clamp_mid(acc);
+    for(k=0;k<8;k++) {
+        acc=p_udn(ah[k].f,1)+p_udh(ah[k].i,1)+p_udl(dy[k].f,negative.f)+p_udm(dy[k].i,negative.f);
+        acc+=p_udn(dy[k].f,negative.i);base[k].f=acc_clamp_low(acc);
+        acc+=p_udh(dy[k].i,negative.i);base[k].i=acc_clamp_mid(acc);
+        if(major)dy[k]=(Rsp32){0,0};
+        if(transpose){base[k]=ah[k];de[k]=dy[k]=(Rsp32){0,0};}
+    }
+    base[6]=(Rsp32){1,0};
+    cmd[0]=scissor[0];cmd[1]=scissor[1];
+    if(major) {
+        int minx=h->x<l->x?h->x:l->x,maxx=h->x>l->x?h->x:l->x;
+        int ulx=((uint32_t)scissor[0]>>12)&0xfff,lrx=((uint32_t)scissor[1]>>12)&0xfff;
+        if(minx<ulx)minx=ulx;if(maxx>lrx)maxx=lrx;
+        cmd[0]=(int32_t)(((uint32_t)scissor[0]&0xff000fffu)|((uint32_t)minx<<12));
+        cmd[1]=(int32_t)(((uint32_t)scissor[1]&0xff000fffu)|((uint32_t)maxx<<12));
+    }
+    cmd+=2;
+    cmd[0]=(int32_t)(((0xc8u|(flags&7u))<<24)|(tile<<16)|(left<<23)|(uint16_t)bottom);
+    cmd[1]=(int32_t)(((uint32_t)(uint16_t)middle<<16)|(uint16_t)top);
+    if(!major) {
+        wide=mk32((int32_t)((uint32_t)wd*0x4000u));
+        cmd[4]=r32(add32(anchor,wide));
+        cmd[6]=r32(sub32(anchor,wide));
+        cmd[5]=cmd[7]=r32(slope[0]);
+    } else if(!transpose) {
+        cmd[2]=(int32_t)((uint32_t)h->x*0x4000u);cmd[3]=r32(slope[0]);
+        cmd[4]=r32(anchor);cmd[5]=cmd[3];
+        cmd[6]=cmd[2];cmd[7]=0;
+    } else {
+        cmd[4]=(int32_t)((uint32_t)h->x*0x4000u);cmd[5]=0;
+        cmd[6]=(int32_t)((uint32_t)l->x*0x4000u);cmd[7]=0;
+    }
+    n=8;
+    for(j=0;j<2;j++)if(flags&(j?2u:4u)) {
+        int first=j?4:0;
+        Rsp32 *values[4]={base,dx,de,dy};
+        for(k=0;k<4;k++) {
+            int at=n+(k/2)*8+(k%2)*2;
+            Rsp32 *v=values[k];
+            cmd[at]=(int32_t)(((uint32_t)U16(v[first].i)<<16)|U16(v[first+1].i));
+            cmd[at+1]=(int32_t)(((uint32_t)U16(v[first+2].i)<<16)|U16(v[first+3].i));
+            if(!(transpose && j==0 && k==0)) {
+                cmd[at+4]=(int32_t)(((uint32_t)U16(v[first].f)<<16)|U16(v[first+1].f));
+                cmd[at+5]=(int32_t)(((uint32_t)U16(v[first+2].f)<<16)|U16(v[first+3].f));
+            }
+        }
+        n+=16;
+    }
+    if(flags&1u) {
+        Rsp32 values[4]={base[7],dx[7],de[7],dy[7]};
+        for(k=0;k<4;k++) {
+            acc=p_udn(values[k].f,32);wide.f=acc_clamp_low(acc);
+            acc+=p_udh(values[k].i,32);wide.i=acc_clamp_mid(acc);cmd[n++]=r32(wide);
+        }
+    }
+    return n+2;
+}
+
 static void rsp_line_z_block(int32_t *zw, int32_t zh, int32_t zl,
                              int32_t major_span_q)
 {
@@ -2373,6 +2855,85 @@ int rsp_line_write(int32_t *cmd, const RspTriVtx *e0, const RspTriVtx *e1,
 
 static int s_rs_lut_sort;
 static int s_d64_lut_sort;
+static unsigned int s_vertex_spill_valid,s_vertex_v6_mod,s_vertex_v8_mod;
+static unsigned int s_vertex_mods_known;
+static uint32_t s_vertex_spill_words[4];
+void rsp_vertex_spill_reset(void)
+{
+    s_vertex_spill_valid=s_vertex_v6_mod=s_vertex_v8_mod=0;
+    s_vertex_mods_known=0;
+}
+void rsp_vertex_spill_position(int32_t z,int ratio,int32_t matrix_z)
+{
+    s_vertex_v6_mod=((uint32_t)rsp_clip_scale_w(z,ratio)>>16)&3u;
+    s_vertex_v8_mod=((uint32_t)matrix_z>>16)&3u;
+    s_vertex_mods_known=1;
+}
+void rsp_vertex_spill_cull(int y0,int y1,int y2,int degenerate)
+{
+    int middle;
+    if(degenerate){s_vertex_mods_known=0;return;}
+    if(y1<y0){int t=y0;y0=y1;y1=t;}
+    if(y2<y1){int t=y1;y1=y2;y2=t;}
+    middle=y0>y1?y0:y1;
+    s_vertex_v6_mod=(unsigned int)middle&3u;
+    s_vertex_mods_known=1;
+}
+void rsp_vertex_spill_screen(unsigned int vertex,int32_t x,int32_t y,int32_t z)
+{
+    unsigned int offset=(vertex&1u)*2u;
+    s_vertex_spill_words[offset]=((uint32_t)U16(x>>14)<<16)|U16(y>>14);
+    s_vertex_spill_words[offset+1]=(uint32_t)z;
+    /* A single final vertex still supplies the first half of the old
+     * projection pair; the discarded partner is not retained here. */
+    s_vertex_spill_valid=(vertex&1u)?3u:1u;
+}
+void rsp_vertex_spill_clip(int32_t x,int32_t y,int32_t z)
+{
+    rsp_vertex_spill_screen(0,x,y,z);
+    s_vertex_mods_known=0;
+}
+int rsp_vertex_spill_take(uint32_t words[4])
+{
+    unsigned int valid=s_vertex_spill_valid;
+    if(!s_vertex_spill_valid)return 0;
+    memcpy(words,s_vertex_spill_words,sizeof(s_vertex_spill_words));
+    s_vertex_spill_valid=0;
+    return (int)valid;
+}
+static int d64_attribute_kernel(void)
+{
+    return s_d64_lut_sort==1 || s_d64_lut_sort==5 || s_d64_lut_sort==6;
+}
+int32_t rsp_z_gradient_min(int32_t gradient,unsigned int minimum)
+{
+    int32_t bound=(int32_t)((minimum&255u)<<16);
+    if(gradient>=0 && gradient<bound)return bound;
+    if(gradient<0 && gradient>-bound)return -bound;
+    return gradient;
+}
+void rsp_clip_spill_words(uint32_t on_rgba, uint32_t on_st,
+                          uint32_t off_rgba, uint32_t off_st, uint32_t words[4])
+{
+    words[0]=((on_rgba>>24)<<23) | (((on_rgba>>16)&255u)<<7);
+    words[1]=(((on_rgba>>8)&255u)<<23) | (((off_rgba>>8)&255u)<<7);
+    words[2]=on_st;
+    words[3]=(((on_st>>8)&255u)<<23) | (((off_st>>8)&255u)<<7);
+}
+
+static unsigned int s_base_spill_packet, s_base_spill_offset;
+static int s_base_spill_kind;
+static int32_t s_base_spill[16];
+int rsp_tri_take_base_spill(unsigned int *packet_words, unsigned int *offset,
+                             int32_t words[16])
+{
+    if (!s_base_spill_packet) return 0;
+    *packet_words = s_base_spill_packet;
+    *offset = s_base_spill_offset;
+    memcpy(words,s_base_spill,sizeof(s_base_spill));
+    s_base_spill_packet = 0;
+    return s_base_spill_kind;
+}
 
 void rsp_tri_set_rs_sort(int on)
 {
@@ -2391,6 +2952,35 @@ void rsp_tri_factor5_context(uint32_t values[5]){memcpy(values,s_factor5_context
 void rsp_tri_factor5_seed_fraction(uint32_t value){s_factor5_context[0]=value;}
 static uint16_t s_f5[32][8];
 static uint32_t s_f5_written;
+void rsp_four_pair_begin(void)
+{
+    if(s_d64_lut_sort<7)return;
+    memset(s_f5[18],0,sizeof(s_f5[18]));
+    memset(s_f5[20],0,sizeof(s_f5[20]));
+    s_f5_written|=(1u<<18)|(1u<<20);
+}
+void rsp_rej_project(unsigned int vertex,unsigned int alpha)
+{
+    unsigned int k,at=(vertex&1u)*4u;
+    for(k=0;k<3;k++) {
+        s_f5[25][at+k]=s_projection_i[k];
+        s_f5[26][at+k]=s_projection_f[k];
+    }
+    s_f5[25][at+1]=(uint16_t)(s_f5[25][at+1]+2u);
+    s_f5[25][at+3]=(uint16_t)(0x7f00u|(alpha&255u));
+    s_f5[26][at+3]=0;
+    s_f5_written|=(1u<<25)|(1u<<26);
+}
+void rsp_rej_prologue(uint32_t words[4],unsigned char alpha[2])
+{
+    unsigned int h;
+    for(h=0;h<2;h++) {
+        unsigned int at=4*h;
+        words[2*h]=((uint32_t)s_f5[25][at]<<16)|(s_f5[25][at+1]&0xfffcu);
+        words[2*h+1]=((uint32_t)s_f5[25][at+2]<<16)|s_f5[26][at+2];
+        alpha[h]=(int16_t)s_f5[25][at+3]<0?0:(unsigned char)s_f5[25][at+3];
+    }
+}
 static Rsp32 s_f5_texture_bound;
 static Rsp32 s_f5_spare;
 void rsp_factor5_spare_bound(uint32_t i,uint32_t f){s_f5_spare.i=i&65535u;s_f5_spare.f=f&65535u;}
@@ -2401,6 +2991,14 @@ void rsp_factor5_checkpoint(int restore)
     else{memcpy(saved,s_f5,sizeof(saved));mask=s_f5_written;bound=s_f5_texture_bound;}
 }
 void rsp_factor5_seed(const uint16_t values[32][8]){memcpy(s_f5,values,sizeof(s_f5));s_f5_written=0;}
+void rsp_light_dir_xfrm_cached(const int32_t mv[4][4],const int32_t dir[3],int32_t out[4])
+{
+    int32_t lanes[4][4];memcpy(lanes,mv,sizeof(lanes));
+    lanes[3][0]=mv[0][3];
+    lanes[3][1]=(int32_t)(((uint32_t)s_f5[9][3]<<16)|s_f5[13][3]);
+    lanes[3][2]=(int32_t)(((uint32_t)s_f5[10][3]<<16)|s_f5[14][3]);
+    rsp_light_dir_xfrm_four((const int32_t (*)[4])lanes,dir,out);
+}
 uint32_t rsp_factor5_get(uint16_t values[32][8]){memcpy(values,s_f5,sizeof(s_f5));return s_f5_written;}
 void rsp_factor5_row(unsigned reg,const uint16_t values[8]){memcpy(s_f5[reg],values,16);s_f5_written|=1u<<reg;}
 void rsp_factor5_lane(unsigned reg,unsigned lane,uint16_t value){s_f5[reg][lane]=value;s_f5_written|=1u<<reg;}
@@ -2563,6 +3161,17 @@ int rsp_tri_write(int32_t *ew,
                   int32_t dx_scale, int32_t idy_scale,
                   int32_t frac_mask, int32_t vcr_bound)
 {
+    return rsp_tri_write_with_texrecip(ew,v1c,v2c,v3c,textured,z_buffered,shaded,
+        smooth,tile,level,dx_scale,idy_scale,frac_mask,vcr_bound,0);
+}
+
+int rsp_tri_write_with_texrecip(int32_t *ew,
+                  const RspTriVtx *v1c, const RspTriVtx *v2c,
+                  const RspTriVtx *v3c,
+                  int textured, int z_buffered, int shaded, int smooth,
+                  int tile, int level, int32_t dx_scale, int32_t idy_scale,
+                  int32_t frac_mask, int32_t vcr_bound, int native_texrecip)
+{
     const RspTriVtx *vh, *vm, *vl, *tmpv;
     int32_t cross_i, cross_f;
     Rsp32 inv_cross, nr, inv_dx;
@@ -2584,10 +3193,12 @@ int rsp_tri_write(int32_t *ew,
     int nw;
     int32_t inv_dy_lm_32;
     int32_t mh_x, mh_y, lh_x, lh_y, hl_y, hm_x, lm_x, lm_y;
+    unsigned int vertex_spill_carry;
 
     hle_timing_add(HLE_WORK_TRIANGLE, 1);
+    s_base_spill_packet = 0;
 
-    if (s_tri_attr_dkr)
+    if (s_tri_attr_dkr || s_d64_lut_sort == 3 || s_d64_lut_sort == 4 || s_d64_lut_sort == 6)
     {
         /* Rare's scalar SLT/swap loop is stable for equal Y values. */
         vh=v1c; vm=v2c; vl=v3c;
@@ -2595,7 +3206,7 @@ int rsp_tri_write(int32_t *ew,
         if (S16(vl->y)<S16(vm->y)) { tmpv=vm; vm=vl; vl=tmpv; }
         if (S16(vm->y)<S16(vh->y)) { tmpv=vh; vh=vm; vm=tmpv; }
     }
-    else if (s_tri_attr_zboss)
+    else if (s_tri_attr_zboss || native_texrecip==2 || s_d64_lut_sort>=7)
     {
         /* The ZSortBOSS y-sort network (IMEM 0x904..0x94c), a
          * vlt/vge/vmrg ladder whose tie behavior is deterministic:
@@ -2645,7 +3256,25 @@ int rsp_tri_write(int32_t *ew,
         vl = va[lut_l[idx]];
         tmpv = 0; (void)tmpv;
     }
-    else if (s_d64_lut_sort)
+    else if (s_d64_lut_sort == 2)
+    {
+        /* Self-booting early Fast3D: IMEM 0x9b4..0xa00, role table
+         * DMEM 0x29e. Strict A<B, A<C, B<C comparisons preserve its
+         * distinct equal-Y choices without selecting the D64 edge math. */
+        static const unsigned char roles[8][3] = {
+            {2,1,0},{1,2,0},{1,0,2},{1,0,2},
+            {2,0,1},{0,1,2},{0,2,1},{0,1,2}
+        };
+        const RspTriVtx *va[3];
+        unsigned int index;
+        va[0]=v1c;va[1]=v2c;va[2]=v3c;
+        index = (S16(v1c->y)<S16(v2c->y) ? 4u : 0u)
+              | (S16(v1c->y)<S16(v3c->y) ? 2u : 0u)
+              | (S16(v2c->y)<S16(v3c->y) ? 1u : 0u);
+        vh=va[roles[index][0]];vm=va[roles[index][1]];vl=va[roles[index][2]];
+        tmpv=0;(void)tmpv;
+    }
+    else if (d64_attribute_kernel())
     {
         /* The Doom 64 lineage sort, transcribed from Rayman 2's resident
          * triangle writer (ucode text 0x978..0x9ac; index tables in the
@@ -2695,6 +3324,8 @@ int rsp_tri_write(int32_t *ew,
         tmpv = 0; (void)tmpv;
     }
 
+    vertex_spill_carry=vh==v1c?s_vertex_v6_mod:vh==v3c?s_vertex_v8_mod:0;
+    s_vertex_spill_valid=0;
     mh_x = S16(vm->x) - S16(vh->x);  mh_y = S16(vm->y) - S16(vh->y);
     lh_x = S16(vl->x) - S16(vh->x);  lh_y = S16(vl->y) - S16(vh->y);
     hl_y = S16(vh->y) - S16(vl->y);
@@ -2713,7 +3344,7 @@ int rsp_tri_write(int32_t *ew,
     acc += s_tri_attr_zboss ? p_udh(hl_y, mh_x) : p_udh(lh_y, hm_x);
     cross_i = (int32_t)((acc >> 32) & 0xffff);   /* vreadacc upper */
     cross_f = (int32_t)((acc >> 16) & 0xffff);   /* vreadacc middle */
-    if (cross_i == 0 && cross_f == 0 && !s_keep_degenerate)
+    if (cross_i == 0 && cross_f == 0 && !s_keep_degenerate && native_texrecip != 2)
         return 0;                                  /* degenerate */
 
     /* ---- reciprocals ---- */
@@ -2726,7 +3357,7 @@ int rsp_tri_write(int32_t *ew,
         /* NR_temp = inv_cross * cross */
         nr = mac32(inv_cross, c, 0);
         /* NR = 16 - 16*NR : vmudh vOne*16 ; vmadn nr_f*-16 ; vmadh nr_i*-16 */
-        acc = p_udh(1, 16);
+        acc = p_udh(s_sdk_ones[1], 16);
         acc += p_udn(nr.f, -16);
         nr.f = acc_clamp_low(acc);
         acc += p_udh(nr.i, -16);
@@ -2775,6 +3406,14 @@ int rsp_tri_write(int32_t *ew,
             }
             inv_dx = mac32(rr, uu, 0);
         }
+    }
+    if(s_d64_lut_sort>=7) {
+        Rsp32 rc=mk32(rsp_rcp32((int32_t)(((uint32_t)U16(cross_i)<<16)|U16(cross_f))));
+        acc=p_udn(rc.f,2);
+        inv_dx.f=acc_clamp_low(acc);
+        acc+=p_udh(rc.i,2);
+        inv_dx.i=acc_clamp_mid(acc);
+        inv_dx_64=r32(inv_dx);
     }
     inv_dy_m_32 = rsp_rcp16(mh_y);
     inv_dy_l_32 = rsp_rcp16(lh_y);
@@ -2851,7 +3490,7 @@ int rsp_tri_write(int32_t *ew,
 
     /* ---- Doom 64 lineage edge chain (transcribed) ---- */
     d64_lh_crimp = 0; d64_lh_f = 0; d64_yfrac2 = 0;
-    if (s_d64_lut_sort || s_tri_attr_dkr)
+    if (d64_attribute_kernel() || s_d64_lut_sort == 4 || s_tri_attr_dkr)
     {
         /* The resident writer's edge section (ucode text 0x9cc..0xb2c),
          * replayed with exact RSP accumulator semantics.  It differs from
@@ -2873,6 +3512,7 @@ int rsp_tri_write(int32_t *ew,
         int32_t d64_yfrac = (int32_t)((U16(vh->y) * 0x4000) & 0xffff);
         int32_t d64_hx_i, d64_hx_f;
         int pass2;
+        if(s_d64_lut_sort==5)d64_yfrac=0;
         d64_yfrac2 = d64_yfrac;
         {
             int64_t xacc = (int64_t)S16(vh->x) * 0x4000;
@@ -3003,11 +3643,11 @@ int rsp_tri_write(int32_t *ew,
         {
             const RspTriVtx *cv = smooth ? vv[vi] : v1c;
             at_i[vi][0] = cv->r;  at_i[vi][1] = cv->g;  at_i[vi][2] = cv->b;
-            at_i[vi][3] = vv[vi]->a;
+            at_i[vi][3] = (d64_attribute_kernel() ? cv : vv[vi])->a;
             /* The transform path carries the RSP's half-step colour bias;
              * the 2D overlay path loads integer colours with zero
              * fractions. */
-            if (vv[vi]->flat2d)
+            if (vv[vi]->flat2d || s_d64_lut_sort>=7)
             {
                 at_f[vi][0] = 0; at_f[vi][1] = 0;
                 at_f[vi][2] = 0; at_f[vi][3] = 0;
@@ -3017,9 +3657,9 @@ int rsp_tri_write(int32_t *ew,
                 at_f[vi][0] = 0x8000; at_f[vi][1] = 0x8000;
                 at_f[vi][2] = 0x8000; at_f[vi][3] = 0x8000;
             }
-            at_i[vi][4] = 0; at_f[vi][4] = 0;
-            at_i[vi][5] = 0; at_f[vi][5] = 0;
-            at_i[vi][6] = 0; at_f[vi][6] = 0;
+            at_i[vi][4] = ((uint16_t)cv->s >> 8); at_f[vi][4] = vv[vi]->flat2d ? 0 : 0x8000;
+            at_i[vi][5] = (cv->s & 255); at_f[vi][5] = vv[vi]->flat2d ? 0 : 0x8000;
+            at_i[vi][6] = ((uint16_t)cv->t >> 8); at_f[vi][6] = vv[vi]->flat2d ? 0 : 0x8000;
             at_i[vi][7] = (vv[vi]->z >> 16) & 0xffff;
             at_f[vi][7] = vv[vi]->z & 0xffff;
         }
@@ -3028,7 +3668,7 @@ int rsp_tri_write(int32_t *ew,
     /* ---- texture S/T/W attributes ---- */
     if(s_tri_attr_rs==2)factor5_edge_attributes(v1c,v2c,v3c,vh,vm,vl,cross_i,cross_f,at_i,at_f,textured&&s_persp_skip);
     if(textured && s_tri_attr_rs==2 && s_persp_skip) { /* staged above */ }
-    else if (textured && (s_affine_tex || s_persp_skip
+    else if (textured && ((!d64_attribute_kernel() && (s_affine_tex || s_persp_skip))
                      || (vh->flat2d && vm->flat2d && vl->flat2d)))
     {
         /* Fighting Force 64's 2D overlay path: the microcode's simplified
@@ -3133,7 +3773,7 @@ int rsp_tri_write(int32_t *ew,
         at_f[2][4] = s_rs_stale_l_sf;
         at_f[2][5] = s_rs_stale_l_tf;
     }
-    else if (textured && s_d64_lut_sort)
+    else if (textured && d64_attribute_kernel())
     {
         /* The Doom 64 lineage perspective staging (ucode text
          * 0xb38..0xbb8): the same fold as Rogue Squadron's z-enabled
@@ -3231,6 +3871,14 @@ int rsp_tri_write(int32_t *ew,
         if (iw[2] > max_iw) max_iw = iw[2];
         for (vi = 0; vi < 3; vi++)
         {
+            if (native_texrecip || s_d64_lut_sort>=7)
+            {
+                /* FIFO 2.05 IMEM 0xa20..0xa48: VRCPH/VRCPL of max(iw),
+                 * followed by VMUDM/VMADL/VMADN/VMADH for each vertex.
+                 * Carry the DIV-table rounding into texture gradients. */
+                wnorm[vi] = mac32(mk32(iw[vi]), mk32(rsp_rcp32(max_iw)), 0);
+                continue;
+            }
             /* Shared per-vertex perspective normalizer.  The LLE RSP emits
              * floor(0x8000 * iw / max) here (equivalently the W lane becomes
              * floor(0x7fff * iw / (2*max))); the raw reciprocal-multiply path
@@ -3261,12 +3909,29 @@ int rsp_tri_write(int32_t *ew,
         }
     }
 
+    if(s_d64_lut_sort>=7) {
+        for(k=0;k<4;k++) {
+            at_f[1][k]=s_f5[18][k];
+            at_f[2][k]=s_f5[20][k];
+        }
+        if(textured && s_d64_lut_sort==7)for(k=4;k<=6;k++)at_f[0][k]=0;
+    }
+    if(native_texrecip==2 && !textured) {
+        /* The middle/lower LLV Z loads overlap lane six of the LPV
+         * fraction vectors. Perspective staging replaces it only when
+         * texture is enabled; the unconditional tail stores expose it. */
+        at_f[1][6]=((uint32_t)vm->z>>16)&0xffffu;
+        at_f[2][6]=((uint32_t)vl->z>>16)&0xffffu;
+    }
+#ifdef RSP_ATTR_OBSERVE
+    RSP_ATTR_OBSERVE(at_i,at_f,vh,vm,vl);
+#endif
     /* ---- attribute deltas and gradients ---- */
     {
     int32_t rs_yspx_vh = (int32_t)U16(vh->y);
     Rsp32 zb_elh8;
     zb_elh8.i = 0; zb_elh8.f = 0;
-    if (s_tri_attr_zboss)
+    if (s_tri_attr_zboss || s_d64_lut_sort>=7)
     {
         /* ZSortBOSS keeps the per-edge Y reciprocals of the edge
          * section live (v9:v10, scaled by v31[e13] == 8 at IMEM
@@ -3280,7 +3945,8 @@ int rsp_tri_write(int32_t *ew,
         zb_elh8.f = acc_clamp_low(acc);
     }
     int32_t rs_mh_y = mh_y, rs_hl_y = hl_y, rs_lh_x = lh_x, rs_hm_x = hm_x;
-    if (s_tri_attr_rs || s_tri_attr_dkr)
+    int scaled_deltas=s_tri_attr_rs || s_tri_attr_dkr || s_d64_lut_sort>=7;
+    if (scaled_deltas)
     {
         /* The writer multiplies the packed edge deltas by v30[5] == 4
          * (vmudh, clamped mid) after the edge reciprocals but before the
@@ -3299,18 +3965,18 @@ int rsp_tri_write(int32_t *ew,
 
         /* dA_x = dMH.y * dA_H + dHL.y * dA_M  (vmudn/vmadh chains, raw
          * accumulator reads) */
-        acc = p_udn(dA_H[k].f, (s_tri_attr_rs || s_tri_attr_dkr) ? rs_mh_y : mh_y);
-        acc += p_udh(dA_H[k].i, (s_tri_attr_rs || s_tri_attr_dkr) ? rs_mh_y : mh_y);
-        acc += p_udn(dA_M[k].f, (s_tri_attr_rs || s_tri_attr_dkr) ? rs_hl_y : hl_y);
-        acc += p_udh(dA_M[k].i, (s_tri_attr_rs || s_tri_attr_dkr) ? rs_hl_y : hl_y);
+        acc = p_udn(dA_H[k].f, scaled_deltas ? rs_mh_y : mh_y);
+        acc += p_udh(dA_H[k].i, scaled_deltas ? rs_mh_y : mh_y);
+        acc += p_udn(dA_M[k].f, scaled_deltas ? rs_hl_y : hl_y);
+        acc += p_udh(dA_M[k].i, scaled_deltas ? rs_hl_y : hl_y);
         dA_x[k].i = (int32_t)((acc >> 32) & 0xffff);
         dA_x[k].f = (int32_t)((acc >> 16) & 0xffff);
 
         /* dA_y = dLH.x * dA_M + dHM.x * dA_H */
-        acc = p_udn(dA_M[k].f, (s_tri_attr_rs || s_tri_attr_dkr) ? rs_lh_x : lh_x);
-        acc += p_udh(dA_M[k].i, (s_tri_attr_rs || s_tri_attr_dkr) ? rs_lh_x : lh_x);
-        acc += p_udn(dA_H[k].f, (s_tri_attr_rs || s_tri_attr_dkr) ? rs_hm_x : hm_x);
-        acc += p_udh(dA_H[k].i, (s_tri_attr_rs || s_tri_attr_dkr) ? rs_hm_x : hm_x);
+        acc = p_udn(dA_M[k].f, scaled_deltas ? rs_lh_x : lh_x);
+        acc += p_udh(dA_M[k].i, scaled_deltas ? rs_lh_x : lh_x);
+        acc += p_udn(dA_H[k].f, scaled_deltas ? rs_hm_x : hm_x);
+        acc += p_udh(dA_H[k].i, scaled_deltas ? rs_hm_x : hm_x);
         dA_y[k].i = (int32_t)((acc >> 32) & 0xffff);
         dA_y[k].f = (int32_t)((acc >> 16) & 0xffff);
 
@@ -3347,7 +4013,7 @@ int rsp_tri_write(int32_t *ew,
        }
         else
         {
-        if (s_tri_attr_zboss)
+        if (s_tri_attr_zboss || s_d64_lut_sort>=7)
         {
             /* the microcode's gradient multiplies are the latched
              * 32x32 vmudl/vmadm/vmadn/vmadh chain on the 32-bit
@@ -3362,12 +4028,18 @@ int rsp_tri_write(int32_t *ew,
         }
         else
         {
-        /* dAdX = dA_x * inv_dx */
-        dAdX[k] = mac32_wide(dA_x[k], inv_dx_64, 0);
-
-        /* dAdY = dA_y * inv_dx ; then the accumulator CONTINUES:
-         * dAdE = dAdY + dAdX * dxhdy */
-        dAdY[k] = mac32_wide(dA_y[k], inv_dx_64, &acc);
+        /* These verified FIFO builds latch the low fraction before the
+         * final VMADH, including its saturation, at IMEM 0xb30..0xb60 in
+         * 2.05. A wide product that clamps both halves at the end loses
+         * this behavior on small triangles and overflowing gradients. */
+        if (native_texrecip || s_d64_lut_sort>=7) {
+            dAdX[k] = mac32(dA_x[k], inv_dx, 0);
+            dAdY[k] = mac32(dA_y[k], inv_dx, &acc);
+        } else {
+            dAdX[k] = mac32_wide(dA_x[k], inv_dx_64, 0);
+            dAdY[k] = mac32_wide(dA_y[k], inv_dx_64, &acc);
+        }
+        /* The dAdY accumulator continues into dAdE. */
         acc += p_udl(dAdX[k].f, dxhdy.f);
         acc += p_udm(dAdX[k].i, dxhdy.f);
         acc += p_udn(dAdX[k].f, dxhdy.i);
@@ -3414,6 +4086,18 @@ int rsp_tri_write(int32_t *ew,
 
     }
 
+    if(s_d64_lut_sort>=7) {
+        /* Paired triangles reuse these low colour lanes. The first
+         * pass leaves scaled X fractions and scaled E integers there;
+         * the native command entry clears them for the next pair. */
+        for(k=0;k<4;k++) {
+            s_f5[18][k]=(uint16_t)acc_clamp_low(p_udn(dAdX[k].f,32));
+            s_f5[20][k]=(uint16_t)acc_clamp_mid(p_udn(dAdE[k].f,32)+p_udh(dAdE[k].i,32));
+        }
+        s_f5_written|=(1u<<18)|(1u<<20);
+        for(k=4;k<(s_d64_lut_sort==7?8:7);k++)base[k].f=0;
+        for(k=0;k<4;k++) {dAdY[k].i=0;dAdY[k].f=0;}
+    }
     if (s_attr_lowp)
     {
         /* T3DUX (Turbo3D UX) low-precision attribute profile, from the cxd4
@@ -3446,6 +4130,7 @@ int rsp_tri_write(int32_t *ew,
      * 8-byte sdv of lanes 4..7 -- captured before the z-block x32 scaling
      * mutates the lane. */
     pre_z_base  = base[7];
+    if(s_d64_lut_sort==8)pre_z_base.f=0;
     pre_z_dAdX  = dAdX[7];
     pre_z_dAdE  = dAdE[7];
     pre_z_dAdY  = dAdY[7];
@@ -3608,7 +4293,7 @@ int rsp_tri_write(int32_t *ew,
         t5.f = acc_clamp_low(acc);
         base[7] = sub32(a5, t5);
     }
-    else if (z_buffered)
+    else if (z_buffered || native_texrecip == 2)
     {
         int32_t v10;
         /* $v10 = dAdE_f * y_spx_f (fresh accumulator, low read) */
@@ -3637,6 +4322,8 @@ int rsp_tri_write(int32_t *ew,
         base[7].i = acc_clamp_mid(acc);
     }
 
+    if(s_d64_lut_sort==8 && z_buffered)base[7]=mk32((int32_t)((uint32_t)vh->z<<5));
+
     /* ---- assemble command words ---- */
     {
         int32_t w0;
@@ -3658,6 +4345,8 @@ int rsp_tri_write(int32_t *ew,
               | ((uint32_t)vh->y & 0xffff));
         /* XL = M.x << 14 stored as one 32-bit word (int<<16 | frac) */
         ew[2] = (int32_t)((uint32_t)((int32_t)S16(vm->x) << 14));
+        if(s_sdk_xl_active)
+            ew[2]=(int32_t)((uint32_t)s_sdk_xl[vm==v1c?0:vm==v2c?1:2]<<14);
         ew[3] = (int32_t)(((uint32_t)U16(dxldy.i) << 16) | (uint32_t)U16(dxldy.f));
         ew[4] = (int32_t)(((uint32_t)U16(xh.i) << 16) | (uint32_t)U16(xh.f));
         ew[5] = (int32_t)(((uint32_t)U16(dxhdy.i) << 16) | (uint32_t)U16(dxhdy.f));
@@ -3666,7 +4355,7 @@ int rsp_tri_write(int32_t *ew,
         nw = 8;
 
         /* ---- Doom 64 lineage shade chain (transcribed) ---- */
-        if (s_d64_lut_sort && (shaded || textured))
+        if (d64_attribute_kernel() && (shaded || textured || z_buffered))
         {
             /* The resident writer's attribute section (ucode text
              * 0xc0c..0xd3c) with its inverse-cross divide (0xf80..0xfcc):
@@ -3698,8 +4387,9 @@ int rsp_tri_write(int32_t *ew,
                 a64d  = (int64_t)(((uint32_t)U16(ic_lo) * (uint32_t)U16(x_lo)) >> 16);
                 a64d += (int64_t)S16(ic_hi) * (int64_t)U16(x_lo);
                 a64d += (int64_t)U16(ic_lo) * (int64_t)S16(x_hi);
+                xr_lo = acc_clamp_low(a64d);
                 a64d += ((int64_t)S16(ic_hi) * (int64_t)S16(x_hi)) << 16;
-                xr_hi = acc_clamp_mid(a64d); xr_lo = acc_clamp_low(a64d);
+                xr_hi = acc_clamp_mid(a64d);
                 fb = (U16(xr_lo) != 0) ? 1 : 0;
                 t_lo = (int32_t)((0u - (uint32_t)U16(xr_lo)) & 0xffffu);
                 t_hi = 2 - S16(xr_hi) - fb;
@@ -3707,14 +4397,18 @@ int rsp_tri_write(int32_t *ew,
                 a64d  = (int64_t)(((uint32_t)U16(ic_lo) * (uint32_t)U16(t_lo)) >> 16);
                 a64d += (int64_t)S16(ic_hi) * (int64_t)U16(t_lo);
                 a64d += (int64_t)U16(ic_lo) * (int64_t)S16(t_hi);
+                ic_lo = acc_clamp_low(a64d);
                 a64d += ((int64_t)S16(ic_hi) * (int64_t)S16(t_hi)) << 16;
-                ic_hi = acc_clamp_mid(a64d); ic_lo = acc_clamp_low(a64d);
+                ic_hi = acc_clamp_mid(a64d);
             }
             mh_y4 = clamp_s16(mh_y * 4) & 0xffff;
             lh_y4 = clamp_s16(lh_y * 4) & 0xffff;
             mh_x4 = clamp_s16(mh_x * 4) & 0xffff;
             lh_x4 = clamp_s16(lh_x * 4) & 0xffff;
-            for (ch = 0; ch < (textured ? 7 : 4); ch++)
+            /* Every lane runs through this kernel, including the stored
+             * depth in lane 7. SDV exposes that lane in the texture block
+             * before the independent depth-output scaling. */
+            for (ch = 0; ch < 8; ch++)
             {
                 int32_t h_i = at_i[0][ch] & 0xffff, h_f = at_f[0][ch] & 0xffff;
                 int32_t m_i = at_i[1][ch] & 0xffff, m_f2 = at_f[1][ch] & 0xffff;
@@ -3758,21 +4452,24 @@ int rsp_tri_write(int32_t *ew,
                 a64d  = (int64_t)(((uint32_t)U16(nx_f) * (uint32_t)U16(ic_lo)) >> 16);
                 a64d += (int64_t)S16(nx_i) * (int64_t)U16(ic_lo);
                 a64d += (int64_t)U16(nx_f) * (int64_t)S16(ic_hi);
+                dx_f = acc_clamp_low(a64d);
                 a64d += ((int64_t)S16(nx_i) * (int64_t)S16(ic_hi)) << 16;
-                dx_i = acc_clamp_mid(a64d); dx_f = acc_clamp_low(a64d);
+                dx_i = acc_clamp_mid(a64d);
                 a64d  = (int64_t)(((uint32_t)U16(ny_f) * (uint32_t)U16(ic_lo)) >> 16);
                 a64d += (int64_t)S16(ny_i) * (int64_t)U16(ic_lo);
                 a64d += (int64_t)U16(ny_f) * (int64_t)S16(ic_hi);
+                dy_f = acc_clamp_low(a64d);
                 a64d += ((int64_t)S16(ny_i) * (int64_t)S16(ic_hi)) << 16;
-                dy_i = acc_clamp_mid(a64d); dy_f = acc_clamp_low(a64d);
+                dy_i = acc_clamp_mid(a64d);
                 /* dAdE = dAdY + dAdX * DxHDy(crimped int : unmasked frac) */
                 a64d  = (int64_t)U16(dy_f);
                 a64d += ((int64_t)S16(dy_i)) << 16;
                 a64d += (int64_t)(((uint32_t)U16(dx_f) * (uint32_t)U16(d64_lh_f)) >> 16);
                 a64d += (int64_t)S16(dx_i) * (int64_t)U16(d64_lh_f);
                 a64d += (int64_t)U16(dx_f) * (int64_t)S16(d64_lh_crimp);
+                de_f = acc_clamp_low(a64d);
                 a64d += ((int64_t)S16(dx_i) * (int64_t)S16(d64_lh_crimp)) << 16;
-                de_i = acc_clamp_mid(a64d); de_f = acc_clamp_low(a64d);
+                de_i = acc_clamp_mid(a64d);
                 /* base = H attr - dAdE * yfrac (vmudl/vmadm; vsubc/vsub) */
                 a64d  = (int64_t)(((uint32_t)U16(de_f) * (uint32_t)U16(d64_yfrac2)) >> 16);
                 a64d += (int64_t)S16(de_i) * (int64_t)U16(d64_yfrac2);
@@ -3784,6 +4481,84 @@ int rsp_tri_write(int32_t *ew,
                 dAdX[ch].i = dx_i; dAdX[ch].f = dx_f;
                 dAdY[ch].i = dy_i; dAdY[ch].f = dy_f;
                 dAdE[ch].i = de_i; dAdE[ch].f = de_f;
+            }
+            pre_z_base=base[7]; pre_z_dAdX=dAdX[7];
+            pre_z_dAdE=dAdE[7]; pre_z_dAdY=dAdY[7];
+            if (textured) {
+                Rsp32 bound={0,0},normal;
+                int lane;
+                /* The resident bounds all three texture planes by their
+                 * vertex magnitudes and integer X/Y gradients, then scales
+                 * the complete four-lane texture block with one reciprocal.
+                 * The depth output below uses the unnormalized Z plane. */
+                for (lane=4;lane<=6;lane++) {
+                    Rsp32 magnitude={0,0},candidate;
+                    int vi,order[3]={0,2,1};
+                    for (vi=0;vi<3;vi++) {
+                        int v=order[vi],value=S16(at_i[v][lane]);
+                        if(value<0)value=value==-32768?32767:-value;
+                        if(vi==0 || value>S16(magnitude.i)) {
+                            magnitude.i=value;magnitude.f=at_f[v][lane];
+                        }
+                    }
+                    if(lane==6) {
+                        int32_t minimum=vh->pw;
+                        Rsp32 m;
+                        if(vm->pw<minimum)minimum=vm->pw;
+                        if(vl->pw<minimum)minimum=vl->pw;
+                        m=mk32(minimum);
+                        acc=p_udl(m.f,0x8000)+p_udm(m.i,0x8000);
+                        magnitude.i=acc_clamp_mid(acc);magnitude.f=acc_clamp_low(acc);
+                    }
+                    acc=p_udl(magnitude.f,2048)+p_udm(magnitude.i,2048);
+                    candidate.i=acc_clamp_mid(acc);candidate.f=acc_clamp_low(acc);
+                    {
+                        int dx=S16(dAdX[lane].i),dy=S16(dAdY[lane].i);
+                        if(dx<0)dx=dx==-32768?32767:-dx;
+                        if(dy<0)dy=dy==-32768?32767:-dy;
+                        acc=p_udm(dx,2048)*2+p_udm(dy,2048);
+                        acc+=p_udn(candidate.f,1);
+                        candidate.f=acc_clamp_low(acc);
+                        acc+=p_udh(candidate.i,1);candidate.i=acc_clamp_mid(acc);
+                    }
+                    if(lane==4 || S16(candidate.i)>S16(bound.i) ||
+                        (S16(candidate.i)==S16(bound.i)&&U16(candidate.f)>=U16(bound.f)))
+                        bound=candidate;
+                }
+                acc=p_udl(bound.f,64)+p_udm(bound.i,64);
+                bound.i=acc_clamp_mid(acc);bound.f=acc_clamp_low(acc);
+                normal=mk32(rsp_rcp32(r32(bound)));
+                acc=p_udn(normal.f,2);
+                normal.f=acc_clamp_low(acc);
+                acc+=p_udh(normal.i,2);normal.i=acc_clamp_mid(acc);
+                if(S16(normal.i)>=1){normal.i=1;normal.f=0;}
+                for(lane=4;lane<=6;lane++) {
+                    base[lane]=mac32(base[lane],normal,0);
+                    dAdX[lane]=mac32(dAdX[lane],normal,0);
+                    dAdE[lane]=mac32(dAdE[lane],normal,0);
+                    dAdY[lane]=mac32(dAdY[lane],normal,0);
+                }
+                pre_z_base=mac32(pre_z_base,normal,0);
+                pre_z_dAdX=mac32(pre_z_dAdX,normal,0);
+                pre_z_dAdE=mac32(pre_z_dAdE,normal,0);
+                pre_z_dAdY=mac32(pre_z_dAdY,normal,0);
+            }
+            if (z_buffered) {
+                Rsp32 h, correction;
+                Rsp32 *gradient[3]={&dAdX[7],&dAdE[7],&dAdY[7]};
+                int gi;
+                /* VMADN re-latches each fraction after the high term.
+                 * The base is recomputed in this scaled domain. */
+                for (gi=0;gi<3;gi++) {
+                    acc=p_udn(gradient[gi]->f,32)+p_udh(gradient[gi]->i,32);
+                    gradient[gi]->i=acc_clamp_mid(acc);
+                    gradient[gi]->f=acc_clamp_low(acc);
+                }
+                acc=p_udn(at_f[0][7],32)+p_udh(at_i[0][7],32);
+                h.i=acc_clamp_mid(acc);h.f=acc_clamp_low(acc);
+                acc=p_udl(dAdE[7].f,d64_yfrac2)+p_udm(dAdE[7].i,d64_yfrac2);
+                correction.i=acc_clamp_mid(acc);correction.f=acc_clamp_low(acc);
+                base[7]=sub32(h,correction);
             }
         }
 
@@ -3837,8 +4612,79 @@ int rsp_tri_write(int32_t *ew,
             ew[nw + 1] = (int32_t)(((uint32_t)U16(dAdX[7].i) << 16) | (uint32_t)U16(dAdX[7].f));
             ew[nw + 2] = (int32_t)(((uint32_t)U16(dAdE[7].i) << 16) | (uint32_t)U16(dAdE[7].f));
             ew[nw + 3] = (int32_t)(((uint32_t)U16(dAdY[7].i) << 16) | (uint32_t)U16(dAdY[7].f));
+            if(d64_attribute_kernel())
+                ew[nw+3]=rsp_z_gradient_min(ew[nw+3],(unsigned int)level>>8);
             nw += 4;
         }
+    }
+    /* The native common base-store tail writes both lane halves even
+     * when the texture block is excluded from the packet length. A
+     * following partial sync can expose these otherwise unused bytes. */
+    if (!textured) {
+        s_base_spill_packet = (unsigned int)nw;
+        s_base_spill_offset = 8u + (shaded ? 16u : 0u);
+        /* LPV reads eight bytes, including the unused S/T bytes after
+         * RGBA. All four vectors are stored even with texture disabled. */
+        {
+            const Rsp32 *attrs[4] = {base,dAdX,dAdE,dAdY};
+            const Rsp32 z[4] = {pre_z_base,pre_z_dAdX,pre_z_dAdE,pre_z_dAdY};
+            int g;
+            for (g=0;g<4;g++) {
+                unsigned int at = (g / 2) * 8u + (g & 1) * 2u;
+                s_base_spill[at] = (int32_t)((U16(attrs[g][4].i)<<16)|U16(attrs[g][5].i));
+                s_base_spill[at+1] = (int32_t)((U16(attrs[g][6].i)<<16)|U16(z[g].i));
+                s_base_spill[at+4] = (int32_t)((U16(attrs[g][4].f)<<16)|U16(attrs[g][5].f));
+                s_base_spill[at+5] = (int32_t)((U16(attrs[g][6].f)<<16)|U16(z[g].f));
+            }
+        }
+        s_base_spill_kind = 16;
+        if (z_buffered) {
+            /* The four Z words replace the first four texture words. */
+            s_base_spill_offset += 4u;
+            memmove(s_base_spill,s_base_spill+4,12*sizeof(s_base_spill[0]));
+            s_base_spill_kind = 12;
+        }
+    }
+    if(native_texrecip==2) {
+        /* Rej stores its Z halfwords even when Z is excluded from the
+         * packet length. These replace the first four texture spill
+         * words when texture is disabled. */
+        if(!z_buffered) {
+            const Rsp32 z[4]={base[7],dAdX[7],dAdE[7],dAdY[7]};
+            int i;
+            if(textured) {
+                s_base_spill_packet=(unsigned int)nw;
+                s_base_spill_offset=(unsigned int)nw;
+                s_base_spill_kind=4;
+            }
+            for(i=0;i<4;i++)
+                s_base_spill[i]=(int32_t)(((uint32_t)U16(z[i].i)<<16)|U16(z[i].f));
+        }
+        for(k=0;k<8;k++) {
+            RspAcc y=p_udn(dAdY[k].f,32)+p_udh(dAdY[k].i,32);
+            s_f5[25][k]=(uint16_t)dA_M[k].i;
+            s_f5[26][k]=(uint16_t)acc_clamp_mid(y);
+        }
+        s_f5_written|=(1u<<25)|(1u<<26);
+    }
+    if(native_texrecip==1 && !s_tri_attr_rs && !s_tri_attr_zboss && !s_d64_lut_sort) {
+        /* The next VTX projection prologue stores old v25/v26. The
+         * texture fractions in v25 survive the writer. v26's borrow
+         * comes from the otherwise unused Z lane of the selected screen
+         * vector, not from the visible Y coordinate. Vertex pointers in
+         * lane 6 and the decoded middle vector's lane 2 are multiples of 4. */
+        if(textured && s_vertex_mods_known) {
+            s_vertex_spill_words[0]=((uint32_t)U16(at_f[0][4])<<16)|U16(at_f[0][5]);
+            s_vertex_spill_words[1]=((uint32_t)(S16(at_f[0][6])<0 && !(s_vtx_z_quant&2)?0:U16(at_f[0][6]))<<16)
+                |(vertex_spill_carry?0xffffu:0u);
+            s_vertex_spill_words[2]=((uint32_t)U16(at_f[1][4])<<16)|U16(at_f[1][5]);
+            s_vertex_spill_words[3]=(uint32_t)(S16(at_f[1][6])<0 && !(s_vtx_z_quant&2)?0:U16(at_f[1][6]))<<16;
+            s_vertex_spill_valid=3;
+        }
+        s_vertex_v6_mod=z_buffered?0u:U16(dAdY[2].f)&3u;
+        /* The depth-branch delay slot scales v8 even without Z output. */
+        s_vertex_v8_mod=0;
+        s_vertex_mods_known=1;
     }
     return nw;
 }
@@ -3853,5 +4699,6 @@ void rsp_emit_state_save(void *p) { rsp_emit_saved_state_save(p); }
 void rsp_emit_state_load(const void *p)
 {
     rsp_emit_saved_state_load(p);
+    s_base_spill_packet = 0;
     if (!p) { s_rs_stale_w_i[0] = s_rs_stale_w_i[1] = s_rs_stale_w_i[2] = 0x7fff; }
 }

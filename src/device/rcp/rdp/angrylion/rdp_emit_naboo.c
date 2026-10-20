@@ -223,6 +223,7 @@ void naboo_set_emit(int on)
 }
 
 static unsigned int nb_dmem_r32(unsigned int off);
+static void nb_packet_drain(void);
 static void nb_ovl1b(unsigned int w1);
 static void nb_ovl21(unsigned int w1);
 struct rdp_fifo_s;
@@ -282,6 +283,14 @@ void naboo_seed_dmem(const unsigned char *dmem)
         nb_dmem_w32(0x118u, nb_dmem_r32(0xfecu));
         nb.geom = 0;
     }
+}
+
+void naboo_seed_output(unsigned int end, unsigned int current)
+{
+    /* Init 0xdd8..0xe2c reuses an actively consumed ring. An idle DPC
+     * starts at the allocation end, making the first drain wrap to base. */
+    if (end >= nb_dmem_r32(0x110u) && current && current != end)
+        nb_dmem_w32(0x118u, end);
 }
 
 static void nb_watch(unsigned int a, unsigned int n, unsigned int v);
@@ -363,6 +372,20 @@ static int nb_store(unsigned int address, unsigned int source, unsigned int byte
     for (i = 0; i < bytes; i++) s_rdram[((address+i)&0x7fffffu)^3u] = nb.dmem[((source+i)&0xfffu)^3u];
     hle_timing_add(HLE_WORK_DMA_SETUP, 1); hle_timing_add(HLE_WORK_DMA, bytes / 8u);
     return 1;
+}
+
+static void nb_packet_drain(void)
+{
+    unsigned int cursor = nb_dmem_r32(0x118u);
+    unsigned int limit = nb_dmem_r32(0x114u);
+    if (!nb_packet_bytes) return;
+    /* Resident 0xdc..0x15c: wrap the whole staging DMA before copying,
+     * then retain its end cursor in the native state word. */
+    if (cursor > limit || nb_packet_bytes > limit - cursor)
+        cursor = nb_dmem_r32(0x110u);
+    nb_store(cursor, 0xe80u, nb_packet_bytes);
+    nb_dmem_w32(0x118u, cursor + nb_packet_bytes);
+    nb_packet_bytes = 0;
 }
 
 #include "rdp_emit_rsp.h"
@@ -1199,7 +1222,7 @@ static int nb_ovl15(RdpFifo *fifo,unsigned int w0)
     /* Coordinate and texture setup precede the splice; depth, fog enable,
      * fog alpha and tile selection are read after the child list returns. */
     if(nb_call_splice(fifo)<0)return 0;
-    nb_packet_bytes=0;
+    nb_packet_drain();
     words[0]=0x2e000000u;
     words[1]=(unsigned int)(unsigned short)((int32_t)nb_dmem_r32(record+0x1cu)>>11)<<16;
     words[2]=0x3a000000u;words[3]=low[3];count=4;
@@ -1209,7 +1232,7 @@ static int nb_ovl15(RdpFifo *fifo,unsigned int w0)
     }
     for(k=0;k<4;k++)words[count+k]=low[nl-4u+k];
     words[count+1u]=(words[count+1u]&0x00ffffffu)|((nb.dmem[0x14au^3u]&7u)<<24);
-    nb_rdp_append(fifo,(const int32_t*)words,(int)(count+4u));nb_packet_bytes=0;
+    nb_rdp_append(fifo,(const int32_t*)words,(int)(count+4u));nb_packet_drain();
     return 1;
 }
 
@@ -1314,7 +1337,7 @@ static int nb_ovl24(RdpFifo *fifo,unsigned int w0)
     unsigned int batches=(w0>>16)&0xffu,address=nb_read_u32(nb.dl+8u),batch;
     unsigned int boxes=nb_read_u32(nb.dl+36u)&0xffu,packets=0;
     if (!batches || nb_call_splice(fifo)<0) return 0;
-    nb_packet_bytes=0;
+    nb_packet_drain();
     for(batch=0;batch<batches;batch++,address+=256u) {
         unsigned int mask=nb_read_u32(nb.dl+32u),slot,box;
         if(!mask) continue;
@@ -1346,12 +1369,12 @@ static int nb_ovl24(RdpFifo *fifo,unsigned int w0)
         for(slot=0;slot<32u;slot++) if((mask&(1u<<slot)) && !(nb_dmem_s16(0x624u+slot*40u)&0x4343u)) {
             unsigned int low[8],nl;
             if(!nb_sprite24_packet(0x600u+slot*40u,0x170u+slot*8u,fraction,low,&nl,&fraction)) return 0;
-            if(nl){nb_rdp_append(fifo,(const int32_t*)low,(int)nl);if(++packets==10u){packets=0;nb_packet_bytes=0;}}
+            if(nl){nb_rdp_append(fifo,(const int32_t*)low,(int)nl);if(++packets==10u){packets=0;nb_packet_drain();}}
         }
         }
     }
     nb_phase_set(address);
-    nb_packet_bytes=0;
+    nb_packet_drain();
     return 1;
 }
 
@@ -2605,7 +2628,7 @@ static int nb_clip_fan(RdpFifo *fifo)
         if ((nb_dmem_s16(0x152u)&0xfffu)!=0xcc8u && nb_call_splice(fifo)<0)return -1;
         if (nb_emit_tri(fifo, va, vb, vc) < 0)
             return -1;
-        nb_packet_bytes=0; /* clip fan tail jumps through the drain */
+        nb_packet_drain(); /* clip fan tail jumps through the drain */
         nb.clip_idx++;
     }
     nb.clip_active = 0u;
@@ -2860,7 +2883,7 @@ static int nb_tri(RdpFifo *fifo, unsigned int w0, unsigned int w1, int quad)
             if (nb_emit_tri(fifo, va, vb, vc) < 0)
                 return -1;
         }
-        nb_packet_bytes=0; /* b6c drains even a rejected first half */
+        nb_packet_drain(); /* b6c drains even a rejected first half */
         nb.tri_phase = 1u;
     }
     if (quad && nb.tri_phase == 1u) {
@@ -2897,7 +2920,7 @@ static int nb_tri(RdpFifo *fifo, unsigned int w0, unsigned int w1, int quad)
         }
     }
     nb.tri_phase = 0u;
-    nb_packet_bytes=0;
+    nb_packet_drain();
     nb_dl_step(len);
     return 0;
 }
@@ -2999,7 +3022,7 @@ static int nb_attribute_callback(RdpFifo *fifo)
     int32_t words[6];
     unsigned int k;
     if ((nb_dmem_s16(0x152u)&0xfffu) != 0xcc8u) {
-        nb_packet_bytes=0; /* default 7b0/7b4 returns through the drain */
+        nb_packet_drain(); /* default 7b0/7b4 returns through the drain */
         return 0;
     }
     old = nb_dmem_s16(0x101u);
@@ -3008,7 +3031,7 @@ static int nb_attribute_callback(RdpFifo *fifo)
     if (nb_dmem_r32(0x58cu)) {
         unsigned int mode;
         if (nb_call_splice(fifo) < 0) return -1;
-        nb_packet_bytes=0; /* c4c, after the splice list has run */
+        nb_packet_drain(); /* c4c, after the splice list has run */
         mode = nb_dmem_r32(0x120u)&0xffcfffffu;
         nb_dmem_w32(0xe70u, mode);
         nb_dmem_w32(0xe60u, mode|0x00100000u);
@@ -3021,7 +3044,7 @@ static int nb_attribute_callback(RdpFifo *fifo)
         nb_dmem_w32(0x58cu,0);
         return tag ? 16 : 0;
     }
-    nb_packet_bytes=0; /* c9c drains before comparing classifications */
+    nb_packet_drain(); /* c9c drains before comparing classifications */
     if ((unsigned int)tag != (unsigned int)old*256u) {
         words[0]=(int32_t)0xe7000000u;
         words[1]=(int32_t)nb_dmem_r32(0xe84u);
@@ -3068,7 +3091,7 @@ static int nb_morph_quad(RdpFifo *fifo)
         if(kind==2u){
             int32_t words[6];unsigned int k;
             if(nb_call_splice(fifo)<0)return -1;
-            nb_packet_bytes=0; /* Indiana's explicit pre-pass drain */
+            nb_packet_drain(); /* Indiana's explicit pre-pass drain */
             words[0]=(int32_t)0xe7000000u;
             words[1]=(int32_t)nb_dmem_r32(0xe84u);
             for(k=0;k<4;k++)words[k+2]=(int32_t)nb_dmem_r32(0xe60u+k*4u);
@@ -3158,7 +3181,7 @@ static int nb_walk(RdpFifo *fifo, unsigned int stop_depth, int nested)
             hle_timing_cycles()>=hle_timing_slice_limit())return 1;
         unsigned int w0 = nb_read_u32(nb.dl);
         unsigned int w1 = nb_read_u32(nb.dl + 4);
-        hle_timing_add(HLE_WORK_COMMAND, 1);
+        hle_timing_command(w0 >> 24);
         {
             static int t = -1;
             if (t < 0) t = getenv("NB_CMD_TRACE") != NULL;
@@ -3193,7 +3216,7 @@ static int nb_walk(RdpFifo *fifo, unsigned int stop_depth, int nested)
                     nb_dl_enter(splice);
                     continue;
                 }
-                nb_packet_bytes=0; /* texrect's 7b0/7b4 callback drains */
+                nb_packet_drain(); /* texrect's 7b0/7b4 callback drains */
             }
             words[0] = (int32_t)w0;
             words[1] = (int32_t)w1;
@@ -3205,7 +3228,7 @@ static int nb_walk(RdpFifo *fifo, unsigned int stop_depth, int nested)
                 nb_rdp_append(fifo, words, 2);
                 nb_dl_step(8u);
             }
-            if(nb_packet_bytes>0xf0u)nb_packet_bytes=0;
+            if(nb_packet_bytes>0xf0u)nb_packet_drain();
             continue;
         }
 
@@ -3355,7 +3378,7 @@ static int nb_walk(RdpFifo *fifo, unsigned int stop_depth, int nested)
             nb.dl    = nb.chunk + nb.off;
             nb_chunk_shadow();
             nb_dmem_w32(0x5a0u, nb.chunk);
-            nb_packet_bytes=0; /* c4c */
+            nb_packet_drain(); /* c4c */
             mode = nb_dmem_r32(0x120u) & 0xffcfffffu;
             nb_dmem_w32(0xe70u, mode);
             nb_dmem_w32(0xe60u, mode | 0x00100000u);
@@ -3485,7 +3508,7 @@ static int nb_walk(RdpFifo *fifo, unsigned int stop_depth, int nested)
                      >> 24) == 0xefu)
                 {fifo->used -= 8u;nb_packet_bytes-=8u;}
                 nb_rdp_append(fifo, words, 2);
-                if(nb_packet_bytes>0xf0u)nb_packet_bytes=0;
+                if(nb_packet_bytes>0xf0u)nb_packet_drain();
             }
             nb_dl_step(8u);
             continue;
@@ -3570,8 +3593,11 @@ static int nb_walk(RdpFifo *fifo, unsigned int stop_depth, int nested)
 
 int naboo_run_dl(RdpFifo *fifo, unsigned int dl_addr, int resume)
 {
+    int result;
     if(!resume)naboo_task_reset(dl_addr);
-    return nb_walk(fifo,0,0);
+    result = nb_walk(fifo,0,0);
+    if (result >= 0) nb_packet_drain();
+    return result;
 }
 
 /* Unit-test hook for the clip overlay: seed DMEM via

@@ -10,6 +10,7 @@ void naboo_set_rdram(unsigned char *rdram);
 void naboo_set_rdram_size(unsigned int size);
 void naboo_task_reset(unsigned int dl);
 void naboo_seed_dmem(const unsigned char *dmem);
+void naboo_seed_output(unsigned int end, unsigned int current);
 void naboo_set_emit(int on);
 void naboo_set_clock(unsigned int clock);
 void naboo_set_phase(unsigned int phase);

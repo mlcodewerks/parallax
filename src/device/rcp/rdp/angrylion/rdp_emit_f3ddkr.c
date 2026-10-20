@@ -254,7 +254,7 @@ static void f3ddkr_run_dl_impl(GSPState *gsp, RdpFifo *fifo, unsigned int addr,
         w1 = rd32(r, pc + 4);
         cmd = (int)((w0 >> 24) & 0xff);
         hle_timing_graphics_family("gfx_f3ddkr");
-        hle_timing_add(HLE_WORK_COMMAND, 1);
+        hle_timing_command(cmd);
         pc += 8;
 
         switch (cmd)

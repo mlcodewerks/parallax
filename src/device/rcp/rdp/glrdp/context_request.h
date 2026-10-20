@@ -9,7 +9,7 @@ static inline bool glrdp_request_context(retro_environment_t environment,
 {
     unsigned preferred = RETRO_HW_CONTEXT_NONE;
     bool es;
-#ifdef GLRDP_DEFAULT_GLES2
+#ifdef GLRDP_DEFAULT_GLES3
     es = true;
 #else
     es = false;
@@ -24,8 +24,8 @@ static inline bool glrdp_request_context(retro_environment_t environment,
             es = false;
     }
     for (unsigned attempt = 0; attempt < 2; ++attempt, es = !es) {
-        hw->context_type = es ? RETRO_HW_CONTEXT_OPENGLES2 : RETRO_HW_CONTEXT_OPENGL_CORE;
-        hw->version_major = es ? 2 : 3;
+        hw->context_type = es ? RETRO_HW_CONTEXT_OPENGLES3 : RETRO_HW_CONTEXT_OPENGL_CORE;
+        hw->version_major = 3;
         hw->version_minor = es ? 0 : 3;
         if (environment(RETRO_ENVIRONMENT_SET_HW_RENDER, hw)) return true;
     }

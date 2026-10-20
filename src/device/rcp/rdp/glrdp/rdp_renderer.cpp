@@ -20,6 +20,14 @@ std::int64_t edge(std::int32_t x, std::int32_t dx, std::int32_t y, std::int32_t 
 }
 GLuint compile(GLenum type, const char *src) {
     GLuint s = glCreateShader(type);
+    std::string embedded;
+    if (glrdp_gles3) {
+        embedded = src;
+        embedded.replace(0, embedded.find('\n') + 1,
+                         "#version 300 es\nprecision highp float;\nprecision highp int;\n"
+                         "precision highp sampler2D;\nprecision highp usampler2D;\n");
+        src = embedded.c_str();
+    }
     glShaderSource(s, 1, &src, nullptr);
     glCompileShader(s);
     GLint ok = 0;
@@ -1216,7 +1224,7 @@ int framebuffer_coverage_fixed(ivec4 value) {
         return value.a >> 5;
     if (fill_image_format != 0)
         return (((value.g >> 3) & 3) << 1) | (value.b >> 7);
-    return clamp(int(floor(value.a * 8.0 / 255.0 + 0.5)) - 1, 0, 7);
+    return clamp(int(floor(float(value.a) * 8.0 / 255.0 + 0.5)) - 1, 0, 7);
 }
 bool depth_compare_farther;
 uint depth_compare_coverage;
@@ -1927,6 +1935,10 @@ void RDPRenderer::initialize_samplers(GLuint program) {
 }
 void RDPRenderer::shutdown() {
     flush();
+    if (stats_.primitives)
+        std::fprintf(stderr, "GLRDP batch limits = capacity=%u queues=%llu queue_full=%llu state=%llu\n",
+            primitive_uniforms_.capacity, (unsigned long long)stats_.queues,
+            (unsigned long long)stats_.queue_flushes, (unsigned long long)stats_.state_flushes);
     if (primitive_ubo_ && stats_.primitives)
         std::fprintf(stderr, "GLRDP submission = primitives=%llu draws=%llu batches=%llu batched=%llu atlas_hits=%llu atlas_uploads=%llu atlas_resets=%llu standalone=%llu framebuffer_tiles=%llu framebuffer_readbacks=%llu\n",
             (unsigned long long)stats_.primitives, (unsigned long long)stats_.draws,
@@ -2143,6 +2155,7 @@ void RDPRenderer::upload_tile(const RDPState &s, std::uint8_t ti, unsigned unit)
         gpu_depth_.find(s.texture_image.address) != nullptr;
     if (framebuffer_tile) ++stats_.framebuffer_tiles;
     if (sig == tile_signature_[unit] && !(framebuffer_tile && tile_regions_[unit][2])) {
+        standalone_tiles_ |= tile_regions_[unit][2] == 0;
         return;
     }
     auto d = rdp_decode_tile(s, ti);
@@ -2202,7 +2215,6 @@ void RDPRenderer::upload_tile(const RDPState &s, std::uint8_t ti, unsigned unit)
 }
 void RDPRenderer::update_feedback(GLFramebuffer &f, bool copy, bool defer_barrier) {
     current_feedback_texture_ = feedback_texture_;
-    glActiveTexture(GL_TEXTURE2);
     if (glrdp_texture_barrier && f.internal_scale == 1 && copy) {
         // One quad invokes the fragment shader once per destination texel.
         // Separate native Z passes can read this colour image without writing it.
@@ -2210,13 +2222,12 @@ void RDPRenderer::update_feedback(GLFramebuffer &f, bool copy, bool defer_barrie
         if (!defer_barrier)
             glrdp_texture_barrier();
         current_feedback_texture_ = f.color;
-        glBindTexture(GL_TEXTURE_2D, f.color);
-        glBindFramebuffer(GL_FRAMEBUFFER, f.fbo);
         return;
     }
     if (feedback_w_ != f.width || feedback_h_ != f.height) {
         feedback_w_ = f.width;
         feedback_h_ = f.height;
+        glActiveTexture(GL_TEXTURE2);
         glBindTexture(GL_TEXTURE_2D, feedback_texture_);
         glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, f.width, f.height, 0, GL_RGBA, GL_UNSIGNED_BYTE,
                      nullptr);
@@ -2225,14 +2236,13 @@ void RDPRenderer::update_feedback(GLFramebuffer &f, bool copy, bool defer_barrie
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
     }
+    if (!copy) return;
     glBindFramebuffer(GL_READ_FRAMEBUFFER, f.fbo);
     glActiveTexture(GL_TEXTURE2);
     glBindTexture(GL_TEXTURE_2D, feedback_texture_);
     const int scale = f.internal_scale;
     const int x = bounds_x_ * scale, y = (f.native_height - bounds_y_ - bounds_h_) * scale;
-    if (copy)
-        glCopyTexSubImage2D(GL_TEXTURE_2D, 0, x, y, x, y, bounds_w_ * scale, bounds_h_ * scale);
-    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, f.fbo);
+    glCopyTexSubImage2D(GL_TEXTURE_2D, 0, x, y, x, y, bounds_w_ * scale, bounds_h_ * scale);
 }
 
 void RDPRenderer::configure_rdp_program(GLuint active_program, const GLFramebuffer &target,
@@ -2349,10 +2359,12 @@ void RDPRenderer::primitive_geometry(const std::vector<GLVertex> &v) {
     uniform_4f(uniform(program_, "rdp_color"), a.r, a.g, a.b, a.a);
     uniform_4f(uniform(program_, "rdp_uv"), a.u * a.inverse_w, a.v * a.inverse_w, a.inverse_w, 0);
 }
-void RDPRenderer::submit_records(const PrimitiveUniforms::Slot *records, unsigned count, GLuint shader) {
+void RDPRenderer::bind_primitive_pipeline(GLuint shader) {
     glUseProgram(shader);
     glBindVertexArray(vao_);
     glBindBuffer(GL_UNIFORM_BUFFER, primitive_ubo_);
+}
+void RDPRenderer::submit_records(const PrimitiveUniforms::Slot *records, unsigned count) {
     const auto stride = primitive_uniforms_.values.size() * sizeof(PrimitiveUniforms::Slot);
     // Stream into fresh, aligned ranges. Orphan only on wrap, so in-flight
     // draws never depend on bytes overwritten by a later batch.
@@ -2379,54 +2391,78 @@ void RDPRenderer::issue_geometry(const std::vector<GLVertex> &vertices, bool /*r
     if (vertices.empty()) return;
     primitive_geometry(vertices);
     bind_tiles();
-    submit_records(primitive_uniforms_.values.data(), 1, program_);
+    bind_primitive_pipeline(program_);
+    submit_records(primitive_uniforms_.values.data(), 1);
 }
 void RDPRenderer::flush() {
     if (batch_bounds_.empty()) return;
+    ++stats_.queues;
+    // No frontend or texture uploads run between these dependency groups.
+    // Set invariant pipeline state once for the complete queue.
+    glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+    if (!glrdp_gles3) glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
+    glDisable(GL_CULL_FACE); glDisable(GL_STENCIL_TEST); glDisable(GL_DITHER);
+    if (!glrdp_gles3) glDisable(GL_MULTISAMPLE);
+    glDisable(GL_BLEND);
+    glViewport(0, 0, batch_target_->width, batch_target_->height);
+    if (batch_depth_) {
+        glEnable(GL_DEPTH_TEST); glDepthFunc(GL_ALWAYS); glDepthMask(GL_TRUE);
+    } else {
+        glDisable(GL_DEPTH_TEST); glDepthMask(GL_FALSE);
+    }
+    glActiveTexture(GL_TEXTURE4); glBindTexture(GL_TEXTURE_2D, atlas_texture_);
+    bind_primitive_pipeline(batch_program_);
+    const auto stride = primitive_uniforms_.values.size();
+    std::vector<PrimitiveUniforms::Slot> records;
+    std::vector<PrimitiveBounds> bounds;
+    records.reserve(stride * primitive_uniforms_.capacity);
+    bounds.reserve(primitive_uniforms_.capacity);
+    for (const auto &group : batch_schedule_.groups) {
+        records.clear(); bounds.clear();
+        for (unsigned index : group) {
+            records.insert(records.end(), batch_records_.begin() + index * stride,
+                           batch_records_.begin() + (index + 1) * stride);
+            bounds.push_back(batch_bounds_[index]);
+        }
+        flush_batch(records, bounds);
+    }
+    batch_bounds_.clear(); batch_records_.clear(); batch_footprints_.clear(); batch_schedule_.clear();
+    batch_target_ = nullptr; batch_depth_ = nullptr;
+    batch_writes_z_ = batch_reads_color_ = false;
+}
+void RDPRenderer::flush_batch(const std::vector<PrimitiveUniforms::Slot> &records,
+                             const std::vector<PrimitiveBounds> &primitive_bounds) {
     auto &target = *batch_target_;
-    PrimitiveBounds bounds = batch_bounds_.front();
-    for (const auto &b : batch_bounds_) {
+    PrimitiveBounds bounds = primitive_bounds.front();
+    for (const auto &b : primitive_bounds) {
         const int x = std::min(bounds.x, b.x), y = std::min(bounds.y, b.y);
         bounds.w = std::max(bounds.x + bounds.w, b.x + b.w) - x;
         bounds.h = std::max(bounds.y + bounds.h, b.y + b.h) - y;
         bounds.x = x; bounds.y = y;
     }
-    glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
-    glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
-    glDisable(GL_CULL_FACE); glDisable(GL_STENCIL_TEST); glDisable(GL_DITHER);
-    glDisable(GL_MULTISAMPLE); glDisable(GL_BLEND);
+    const int saved[] = {bounds_x_, bounds_y_, bounds_w_, bounds_h_};
+    bounds_x_ = bounds.x; bounds_y_ = bounds.y; bounds_w_ = bounds.w; bounds_h_ = bounds.h;
+    update_feedback(target, batch_reads_color_, batch_depth_ != nullptr);
+    bounds_x_ = saved[0]; bounds_y_ = saved[1]; bounds_w_ = saved[2]; bounds_h_ = saved[3];
     if (batch_depth_) {
         gpu_depth_.begin_pass(*batch_depth_, bounds.x, target.native_height - bounds.y - bounds.h,
-                              bounds.w, bounds.h, true);
-        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT2, GL_TEXTURE_2D, target.color, 0);
-        const GLenum buffers[] = {GL_COLOR_ATTACHMENT2, GL_NONE, GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1};
+                              bounds.w, bounds.h, true, true);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, glrdp_combined_attachment(), GL_TEXTURE_2D, target.color, 0);
+        const GLenum buffers[] = {glrdp_combined_attachment(), GL_NONE, glrdp_depth_attachment(), glrdp_acceptance_attachment()};
         glDrawBuffers(4, buffers);
-        glEnable(GL_DEPTH_TEST); glDepthFunc(GL_ALWAYS); glDepthMask(GL_TRUE);
         glActiveTexture(GL_TEXTURE3);
         glBindTexture(GL_TEXTURE_2D, gpu_depth_.source_state_texture(*batch_depth_));
     } else {
-        if (batch_reads_color_) {
-            const int saved[] = {bounds_x_, bounds_y_, bounds_w_, bounds_h_};
-            bounds_x_ = bounds.x; bounds_y_ = bounds.y; bounds_w_ = bounds.w; bounds_h_ = bounds.h;
-            update_feedback(target, true);
-            bounds_x_ = saved[0]; bounds_y_ = saved[1]; bounds_w_ = saved[2]; bounds_h_ = saved[3];
-        }
         glBindFramebuffer(GL_FRAMEBUFFER, target.fbo);
         const GLenum color = GL_COLOR_ATTACHMENT0; glDrawBuffers(1, &color);
-        glDisable(GL_DEPTH_TEST); glDepthMask(GL_FALSE);
     }
-    glViewport(0, 0, target.width, target.height);
     // Each quad is already clipped to both its primitive bounds and scissor.
     glDisable(GL_SCISSOR_TEST);
     glActiveTexture(GL_TEXTURE2);
-    glBindTexture(GL_TEXTURE_2D, batch_depth_ || !batch_reads_color_ ? target.color : current_feedback_texture_);
-    glActiveTexture(GL_TEXTURE4); glBindTexture(GL_TEXTURE_2D, atlas_texture_);
-    submit_records(batch_records_.data(), unsigned(batch_bounds_.size()), batch_program_);
+    glBindTexture(GL_TEXTURE_2D, current_feedback_texture_);
+    submit_records(records.data(), unsigned(primitive_bounds.size()));
     if (batch_depth_) gpu_depth_.finish_pass(*batch_depth_, batch_writes_z_);
-    ++stats_.batches; stats_.batched_primitives += batch_bounds_.size();
-    batch_bounds_.clear(); batch_records_.clear();
-    batch_target_ = nullptr; batch_depth_ = nullptr;
-    batch_writes_z_ = batch_reads_color_ = false;
+    ++stats_.batches; stats_.batched_primitives += primitive_bounds.size();
 }
 
 bool RDPRenderer::render_gpu_depth(const std::vector<GLVertex> &vertices, bool textured,
@@ -2437,20 +2473,20 @@ bool RDPRenderer::render_gpu_depth(const std::vector<GLVertex> &vertices, bool t
     const bool combined =
         target.internal_scale == 1 && cycle_type < 2 && target.address != s.z_image_address;
     if (!gpu_depth_.begin_pass(surface, bounds_x_, target.native_height - bounds_y_ - bounds_h_,
-                               bounds_w_, bounds_h_, combined))
+                               bounds_w_, bounds_h_, combined, combined))
         return false;
     if (combined) {
         // GL3.3 MRT writes physical colour and the ping-pong Z/DZ state in
         // one fragment invocation. All reads use the old feedback/state.
-        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT2, GL_TEXTURE_2D, target.color,
+        glFramebufferTexture2D(GL_FRAMEBUFFER, glrdp_combined_attachment(), GL_TEXTURE_2D, target.color,
                                0);
-        const GLenum buffers[4] = {GL_COLOR_ATTACHMENT2, GL_NONE, GL_COLOR_ATTACHMENT0,
-                                   GL_COLOR_ATTACHMENT1};
+        const GLenum buffers[4] = {glrdp_combined_attachment(), GL_NONE, glrdp_depth_attachment(),
+                                   glrdp_acceptance_attachment()};
         glDrawBuffers(4, buffers);
     }
     glViewport(0, 0, target.native_width, target.native_height);
     glDisable(GL_BLEND);
-    glDisable(GL_MULTISAMPLE);
+    if (!glrdp_gles3) glDisable(GL_MULTISAMPLE);
     glEnable(GL_DEPTH_TEST);
     glDepthFunc(GL_ALWAYS);
     glDepthMask(GL_TRUE);
@@ -2571,11 +2607,13 @@ void RDPRenderer::draw_vertices(const std::vector<GLVertex> &v, bool textured, c
         batch_target_->format != s.color_image.format || batch_target_->size != s.color_image.size ||
         batch_target_->native_width != rdp_w_ || batch_target_->native_height != rdp_h_ ||
         batch_target_->z_address != s.z_image_address || batch_target_->cpu_dirty ||
-        batch_program_ != program_)) flush();
+        batch_program_ != program_)) { ++stats_.state_flushes; flush(); }
     const int writing_cycle = int((s.other_modes >> 52) & 3);
     const bool incoming_depth = (writing_cycle < 2 && (s.other_modes & 0x30u)) ||
         (writing_cycle == 3 && s.color_image.size == RDPImageSize::Bits16 && s.color_image.address == s.z_image_address);
-    if (batch_target_ && (bool(batch_depth_) != incoming_depth || (batch_depth_ && writing_cycle >= 2))) flush();
+    if (batch_target_ && (bool(batch_depth_) != incoming_depth || (batch_depth_ && writing_cycle >= 2))) {
+        ++stats_.state_flushes; flush();
+    }
     const bool raw16_fill = writing_cycle == 3 && s.color_image.size == RDPImageSize::Bits16 &&
                             s.color_image.address == s.z_image_address;
     const auto destination_bytes =
@@ -2718,19 +2756,25 @@ void RDPRenderer::draw_vertices(const std::vector<GLVertex> &v, bool textured, c
     const bool combined = depth_surface && target.internal_scale == 1 && cycle_type < 2 &&
                           target.address != s.z_image_address;
     const bool can_batch = !standalone_tiles_ && !fill_writes_z_image && target.address != target.z_address &&
-        (!needs_depth || (combined && glrdp_texture_barrier));
+        (!needs_depth || combined);
     if (can_batch) {
         const PrimitiveBounds bounds{bounds_x_, bounds_y_, bounds_w_, bounds_h_};
-        if ((batch_target_ && (batch_target_ != &target || batch_depth_ != depth_surface)) ||
-            batch_bounds_.size() >= primitive_uniforms_.capacity ||
-            std::any_of(batch_bounds_.begin(), batch_bounds_.end(), [&](const auto &b) { return b.intersects(bounds); }))
-            flush();
+        const PrimitiveFootprint footprint{bounds, triangle_edge_,
+            !rectangle && target.internal_scale == 1 && config_.coverage == GLRDP_COVERAGE_OFF,
+            cycle_type < 2 && !(s.other_modes & 8u)};
+        if (batch_target_ && (batch_target_ != &target || batch_depth_ != depth_surface)) {
+            ++stats_.state_flushes; flush();
+        } else if (batch_bounds_.size() >= PrimitiveScheduler::max_queued) {
+            ++stats_.queue_flushes; flush();
+        }
         configure_rdp_program(program_, target, s, textured, texture_is_framebuffer, cycle_type,
                               float(target.internal_scale), depth_surface != nullptr, false, false,
                               primitive_noise_seed, depth_surface != nullptr);
         primitive_geometry(v);
         batch_records_.insert(batch_records_.end(), primitive_uniforms_.values.begin(), primitive_uniforms_.values.end());
         batch_bounds_.push_back(bounds); batch_target_ = &target; batch_depth_ = depth_surface;
+        batch_schedule_.append(batch_footprints_, footprint, primitive_uniforms_.capacity);
+        batch_footprints_.push_back(footprint);
         batch_program_ = program_; batch_writes_z_ |= (s.other_modes & 0x20u) != 0;
         batch_reads_color_ |= rdp_reads_color_memory(s);
         target.raw_z = false; target.gpu_dirty = true;
@@ -2738,7 +2782,7 @@ void RDPRenderer::draw_vertices(const std::vector<GLVertex> &v, bool textured, c
     }
     flush();
     glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
-    glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
+    if (!glrdp_gles3) glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
     glDisable(GL_CULL_FACE); glDisable(GL_STENCIL_TEST); glDisable(GL_DITHER);
     update_feedback(target, rdp_reads_color_memory(s), combined);
     combined_depth_color_ = false;
@@ -2754,7 +2798,7 @@ void RDPRenderer::draw_vertices(const std::vector<GLVertex> &v, bool textured, c
         const GLenum draw_buffer = GL_COLOR_ATTACHMENT0;
         glDrawBuffers(1, &draw_buffer);
         glViewport(0, 0, target.width, target.height);
-        glDisable(GL_MULTISAMPLE);
+        if (!glrdp_gles3) glDisable(GL_MULTISAMPLE);
         primitive_scissor(target, s, target.internal_scale);
 
         // RDP Z compare/update is performed by the preceding GLSL 3.30 integer-texture
@@ -2787,6 +2831,7 @@ void RDPRenderer::draw_vertices(const std::vector<GLVertex> &v, bool textured, c
 }
 void RDPRenderer::draw_triangle(const RDPTriangle &t, const RDPState &s) {
     const auto &e = t.edge;
+    triangle_edge_ = e;
     max_mip_level_ = e.level;
     if (e.yh >= e.yl)
         return;
@@ -2930,7 +2975,7 @@ void RDPRenderer::present(const RDPState &state, std::uint32_t vi_status, std::u
     flush();
     const auto scanout = glrdp_scanout_config(config_);
     glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
-    glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
+    if (!glrdp_gles3) glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
     glDisable(GL_CULL_FACE);
     glDisable(GL_STENCIL_TEST);
     glDisable(GL_DITHER);

@@ -64,7 +64,7 @@ void alist_naudio_walk(struct hle_t* hle, const acmd_callback_t abi[], int banjo
         hle->alist_processed += 8;
         hle->alist_chunk -= 8;
         hle->alist_chunk_offset += 8;
-        hle_timing_add(HLE_WORK_COMMAND, 1);
+        hle_timing_command(acmd);
         if (banjo && acmd == 0x0e) {
             /* 02b0 is inside SETVOL, after v0 was derived. */
             hle->alist_naudio.rate[1] = (int32_t)((hle->alist_v0 << 16) | (w2 & 0xffff));

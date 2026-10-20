@@ -3,8 +3,6 @@
 #include "gl_state_guard.hpp"
 #include "rdp_parser.hpp"
 #include "rdp_renderer.hpp"
-#include "gles2_renderer.hpp"
-#include "gl_state_guard_es2.hpp"
 #include "renderer_options.h"
 #include <algorithm>
 #include <cstring>
@@ -23,21 +21,10 @@ retro_hw_render_callback hw{};
 N64Memory rdram_memory;
 std::unique_ptr<RDPCommandParser> parser;
 std::unique_ptr<RDPRenderer> renderer;
-std::unique_ptr<GLES2Renderer> es_renderer;
 std::unique_ptr<GLStateGuard> frame_guard;
-std::unique_ptr<ES2Guard> es_frame_guard;
-bool ready = false, opened = false, es2 = false;
+bool ready = false, opened = false, gles3 = false;
 std::vector<uint8_t> command_bytes;
-struct ContextGuard {
-    std::unique_ptr<GLStateGuard> desktop;
-    std::unique_ptr<ES2Guard> embedded;
-    ContextGuard() {
-        if (es2)
-            embedded = std::make_unique<ES2Guard>();
-        else
-            desktop = std::make_unique<GLStateGuard>();
-    }
-};
+using ContextGuard = GLStateGuard;
 
 void error(const char *operation, const char *detail) {
     if (log_cb)
@@ -45,15 +32,6 @@ void error(const char *operation, const char *detail) {
 }
 bool initialize_renderer() {
     ContextGuard guard;
-    if (es2) {
-        es_renderer = std::make_unique<GLES2Renderer>();
-        es_renderer->set_rendering_config(renderer_settings.glrdp);
-        if (!es_renderer->initialize(&rdram_memory))
-            return false;
-        es_renderer->set_internal_resolution_scale(renderer_settings.upscale);
-        es_renderer->set_output_size(640, 480);
-        return true;
-    }
     renderer = std::make_unique<RDPRenderer>();
     renderer->set_rendering_config(renderer_settings.glrdp);
     if (!renderer->initialize(&rdram_memory))
@@ -66,15 +44,16 @@ bool initialize_renderer() {
 
 bool glrdp_context_reset(const retro_hw_render_callback *callback) {
     hw = *callback;
-    es2 = hw.context_type == RETRO_HW_CONTEXT_OPENGLES2;
-    ready = load_gl33(hw.get_proc_address, es2);
+    gles3 = hw.context_type == RETRO_HW_CONTEXT_OPENGLES3 ||
+          hw.context_type == RETRO_HW_CONTEXT_OPENGLES_VERSION;
+    ready = load_gl33(hw.get_proc_address, gles3);
     if (!ready) {
-        error("context", "required GL 3.3 / GLES2 entry points unavailable");
+        error("context", "required GL 3.3 / GLES3 entry points unavailable");
         return false;
     }
     if (log_cb)
         log_cb(RETRO_LOG_INFO, "GLRDP: %s; %s.\n", glGetString(GL_VERSION),
-               es2 ? "native GLES2 RDP" : "native GL 3.3 RDP");
+               gles3 ? "native GLES3 RDP" : "native GL 3.3 RDP");
     if (log_cb) {
         const auto &c = renderer_settings.glrdp;
         const char *levels[] = {"off", "reduced", "full", "2x"};
@@ -112,11 +91,6 @@ void glrdp_context_destroy() {
         renderer->shutdown();
         renderer.reset();
     }
-    es_frame_guard.reset();
-    if (es_renderer) {
-        es_renderer->shutdown();
-        es_renderer.reset();
-    }
     ready = false;
 }
 bool glrdp_open() {
@@ -129,40 +103,25 @@ bool glrdp_open() {
         parser = std::make_unique<RDPCommandParser>();
         parser->set_memory(&rdram_memory);
         parser->callbacks().draw_triangle = [](const auto &t, const auto &s) {
-            if (es2)
-                es_renderer->draw_triangle(t, s);
-            else
-                renderer->draw_triangle(t, s);
+            renderer->draw_triangle(t, s);
         };
         parser->callbacks().draw_texture_rectangle = [](const auto &t, const auto &s) {
-            if (es2)
-                es_renderer->draw_texture_rectangle(t, s);
-            else
-                renderer->draw_texture_rectangle(t, s);
+            renderer->draw_texture_rectangle(t, s);
         };
         parser->callbacks().draw_fill_rectangle = [](const auto &t, const auto &s) {
-            if (es2)
-                es_renderer->draw_fill_rectangle(t, s);
-            else
-                renderer->draw_fill_rectangle(t, s);
+            renderer->draw_fill_rectangle(t, s);
         };
         parser->callbacks().before_texture_load = [](const auto &state) {
-            if (es2)
-                es_renderer->fb_read(state.texture_image.address);
-            else
-                renderer->fb_read(state.texture_image.address);
+            renderer->fb_read(state.texture_image.address);
         };
         // A retired depth allocation is no longer reported in FBInfo. Commit
         // it before CPU/DMA can reuse that RAM without write notifications.
         parser->callbacks().before_z_image_change = [](const auto &state) {
-            if (es2)
-                es_renderer->fb_read(state.z_image_address);
-            else
-                renderer->fb_read(state.z_image_address);
+            renderer->fb_read(state.z_image_address);
         };
         // The core schedules DP completion. Never alter DPC_CLOCK or deliver an early IRQ.
         parser->callbacks().sync_full = [] { if (renderer) renderer->flush(); *gfx_info.MI_INTR_REG |= 0x20; };
-        opened = (renderer || es_renderer) || initialize_renderer();
+        opened = renderer || initialize_renderer();
     } catch (const std::exception &e) {
         error("open", e.what());
         glrdp_close();
@@ -174,16 +133,12 @@ void glrdp_close() {
         renderer->shutdown();
         renderer.reset();
     }
-    if (es_renderer) {
-        es_renderer->shutdown();
-        es_renderer.reset();
-    }
     parser.reset();
     opened = false;
     command_bytes.clear();
 }
 void glrdp_process_commands() {
-    if (!ready || !opened || !parser || (!renderer && !es_renderer))
+    if (!ready || !opened || !parser || !renderer)
         return;
     const uint32_t start = *gfx_info.DPC_CURRENT_REG & 0x00fffff8;
     const uint32_t end = *gfx_info.DPC_END_REG & 0x00fffff8;
@@ -218,10 +173,7 @@ void glrdp_begin_frame() {
     if (!ready)
         return;
     try {
-        if (es2 && !es_frame_guard)
-            es_frame_guard = std::make_unique<ES2Guard>();
-        else if (!es2 && !frame_guard)
-            frame_guard = std::make_unique<GLStateGuard>();
+        if (!frame_guard) frame_guard = std::make_unique<GLStateGuard>();
     } catch (const std::exception &e) {
         error("frame state", e.what());
     }
@@ -229,10 +181,9 @@ void glrdp_begin_frame() {
 void glrdp_end_frame() {
     if (renderer) renderer->flush();
     frame_guard.reset();
-    es_frame_guard.reset();
 }
 void glrdp_present() {
-    if (!ready || !opened || (!renderer && !es_renderer) || !parser)
+    if (!ready || !opened || !renderer || !parser)
         return;
     try {
         ContextGuard guard;
@@ -244,39 +195,31 @@ void glrdp_present() {
                         *gfx_info.VI_X_SCALE_REG, *gfx_info.VI_Y_SCALE_REG, *gfx_info.VI_V_SYNC_REG,
                         *gfx_info.VI_V_CURRENT_LINE_REG);
         };
-        if (es2)
-            present(*es_renderer);
-        else
-            present(*renderer);
+        present(*renderer);
         libretro_swap_buffer = true;
     } catch (const std::exception &e) {
         error("present", e.what());
     }
 }
 void glrdp_fb_read(uint32_t address) {
-    if (!ready || (!renderer && !es_renderer))
+    if (!ready || !renderer)
         return;
     try {
-        if (es2)
-            es_renderer->fb_read(address);
-        else
-            renderer->fb_read(address);
+        renderer->fb_read(address);
     } catch (const std::exception &e) {
         error("framebuffer read", e.what());
     }
 }
 void glrdp_fb_write(uint32_t address, uint32_t size) {
-    if (es_renderer)
-        es_renderer->fb_write(address, size);
-    else if (renderer)
+    if (renderer)
         renderer->fb_write(address, size);
 }
 void glrdp_fb_info(void *data) {
     auto *info = static_cast<FrameBufferInfo *>(data);
     std::memset(info, 0, 6 * sizeof(*info));
-    if ((!renderer && !es_renderer) || !parser)
+    if (!renderer || !parser)
         return;
-    auto &manager = es2 ? es_renderer->framebuffers() : renderer->framebuffers();
+    auto &manager = renderer->framebuffers();
     std::vector<const GLFramebuffer *> buffers;
     for (const auto &[key, f] : manager.buffers())
         if (f.fbo && f.address && f.size != RDPImageSize::Bits4)
@@ -295,8 +238,7 @@ void glrdp_fb_info(void *data) {
             break;
     }
     const auto &state = parser->state();
-    const auto dimensions = es2 ? es_renderer->depth_dimensions(state.z_image_address)
-                                : renderer->depth_dimensions(state.z_image_address);
+    const auto dimensions = renderer->depth_dimensions(state.z_image_address);
     bool already_listed = false;
     for (unsigned i = 0; i < index; ++i)
         already_listed |= info[i].addr == state.z_image_address;

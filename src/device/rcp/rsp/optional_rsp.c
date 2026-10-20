@@ -37,6 +37,16 @@ extern void parallelRSPGetGraphicsLatches(uint16_t values[32][8]);
 extern void parallelRSPSetGraphicsLatches(const uint16_t values[32][8],uint32_t);
 static struct hle_t hle;
 static RSP_INFO info;
+static void capture_cp0(uint32_t words[16])
+{
+    const uint32_t values[16] = {
+        *info.SP_MEM_ADDR_REG, *info.SP_DRAM_ADDR_REG, *info.SP_RD_LEN_REG, *info.SP_WR_LEN_REG,
+        *info.SP_STATUS_REG, *info.SP_DMA_FULL_REG, *info.SP_DMA_BUSY_REG, *info.SP_SEMAPHORE_REG,
+        *info.DPC_START_REG, *info.DPC_END_REG, *info.DPC_CURRENT_REG, *info.DPC_STATUS_REG,
+        *info.DPC_CLOCK_REG, *info.DPC_BUFBUSY_REG, *info.DPC_PIPEBUSY_REG, *info.DPC_TMEM_REG
+    };
+    memcpy(words, values, sizeof(values));
+}
 static unsigned int forwarded_cycles;
 static unsigned int start_status;
 static int forwarded;
@@ -45,6 +55,12 @@ static const char *graphics_capture_prefix;
 static unsigned int graphics_capture_started, graphics_capture_count;
 static unsigned long long graphics_tasks, audio_tasks, other_tasks, boot_tasks, lle_tasks;
 static int timing_probe_active, timing_probe_failed;
+static uint32_t timing_probe_status;
+uint32_t optional_rsp_timing_status(void){return timing_probe_status;}
+static uint32_t timing_probe_supported;
+uint32_t optional_rsp_timing_supported(void){return timing_probe_supported;}
+static uint32_t timing_probe_full_rdram;
+uint32_t optional_rsp_timing_full_rdram(void){return timing_probe_full_rdram;}
 static uint32_t timing_probe_t6;
 static uint32_t timing_probe_f5[7];
 void optional_rsp_timing_f5(uint32_t *values){memcpy(values,timing_probe_f5,sizeof(timing_probe_f5));}
@@ -54,6 +70,31 @@ uint32_t optional_rsp_timing_t6(void){return timing_probe_t6;}
 
 static unsigned char *get_rdram(void) { return info.RDRAM; }
 static unsigned char *get_dmem(void) { return info.DMEM; }
+static void boot_probe(struct hle_t *h, uint32_t state[PARALLEL_RSP_STATE_WORDS], int commit)
+{
+    uint32_t result=parallelRSPHleBootProbe((const uint32_t*)h->imem,
+        (const uint32_t*)h->dmem,state,&h->rsp_vco);
+    if(result&0x80000u) {
+        if(!(result&0x100000u) || !(*h->sp_status&0x4000u)) {
+            uint32_t clock=*h->dpc_clock;
+            if(!(clock&0x7fu)) {
+                const unsigned char *source=(clock&0x1000u)?h->imem:h->dmem;
+                uint32_t address=(clock>>2)&0x7ffff8u;
+                memmove(h->dram+address,source+(clock&0xff8u),8);
+            }
+        }
+        return;
+    }
+    if(result&0x10000u) {
+        uint32_t address=*(const uint32_t*)(h->dmem+0xfc8)&0x7ffff8u;
+        memcpy(h->dram+address,h->imem+(result&0xff8u),8);
+        *h->sp_status=(*h->sp_status&~0x4000u)|((result&0x20000u)?0x4000u:0u);
+        if(result&0x40000u) {
+            h->rsp_vco_written=1;
+            if(commit)parallelRSPLoadState(state);
+        }
+    }
+}
 static unsigned int get_rdram_size(void) { return 0x800000; }
 static void submit(const unsigned char *storage, unsigned int base, unsigned int bytes)
 {
@@ -87,7 +128,11 @@ static void time_packet(const int32_t *words, unsigned int count)
 {
     rdp_time_hle(&g_dev.dp, (const uint32_t *)words, count, hle_timing_cycles());
 }
-static const RdpEmitBackend backend = {get_rdram, get_rdram_size, get_dmem, submit, time_packet};
+static void get_dpc_state(unsigned int state[3])
+{
+    state[0]=*info.DPC_END_REG;state[1]=*info.DPC_CURRENT_REG;state[2]=*info.DPC_STATUS_REG;
+}
+static const RdpEmitBackend backend = {get_rdram, get_rdram_size, get_dmem, submit, time_packet, get_dpc_state};
 
 void optional_rsp_init(RSP_INFO rsp_info)
 {
@@ -117,12 +162,20 @@ void optional_rsp_init(RSP_INFO rsp_info)
     hle_stream_state_load(NULL);
 }
 
-static int graphics_supported(const uint32_t *task)
+static int graphics_supported_memory(const uint32_t *task, unsigned char *ram, unsigned char *dmem)
 {
     unsigned int sum = 0, i;
     graphics_checksum=0;
 
-    if (zsort_ucode_match(info.RDRAM, 0x800000, task[6], task[7]))
+    for (i = 0; i < (task[5] < 0xf80 ? task[5] : 0xf80) / 2; i++)
+        sum += ram[task[4] + i];
+    graphics_checksum=sum;
+    /* A yielded task resumes from its saved DMEM, not TASK_DATA_PTR.
+     * Only a walker with a live continuation may consume it. Otherwise
+     * let the native boot restore the yield buffer and saved registers. */
+    if ((task[1] & 1u) && !hle_stream_can_resume(sum)) return 0;
+
+    if (zsort_ucode_match(ram, 0x800000, task[6], task[7]))
     {
         /* Optional local capture for RSP disassembly/oracle tests. RDRAM
          * words retain the core's host-native byte order in this file. */
@@ -134,39 +187,40 @@ static int graphics_supported(const uint32_t *task)
             if (file)
             {
                 unsigned int text_bytes = task[5] < 0xf80 ? task[5] : 0xf80;
-                fwrite(info.RDRAM + task[4], 1, text_bytes, file);
-                fwrite(info.RDRAM + task[6], 1, task[7], file);
+                fwrite(ram + task[4], 1, text_bytes, file);
+                fwrite(ram + task[6], 1, task[7], file);
                 fclose(file);
                 captured = 1;
                 DebugMessage(M64MSG_INFO, "ZSortp capture: text %08x/%x data %08x/%x",
                     task[4], text_bytes, task[6], task[7]);
             }
         }
-        return zsort_validate(info.RDRAM, 0x800000, info.DMEM, task[12] & 0xffffff);
+        return zsort_validate(ram, 0x800000, dmem, task[12] & 0xffffff);
     }
 
-    for (i = 0; i < (task[5] < 0xf80 ? task[5] : 0xf80) / 2; i++)
-        sum += info.RDRAM[task[4] + i];
-    graphics_checksum=sum;
     if (sum == 0x28b9e || sum == 0x2095b || sum == 0x1f7bb ||
         sum == 0x25c16 || sum == 0x25c53)
         return !(task[1] & 1) || hle_stream_can_resume(sum);
-    return rdp_emit_hle_supported(info.RDRAM, 0x800000, task[4], task[6], task[7]);
+    return rdp_emit_hle_supported(ram, 0x800000, task[4], task[6], task[7]);
 }
+static int graphics_supported(const uint32_t *task)
+{ return graphics_supported_memory(task, info.RDRAM, info.DMEM); }
 
-static int audio_supported(const uint32_t *task)
+static int audio_supported_memory(const uint32_t *task, unsigned char *ram)
 {
-    const uint32_t *data = (const uint32_t *)(info.RDRAM + task[6]);
+    const uint32_t *data = (const uint32_t *)(ram + task[6]);
     /* Match upstream hle.c's try_audio_task_detection branch order: ABI1
      * takes precedence over the v2 signature; v1 is in the non-ABI1 branch.
      * Validate every task, even when the dispatcher has cached its ucode. */
     if (data[0] == 1) {
         if (data[12] != 0xf0000f00 && data[4] == 0x00010010)
-            return musyx_v2_supported(info.RDRAM, task[12], task[13]);
+            return musyx_v2_supported(ram, task[12], task[13]);
     } else if (data[4] == 1)
-        return musyx_v1_supported(info.RDRAM, task[12], task[13]);
+        return musyx_v1_supported(ram, task[12], task[13]);
     return 1;
 }
+static int audio_supported(const uint32_t *task)
+{ return audio_supported_memory(task, info.RDRAM); }
 
 /* Standalone input snapshots for the private ROM-instruction replay harness.
  * Capture only task starts: a streaming continuation needs the walker's private
@@ -214,6 +268,7 @@ static void graphics_capture_begin(const uint32_t *task)
         parallelRSPSaveState(state);
         fwrite(tag, sizeof(tag), 1, file);
         fwrite(state, sizeof(state), 1, file);
+        { uint32_t cp0[16]; capture_cp0(cp0); hle_capture_write_cp0(file, cp0); }
     }
     fclose(file);
 }
@@ -248,14 +303,19 @@ unsigned int optional_rsp_execute(unsigned int cycles)
     start_status = *info.SP_STATUS_REG;
     parallelRSPResetExecutedCycles();
     hle.rsp_vco=parallelRSPGetVCO();hle.rsp_vco_written=0;
+    rsp_graphics_entry_carry(hle.rsp_vco);
     hle.rsp_t6=parallelRSPGetT6();hle.rsp_t6_written=0;naboo_set_phase(hle.rsp_t6);
     parallelRSPGetF5Context(hle.rsp_f5);hle.rsp_f5_written=0;naboo_set_context(hle.rsp_f5);
     rsp_tri_factor5_seed_fraction(hle.rsp_f5[0]);
-    if(kind==HLE_TASK_GRAPHICS && (graphics_checksum==0x25c16u || graphics_checksum==0x25c53u)){
+    if(kind==HLE_TASK_GRAPHICS){
         uint16_t latches[32][8];parallelRSPGetGraphicsLatches(latches);rsp_factor5_seed(latches);
         naboo_set_packet_cursor(parallelRSPGetPacketCursor());
     }
     if (kind == HLE_TASK_GRAPHICS) graphics_capture_begin(task);
+    if ((*(const uint32_t*)hle.imem & 0xfc000000u) == 0x08000000u) {
+        uint32_t state[PARALLEL_RSP_STATE_WORDS];parallelRSPSaveState(state);
+        boot_probe(&hle,state,1);
+    }
     hle_execute(&hle);
     if(!forwarded && hle.rsp_vco_written)parallelRSPSetVCO(hle.rsp_vco);
     if(!forwarded){
@@ -266,7 +326,7 @@ unsigned int optional_rsp_execute(unsigned int cycles)
             uint32_t context[5];rsp_tri_factor5_context(context);
             hle.rsp_f5[0]=context[0];hle.rsp_f5_written=1u;
         }
-        if(kind==HLE_TASK_GRAPHICS && (graphics_checksum==0x25c16u || graphics_checksum==0x25c53u)){
+        if(kind==HLE_TASK_GRAPHICS){
             uint16_t latches[32][8];uint32_t mask=rsp_factor5_get(latches);
             parallelRSPSetGraphicsLatches(latches,mask);
             parallelRSPSetPacketCursor(naboo_get_packet_cursor());
@@ -397,14 +457,19 @@ static void probe_submit(const unsigned char *p, unsigned int base, unsigned int
     }
     if (dump) { fwrite(p, bytes, 1, dump); fclose(dump); }
 }
-static const RdpEmitBackend probe_backend = {probe_get_ram, get_rdram_size, probe_get_dmem, probe_submit};
+static unsigned int probe_dpc[3];
+static void probe_get_dpc_state(unsigned int state[3]) { memcpy(state,probe_dpc,sizeof(probe_dpc)); }
+static const RdpEmitBackend probe_backend = {probe_get_ram, get_rdram_size, probe_get_dmem, probe_submit, NULL, probe_get_dpc_state};
 
 unsigned int optional_rsp_timing_replay(const char *path, char *family,
     uint32_t *units, unsigned int *estimate, unsigned int *diffs, unsigned int *written)
 {
+    timing_probe_status = 0;
+    timing_probe_supported = 0;
+    timing_probe_full_rdram = 0;
     FILE *f = fopen(path, "rb");
     uint32_t header[4], regs[32] = {0};
-    unsigned char *memory = NULL, *snapshot = NULL;
+    unsigned char *memory = NULL, *snapshot = NULL, *expected_ram = NULL;
     struct hle_t probe;
     struct hle_timing_work work;
     probe_rdp_hash = UINT64_C(14695981039346656037); probe_rdp_words = 0;
@@ -417,10 +482,24 @@ unsigned int optional_rsp_timing_replay(const char *path, char *family,
     if (!f) return 0;
     memory = (unsigned char *)malloc(0x802000);
     snapshot = (unsigned char *)malloc(optional_rsp_state_size());
-    if (!memory || !snapshot || fread(header, sizeof(header), 1, f) != 1 ||
+    expected_ram = (unsigned char *)malloc(0x800000);
+    if (!memory || !snapshot || !expected_ram || fread(header, sizeof(header), 1, f) != 1 ||
         header[0] != 0x484c5431u || (!header[1] && header[3] != 0x47465849u) ||
         fread(memory, 0x802000, 1, f) != 1) goto finish;
+    memcpy(expected_ram, memory, 0x800000);
     optional_rsp_save(snapshot);
+    {
+        uint32_t cp0[16];unsigned i;
+        if (hle_capture_cp0(f, cp0)) {
+            for (i=0;i<7;++i) regs[i+1]=cp0[i];
+            regs[9]=cp0[7];
+            for (i=8;i<16;++i) regs[i+2]=cp0[i];
+            /* Offline DMA/RDP service completes immediately; keep input
+             * signal bits and DPC_CLOCK, which some boot programs read. */
+            regs[5]&=~3u;regs[6]=regs[7]=0;
+            regs[12]=regs[11];regs[13]&=1u;regs[15]=regs[16]=regs[17]=0;
+        }
+    }
     memset(&probe, 0, sizeof(probe));
     hle_init(&probe, memory, memory + 0x800000, memory + 0x801000,
         &regs[0], &regs[1], &regs[2], &regs[3], &regs[4], &regs[5], &regs[6],
@@ -429,28 +508,51 @@ unsigned int optional_rsp_timing_replay(const char *path, char *family,
     probe.hle_gfx = 1;
     probe.hle_aud = 0;
     probe.rsp_vco=hle_capture_vco(f);
+    rsp_graphics_entry_carry(probe.rsp_vco);
     probe.rsp_t6=hle_capture_t6(f);naboo_set_phase(probe.rsp_t6);
     hle_capture_f5(f,probe.rsp_f5);naboo_set_context(probe.rsp_f5);
     probe_ram = memory; probe_dmem = memory + 0x800000;
+    probe_dpc[0]=regs[11];probe_dpc[1]=regs[12];probe_dpc[2]=regs[13];
     rdp_emit_set_backend(&probe_backend);
     rdp_emit_hle_reset(); rdp_emit_stream_load(NULL); hle_stream_state_load(NULL);
     rsp_tri_factor5_seed_fraction(probe.rsp_f5[0]);
     {
         uint32_t state[369];uint16_t latches[32][8]={{0}};
         if(hle_capture_rsp(f,state,369)){
-            unsigned r,k;for(r=0;r<32;r++)for(k=0;k<8;k++)latches[r][k]=(uint16_t)state[37+r*8+k];
+            unsigned r,k;for(r=0;r<32;r++)for(k=0;k<8;k++)latches[r][k]=(uint16_t)state[PARALLEL_RSP_STATE_VECTOR_OFFSET+r*8+k];
             naboo_set_packet_cursor(state[21]);
         }else naboo_set_packet_cursor(0);
         rsp_factor5_seed(latches);
     }
     timing_probe_active = 1; timing_probe_failed = 0;
+    /* Audio state slabs overlap OSTask in native DMEM. Completion may
+     * legitimately overwrite task metadata, so classify its input once. */
+    enum hle_task_kind probe_kind = hle_get_task_kind(&probe);
+    {
+        const uint32_t *task=(const uint32_t *)(probe.dmem+0xfc0);
+        timing_probe_supported=probe_kind!=HLE_TASK_UNKNOWN;
+        if(task[3]<=0x1000 && ((task[4]&3) || task[4]>0x7ff000 ||
+            (task[6]&3) || task[6]>0x7ff000 || task[7]>0x1000 ||
+            (task[12]&3) || task[12]>=0x800000 || task[13]>0x800000-task[12]))
+            timing_probe_supported=0;
+        if(timing_probe_supported && probe_kind==HLE_TASK_GRAPHICS)
+            timing_probe_supported=graphics_supported_memory(task,memory,probe.dmem);
+        if(timing_probe_supported && probe_kind==HLE_TASK_AUDIO)
+            timing_probe_supported=!(task[12]&7) && audio_supported_memory(task,memory);
+    }
     uint32_t saved_limit=hle_timing_slice_limit();hle_timing_set_slice_limit(0);
+    if ((*(const uint32_t*)probe.imem & 0xfc000000u) == 0x08000000u) {
+        uint32_t state[PARALLEL_RSP_STATE_WORDS]={0};
+        hle_capture_rsp(f,state,PARALLEL_RSP_STATE_WORDS);
+        boot_probe(&probe,state,0);
+    }
     hle_execute(&probe);
+    timing_probe_status = *probe.sp_status;
     hle_timing_set_slice_limit(saved_limit);
     timing_probe_t6=probe.rsp_t6;
     memcpy(timing_probe_f5,probe.rsp_f5,sizeof(timing_probe_f5));
-    if(hle_get_task_kind(&probe)==HLE_TASK_GRAPHICS)naboo_get_phase(&timing_probe_t6);
-    if(hle_get_task_kind(&probe)==HLE_TASK_GRAPHICS)naboo_get_context(timing_probe_f5);
+    if(probe_kind==HLE_TASK_GRAPHICS)naboo_get_phase(&timing_probe_t6);
+    if(probe_kind==HLE_TASK_GRAPHICS)naboo_get_context(timing_probe_f5);
     work = hle_timing_get();
     if(work.family && !strcmp(work.family,"rs_gfx_task")){
         uint32_t context[5];rsp_tri_factor5_context(context);timing_probe_f5[0]=context[0];
@@ -461,7 +563,7 @@ unsigned int optional_rsp_timing_replay(const char *path, char *family,
         *estimate = hle_timing_cycles(); measured = header[1];
         {
             uint32_t count;
-            if (fread(&count, sizeof(count), 1, f) == 1 && count <= 512u) {
+            if (fread(&count, sizeof(count), 1, f) == 1 && count <= HLE_CAPTURE_MAX_RANGES) {
                 unsigned int r;
                 *diffs = *written = 0;
                 for (r = 0; r < count; r++) {
@@ -472,6 +574,7 @@ unsigned int optional_rsp_timing_replay(const char *path, char *family,
                     for (i = 0; i < span[1]; i++) {
                         int expected = fgetc(f);
                         if (expected < 0) { *diffs = *written = 0xffffffffu; break; }
+                        expected_ram[span[0]+i] = (unsigned char)expected;
                         if (memory[span[0]+i] != (unsigned char)expected) {
                             if (*diffs < 24 && getenv("HLE_TIMING_DIFF_TRACE"))
                                 fprintf(stderr, "DIFF %06x HLE=%02x REF=%02x\n", span[0]+i,
@@ -481,10 +584,29 @@ unsigned int optional_rsp_timing_replay(const char *path, char *family,
                     }
                     if (*written == 0xffffffffu) break;
                 }
+                if (*diffs != 0xffffffffu && *written != 0xffffffffu) {
+                    unsigned int address;
+                    *diffs = 0;
+                    /* Native DMA spans define changes to the input RAM.
+                     * Compare the whole resulting image too, so an HLE
+                     * write outside those spans cannot be certified. */
+                    if (memcmp(memory, expected_ram, 0x800000))
+                        for (address=0;address<0x800000;++address)
+                            if (memory[address]!=expected_ram[address]) {
+                                if (*diffs<24 && getenv("HLE_TIMING_DIFF_TRACE"))
+                                    fprintf(stderr,"RAM_DIFF %06x HLE=%02x REF=%02x\n",address,memory[address],expected_ram[address]);
+                                ++*diffs;
+                            }
+                    timing_probe_full_rdram = 1;
+                }
             }
         }
     }
     timing_probe_active = 0;
+    if(getenv("HLE_TIMING_RAM_DUMP")) {
+        FILE *out=fopen(getenv("HLE_TIMING_RAM_DUMP"),"wb");
+        if(out){fwrite(memory,0x800000,1,out);fclose(out);}
+    }
     if (getenv("HLE_TIMING_GSP_DUMP")) {
         unsigned int size = rdp_emit_hle_state_size();
         void *state = malloc(size);
@@ -499,6 +621,6 @@ unsigned int optional_rsp_timing_replay(const char *path, char *family,
     rdp_emit_set_backend(&backend);
     probe_ram = probe_dmem = NULL;
 finish:
-    fclose(f); free(memory); free(snapshot);
+    fclose(f); free(memory); free(snapshot); free(expected_ram);
     return measured;
 }

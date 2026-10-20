@@ -75,6 +75,12 @@ int bridge_add_triangle(int32_t *cmd,
                         int textured, int z_buffered, int shaded, int smooth,
                         int cull_mode,
                         int tile, int max_level, int tex_w, int tex_h);
+int bridge_add_triangle_with_texrecip(int32_t *cmd,
+                        const BridgeVertex *v0, const BridgeVertex *v1,
+                        const BridgeVertex *v2, const BridgeViewport *vp,
+                        int textured, int z_buffered, int shaded, int smooth,
+                        int cull_mode, int tile, int max_level, int tex_w, int tex_h,
+                        int native_texrecip);
 
 #ifdef __cplusplus
 }

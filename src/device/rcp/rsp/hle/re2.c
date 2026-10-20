@@ -248,6 +248,12 @@ void decode_video_frame_task(struct hle_t* hle)
 
 void fill_video_double_buffer_task(struct hle_t* hle)
 {
+    /* The boot entry completes a pre-empted fill without touching pixels. */
+    if (*hle->sp_status & SP_STATUS_SIG0) {
+        *hle->sp_status &= ~SP_STATUS_SIG0;
+        rsp_break(hle, SP_STATUS_SIG1 | SP_STATUS_TASKDONE);
+        return;
+    }
     int data_ptr = *dmem_u32(hle, TASK_UCODE_DATA);
 
     int pSrc = *dram_u32(hle, data_ptr);
@@ -259,7 +265,7 @@ void fill_video_double_buffer_task(struct hle_t* hle)
     assert((*dram_u32(hle, data_ptr + 0x28) >> 16) == 0x8000);
 
     int i, j;
-    int r, g, b;
+    int r, g, b, a;
     uint32_t pixel, pixel1, pixel2;
 
     for(i = 0; i < height; i++)
@@ -273,8 +279,11 @@ void fill_video_double_buffer_task(struct hle_t* hle)
         r = (((pixel1 >> 24) & 0xff) + ((pixel2 >> 24) & 0xff)) >> 1;
         g = (((pixel1 >> 16) & 0xff) + ((pixel2 >> 16) & 0xff)) >> 1;
         b = (((pixel1 >> 8) & 0xff) + ((pixel2 >> 8) & 0xff)) >> 1;
+        /* LUV/SUV process all eight bytes of each two-pixel block.
+         * Alpha participates in the average, just like RGB. */
+        a = ((pixel1 & 0xff) + (pixel2 & 0xff)) >> 1;
       
-        pixel = (r << 24) | (g << 16) | (b << 8) | 0;
+        pixel = (r << 24) | (g << 16) | (b << 8) | a;
       
         dram_store_u32(hle, &pixel, pDest+j, 1);
       }
@@ -282,5 +291,7 @@ void fill_video_double_buffer_task(struct hle_t* hle)
       pDest += stride;
     }
 
-    rsp_break(hle, SP_STATUS_TASKDONE);
+    /* Native SP_STATUS write 0x5200 clears SIG0 and sets SIG1/SIG2. */
+    *hle->sp_status &= ~SP_STATUS_SIG0;
+    rsp_break(hle, SP_STATUS_SIG1 | SP_STATUS_TASKDONE);
 }

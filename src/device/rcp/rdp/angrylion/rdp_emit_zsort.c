@@ -165,11 +165,11 @@ static int zs_rdp(ZSortState *z, unsigned op, unsigned w0, unsigned w1)
         z->othermode_l = w1;
     }
     else if (op == 0xfd || op == 0xfe || op == 0xff)
-        w1 = zs_phys(z, w1);
+        w1 = (w1 & 0xffffffu) + z->segments[(w1 >> 24) & 15u];
     if (op == 0xe9 || op == 0x29)
     {
         if (z->fifo)
-            rdp_fifo_fullsync_note();
+            rdp_fifo_fullsync_append(z->fifo, w0, w1);
         return 1;
     }
     w[0] = (int32_t)w0;
@@ -193,10 +193,12 @@ static int zs_rdplist(ZSortState *z, unsigned pointer)
         w1 = zs_get32(z->rdram, a + 4);
         op = w0 >> 24;
         hle_timing_graphics_family("gfx_zsort");
-        hle_timing_add(HLE_WORK_COMMAND, 1);
+        hle_timing_command(op);
         a += 8;
-        if (op == 0xdf)
+        if (op == 0xdf) {
+            if (z->fifo && z->fifo->drain) z->fifo->drain();
             return 1;
+        }
         if (op == 0)
             continue; /* Embedded SPNoOp/padding pairs. */
         if (op == 0xe4 || op == 0xe5)
@@ -446,7 +448,7 @@ static int zs_walk(ZSortState *z, unsigned start)
         w1 = zs_get32(z->rdram, a + 4);
         op = w0 >> 24;
         hle_timing_graphics_family("gfx_zsort");
-        hle_timing_add(HLE_WORK_COMMAND, 1);
+        hle_timing_command(op);
         pc[depth] += 8;
         if (z->trace)
         {
@@ -504,7 +506,7 @@ static int zs_walk(ZSortState *z, unsigned start)
             {
                 if (off & 3 || off >= 64)
                     return 0;
-                z->segments[off / 4] = w1 & 0xffffff;
+                z->segments[off / 4] = w1;
             }
             else if (idx == 8)
             {

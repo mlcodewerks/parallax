@@ -176,9 +176,10 @@ static void f3d_emit_sprite(RdpFifo *fifo, unsigned int pos)
         if (max_rows == 0u)
             return;
 
-        /* The routine opens by re-emitting the display list's current
-         * other-modes shadow verbatim (no TEXTLUT force, no write-back
-         * -- unlike the CI routine below). */
+        /* The common sprite setup clears TEXTLUT before ORing in the
+         * format's palette mode (zero for RGBA). This also updates the
+         * shadow used by subsequent partial other-mode commands. */
+        s_othermode_h &= ~0x0000c000u;
         w[0] = (int32_t)(0xef000000u | (s_othermode_h & 0x00ffffffu));
         w[1] = (int32_t)s_othermode_l;
         rdp_fifo_append(fifo, w, 2);
@@ -219,6 +220,7 @@ static void f3d_emit_sprite(RdpFifo *fifo, unsigned int pos)
     }
 
     /* palette: SETTIMG -> SYNC_TILE -> SETTILE -> SYNC_LOAD -> LOADTLUT -> PIPESYNC */
+    if (fifo->group) fifo->group(1);
     w[0] = (int32_t)0xfd100000u; w[1] = (int32_t)paladdr;    rdp_fifo_append(fifo, w, 2);
     w[0] = (int32_t)0xe8000000u; w[1] = 0;                   rdp_fifo_append(fifo, w, 2);
     w[0] = (int32_t)0xf5000100u; w[1] = (int32_t)0x07000000u;rdp_fifo_append(fifo, w, 2);
@@ -227,6 +229,7 @@ static void f3d_emit_sprite(RdpFifo *fifo, unsigned int pos)
     w[1] = (int32_t)(0x07000000u | (((siz == 0u) ? 15u : 255u) << 14));
     rdp_fifo_append(fifo, w, 2);
     w[0] = (int32_t)0xe7000000u; w[1] = 0;                   rdp_fifo_append(fifo, w, 2);
+    if (fifo->group) fifo->group(0);
     /* render mode: the microcode's sprite routine emits the game's *current*
      * other-modes for every sprite -- the low word verbatim from the shadow
      * the display list accumulated through G_SETOTHERMODE_L, the high word
@@ -284,6 +287,7 @@ static void f3d_emit_sprite(RdpFifo *fifo, unsigned int pos)
 
 
         /* SETTIMG + load-tile SETTILE are constant across bands */
+        if (disph <= max_rows && fifo->group) fifo->group(1);
         w[0] = (int32_t)(0xfd000000u | (fsbyte << 16) | timgw);
         w[1] = (int32_t)texaddr;                             rdp_fifo_append(fifo, w, 2);
         w[0] = (int32_t)(0xf5000000u | (fmt << 21) | (1u << 19) | (line << 9));
@@ -310,6 +314,7 @@ static void f3d_emit_sprite(RdpFifo *fifo, unsigned int pos)
             w[3] = (int32_t)(((sflip ? ((0x10000u - dsdx) & 0xffffu) : dsdx) << 16)
                              | (tflip ? ((0x10000u - dtdy) & 0xffffu) : dtdy));
             rdp_fifo_append(fifo, w, 4);
+            if (fifo->group) fifo->group(0);
         } else {
             /* TMEM-limited: split into vertical bands of (max_rows) texels with
              * a one-row overlap (advance = max_rows-1) for bilerp continuity,
@@ -462,6 +467,7 @@ void f3d_set_stop_on_ucode(int on)
         s_uc_stop_depth = -1;
 }
 unsigned int f3d_get_resume_pc(void)            { return s_resume_pc; }
+unsigned int f3d_get_half1(void)                { return s_last_rdphalf1; }
 int f3d_stopped_at_ucode(void)                  { return s_stopped_at_uc; }
 void f3d_import_segments(const unsigned int *src)
 {
@@ -483,6 +489,31 @@ void f3d_set_othermode_init(unsigned int h, unsigned int l)
  * ucode-text word). F3DEX2/S2DEX2/L3DEX2 builds carry 0xc81f20xx here; the
  * Fast3D builds do not. Matching positively on the known F3D word keeps the
  * F3DEX2 titles on their existing path unchanged. */
+int f3d_is_early_ucode(const unsigned char *rdram, unsigned int size, unsigned int text)
+{
+#ifndef HLE_EARLY_F3D_EXPERIMENTAL
+    /* The recovered 2D stream is verified; the 3D edge/attribute arithmetic
+     * still differs from native execution. Keep this program on the native
+     * production path until the controlled geometry witnesses also match. */
+    (void)rdram;
+    (void)size;
+    (void)text;
+    return 0;
+#else
+    unsigned int i, hash = 2166136261u;
+    if (!rdram || !text || text > size || size-text < 0xfb0u)
+        return 0;
+    if (rd32(rdram,text) || rd32(rdram,text+4) || rd32(rdram,text+0x10)!=0x20022800u)
+        return 0;
+    /* Full resident image, SHA256 8d139400...dc78e2c. This self-booting
+     * GBI1 build has no SGI name; B5 is perspective normalization and
+     * B0/B1/BD/BE are dispatch no-ops, unlike later F3DEX builds. */
+    for (i=0;i<0xfb0u;++i)
+        hash=(hash^rdram[(text+i)^3u])*16777619u;
+    return hash==0xd81ace31u;
+#endif
+}
+
 int f3d_is_ucode(const unsigned char *rdram, unsigned int rdram_size,
                  unsigned int text)
 {
@@ -492,6 +523,8 @@ int f3d_is_ucode(const unsigned char *rdram, unsigned int rdram_size,
         return 0;
     w1 = *(const unsigned int *)(rdram + text + 4u);
     if (w1 == 0x201d0110u)      /* RSP SW Version 2.0X (Super Mario 64) */
+        return 1;
+    if (!w1 && f3d_is_early_ucode(rdram,limit,text))
         return 1;
     /* The L3DEX line microcode boots differently and its word at text+4 is not
      * the SM64 version word, so it is not recognised here; the dispatcher
@@ -638,6 +671,11 @@ void f3d_set_variant(int doom64)
     rsp_set_vtx_invw_2rd(s_variant_d64);
     rsp_set_clip_lerp_l3dex(s_variant_d64);
 }
+/* Store this feature in the existing serialized variant word. */
+void f3d_set_variant_early(int enabled)
+{
+    s_variant_d64 = (s_variant_d64 & ~2) | (enabled ? 2 : 0);
+}
 void f3d_set_line_variant(int line) { s_variant_line = line ? 1 : 0; }
 void f3d_set_variant_wr64(int wr64) { s_variant_wr64 = wr64 ? 1 : 0; }
 static int s_variant_wo64 = 0;
@@ -681,12 +719,9 @@ static void rdp_passthrough(GSPState *gsp, RdpFifo *fifo, int cmd,
         gsp->tile_mask_t[ti] = (unsigned char)((w1 >> 14) & 0xf);
         gsp->tile_mask_s[ti] = (unsigned char)((w1 >> 4) & 0xf);
     }
-    /* 0x24..0x3f are the RDP non-triangle commands angrylion implements; skip
-     * 0x31 (G_SETKEY*, unimplemented) and 0x29 (SYNC_FULL, the activation
-     * appends exactly one frame terminator itself, but records that the list
-     * requested one). */
+    /* FullSync is forwarded in place, including its ignored payload. */
     if (rdp_id == 0x29)
-        rdp_fifo_fullsync_note();
+        rdp_fifo_fullsync_append(fifo, w0, w1);
     if (rdp_id >= 0x24 && rdp_id <= 0x3f && rdp_id != 0x31 && rdp_id != 0x29)
     {
         int32_t two[2];
@@ -742,8 +777,8 @@ void f3d_run_dl(GSPState *gsp, RdpFifo *fifo, unsigned int addr,
          * F3DEX GBI1 forks say which they are in their data segment's near
          * plane row (f3d_set_near_plane_from_data): GoldenEye's 2.0G ships
          * {0,0,0,1}, a NoN row, where SM64's 2.0D ships {0,0,1,1}. */
-        gsp->clip_near_z = (s_variant_d64 || s_variant_pd) ? 0
-                         : (s_near_plane_z >= 0 ? s_near_plane_z : 1);
+        gsp->clip_near_z = s_variant_pd ? 0
+                         : (s_near_plane_z >= 0 ? s_near_plane_z : !s_variant_d64);
         /* Perfect Dark uses the wider guard-band clip ratio (FRUSTRATIO_2),
          * not the clip-to-screen ratio the plain F3D/F3DEX builds default to.
          * With the narrow ratio the walker subdivided every door- and
@@ -764,7 +799,155 @@ void f3d_run_dl(GSPState *gsp, RdpFifo *fifo, unsigned int addr,
          * triangles with the correct fan). */
         if (s_variant_d64)
             gsp->clip_fan_first = 1;
-        rsp_tri_set_d64_sort(s_variant_d64 ? 1 : 0);
+        if (fifo->dmem) {
+            unsigned int text=rd32(fifo->dmem,0xfd0u)&0x7fffffu,at;
+            /* This overlay seeds C,B,A, walks outgoing edges in ascending
+             * order and fans ascending pairs back into the writer as
+             * (pair[1],pair[0],pivot), like the audited Wipeout driver. */
+            if(text<=s_rdram_size && 0x1800u<=s_rdram_size-text)
+                for(at=0;at+28u<=0x1800u;at+=4u) {
+                    unsigned int base=rd32(r,text+at)&0xffffu;
+                    if(base<=0xfc0u && !(base&7u) &&
+                       rd32(r,text+at)==(0xa4030000u|base) &&
+                       rd32(r,text+at+4u)==(0xa4020000u|(base+2u)) &&
+                       rd32(r,text+at+8u)==(0xa4010000u|(base+4u)) &&
+                       rd32(r,text+at+12u)==(0xa4000000u|(base+6u)) &&
+                       rd32(r,text+at+16u)==0x34070db8u &&
+                       rd32(r,text+at+20u)==(0x341e0000u|base) &&
+                       rd32(r,text+at+24u)==0x3406000cu) {
+                        gsp->clip_fan_first=4;
+                        unsigned int k;
+                        for(k=0;k+32u<=0x1800u;k+=4u)
+                            if(rd32(r,text+k)==0x4b7d5ef2u &&
+                               rd32(r,text+k+4u)==0x4b7c5eb1u &&
+                               rd32(r,text+k+20u)==0x4b5fd686u &&
+                               rd32(r,text+k+24u)==0x4b5fdecfu &&
+                               rd32(r,text+k+28u)==0x4b1ffe8eu) {
+                                rsp_set_clip_lerp_gbi1();
+                                break;
+                            }
+                        break;
+                    }
+                }
+        }
+        rsp_tri_set_d64_sort((s_variant_d64 & 2) ? 2 : s_variant_d64 ? 1 : 0);
+        if(s_variant_d64==1 && fifo->dmem) {
+            unsigned int text=rd32(fifo->dmem,0xfd0u)&0x7fffffu,at;
+            /* The faster writer omits all subpixel anchor corrections.
+             * Its X loads feed direct stores, and its attribute base is
+             * the high vertex rather than a Y-fraction backstep. */
+            if(text<=s_rdram_size && 0xf80u<=s_rdram_size-text)
+                for(at=0;at+16u<=0xf80u;at+=4u)
+                    if(rd32(r,text+at)==0x4b9f2285u &&
+                       rd32(r,text+at+4u)==0xc84d080cu &&
+                       rd32(r,text+at+8u)==0x4b1ffa4eu &&
+                       rd32(r,text+at+12u)==0xc82d0a0cu) {
+                        rsp_tri_set_d64_sort(5);
+                        break;
+                    }
+        }
+        if (fifo->dmem) {
+            unsigned int text = rd32(fifo->dmem,0xfd0u) & 0x7fffffu;
+            unsigned int at;
+            gsp_set_legacy_lighting(0);
+            if(gsp->clip_near_z==0 && text<=s_rdram_size && 0xf80u<=s_rdram_size-text)
+                for(at=0;at+20u<=0xf80u;at+=4u)
+                    if(rd32(r,text+at)==0x318c7030u &&
+                       rd32(r,text+at+12u)==0x316b4343u) {
+                        /* This NoN projector masks the negative Z flag
+                         * with 0x0703; its pointer-list near test uses NZ,
+                         * never the full writer's artificial W flag. */
+                        gsp->clip_near_z=-1;
+                        break;
+                    }
+            if(text<=s_rdram_size && 0x1800u<=s_rdram_size-text)
+                for(at=0;at+20u<=0x1800u;at+=4u)
+                    if(rd32(r,text+at)==0x4a052180u &&
+                       rd32(r,text+at+4u)==0x4a6630d0u &&
+                       rd32(r,text+at+8u)==0x4ac61990u &&
+                       rd32(r,text+at+12u)==0x4a8639c0u) {
+                        gsp_set_legacy_lighting(1);
+                        break;
+                    }
+            /* These projectors round screen Y before storing the vertex
+             * record: VADD of two quarter-pixels followed by VAND -4.
+             * Keep the rounded coordinate for culling and plane setup. */
+            if(text<=s_rdram_size && 0xf80u<=s_rdram_size-text)
+                for(at=0;at+16u<=0xf80u;at+=4u)
+                    if((rd32(r,text+at)==0x4bbe8428u &&
+                        rd32(r,text+at+4u)==0x4bbece68u) ||
+                       (rd32(r,text+at)==0x4b5f3110u &&
+                        rd32(r,text+at+4u)==0xe8f21005u &&
+                        rd32(r,text+at+8u)==0xe8e61803u &&
+                        rd32(r,text+at+12u)==0x4bbc2128u)) {
+                        rsp_set_vtx_y_round(1);
+                        if(rd32(r,text+at)==0x4bbe8428u) {
+                            rsp_tri_set_d64_sort(7);
+                            gsp->clip_reject=2;
+                            gsp->clip_fan_first=0;
+                        }
+                        break;
+                    }
+            /* Compact paired writers preload their four vertex indices
+             * and clear the two retained colour fraction banks here. */
+            if(text<=s_rdram_size && 0xf80u<=s_rdram_size-text)
+                for(at=0;at+12u<=0xf80u;at+=4u)
+                    if(rd32(r,text+at)==0xcbbd100du &&
+                       rd32(r,text+at+4u)==0x4a1ffdadu &&
+                       rd32(r,text+at+8u)==0xcb62307fu) {
+                        unsigned int k;
+                        int texture_fractions=0;
+                        /* Both compact paired writers share this entry.
+                         * The later variant reloads the high vertex's
+                         * texture fractions with LDV before subtracting
+                         * attributes; the older variant leaves them zero. */
+                        for(k=at;k+12u<=0xf80u;k+=4u)
+                            if(rd32(r,text+k)==0xcaf01c01u &&
+                               rd32(r,text+k+4u)==0x4a1c9ce7u &&
+                               rd32(r,text+k+8u)==0xc8300f03u) {
+                                texture_fractions=1;
+                                break;
+                            }
+                        rsp_tri_set_d64_sort(texture_fractions?8:7);
+                        gsp->clip_reject=2;gsp->clip_fan_first=0;
+                        gsp->clip_ratio=(int16_t)(rd32(fifo->dmem,0x74u)&0xffffu);
+                        break;
+                    }
+            if (text <= s_rdram_size && 0xf80u <= s_rdram_size-text)
+                for (at=0;at+24u<=0xf80u;at+=4u)
+                    if (rd32(r,text+at)==0x0149382au &&
+                        rd32(r,text+at+4u)==0x18e00008u &&
+                        rd32(r,text+at+8u)==0x01403820u &&
+                        rd32(r,text+at+12u)==0x01205020u &&
+                        rd32(r,text+at+16u)==0x00e04820u) {
+                        rsp_tri_set_d64_sort(4);
+                        /* Some scalar-sort Fast3D builds retain the older
+                         * full-precision attribute MAC chain. Command
+                         * encoding is still plain Fast3D; arithmetic and
+                         * sorting must be selected independently of it. */
+                        unsigned int k;
+                        for(k=0;k+24u<=0xf80u;k+=4u)
+                            if((rd32(r,text+k)&0xfffff83fu)==(0x4b645186u&0xfffff83fu) &&
+                               (rd32(r,text+k+4u)&0xfffff83fu)==(0x4b64498fu&0xfffff83fu) &&
+                               (rd32(r,text+k+8u)&0xfffff83fu)==(0x4ba4b18eu&0xfffff83fu) &&
+                               (rd32(r,text+k+12u)&0xfffff83fu)==(0x4ba4a98fu&0xfffff83fu) &&
+                               rd32(r,text+k+16u)==0x4b094a5du &&
+                               rd32(r,text+k+20u)==0x4b2a529du) {
+                                rsp_tri_set_d64_sort(6);
+                                break;
+                            }
+                        break;
+                    }
+            if(text<=s_rdram_size && 0x1800u<=s_rdram_size-text)
+                for(at=0;at+20u<=0x1800u;at+=4u)
+                    if(rd32(r,text+at)==0x4b5fd686u &&
+                       rd32(r,text+at+4u)==0x4b5fdecfu &&
+                       rd32(r,text+at+8u)==0x4b1ffe8eu &&
+                       rd32(r,text+at+12u)==0xc8172006u) {
+                        rsp_set_vtx_invw_2rd(1);
+                        break;
+                    }
+        }
         if (s_variant_wo64)
         {
             /* Wipeout 64's data-segment plane table (data + 0x70):
@@ -780,6 +963,21 @@ void f3d_run_dl(GSPState *gsp, RdpFifo *fifo, unsigned int addr,
                         && !s_variant_bhline) ? 1 : 0;
         gsp->line_alpha_mask = (s_variant_line && s_variant_d64
                                 && !s_variant_bhline) ? 1 : 0;
+        if (s_variant_line && fifo->dmem) {
+            unsigned int text = rd32(fifo->dmem, 0xfd0u) & 0xffffffu;
+            unsigned int at;
+            /* This line writer unpacks colour with LUV and converts all
+             * four S8.7 channels by VMUDM with the 0x0200 constant.
+             * Alpha is the full byte, just like RGB. */
+            if (in_range(text, 0xf80u) &&
+                (rd32(fifo->dmem, 0x3cu) & 0xffffu) == 0x0200u)
+                for (at = 0; at + 8u <= 0xf80u; at += 4u)
+                    if (rd32(r,text+at) == 0x4bff2105u &&
+                        rd32(r,text+at+4u) == 0x4bffb585u) {
+                        gsp->line_alpha_mask = 0;
+                        break;
+                    }
+        }
         gsp->line_clip_3d = (s_variant_line && s_variant_d64
                              && !s_variant_bhline) ? 1 : 0;
         gsp->line_z = s_variant_bhline;
@@ -804,8 +1002,48 @@ void f3d_run_dl(GSPState *gsp, RdpFifo *fifo, unsigned int addr,
         unsigned int w1 = rd32(r, pc + 4);
         int cmd = (int)((w0 >> 24) & 0xff);
         hle_timing_graphics_family("gfx_f3d");
-        hle_timing_add(HLE_WORK_COMMAND, 1);
+        hle_timing_command(cmd);
         pc += 8;
+
+        if (s_variant_d64 & 2)
+        {
+            /* The early dispatcher masks opcode bits 4 and 5 before
+             * indexing its 64 halfword entries (IMEM 0x130..0x150). */
+            if (cmd < 0x40) cmd &= 15;
+            else if (cmd < 0x80) continue;
+            else if (cmd < 0xc0) cmd = 0xb0 | (cmd & 15);
+            if (cmd == 0xb0 || cmd == 0xb1 || cmd == 0xbd || cmd == 0xbe ||
+                (cmd < 0x10 && cmd != 1 && cmd != 3 && cmd != 4 && cmd != 6))
+                continue;
+            if (cmd == 0xb5)
+            {
+                gsp_set_persp_norm(gsp, w1 & 0xffffu);
+                continue;
+            }
+            if (cmd == 0xb2 || cmd == 0xb3)
+            {
+                int32_t pair[2];
+                pair[0] = (int32_t)s_last_rdphalf1;
+                pair[1] = (int32_t)w1;
+                rdp_fifo_append(fifo, pair, 2);
+                continue;
+            }
+            if (cmd == 0xb4)
+            {
+                s_last_rdphalf1 = w1;
+                continue;
+            }
+            if (cmd >= 0xc0 && ((cmd & 0x3f) < 0x24 || cmd == 0xe9 || cmd == 0xf1))
+            {
+                /* This build forwards every RDP-table slot, including
+                 * reserved opcodes and FullSync in its original position. */
+                int32_t pair[2];
+                pair[0] = (int32_t)w0;
+                pair[1] = (int32_t)w1;
+                rdp_fifo_append(fifo, pair, 2);
+                continue;
+            }
+        }
 
         if (s_stop_uc && cmd == 0xAF && s_dl_depth == s_uc_stop_depth)
         {
@@ -819,6 +1057,13 @@ void f3d_run_dl(GSPState *gsp, RdpFifo *fifo, unsigned int addr,
 
         switch (cmd)
         {
+        case 0xc0:                      /* G_RDP_NOOP is still copied to RDP */
+        {
+            int32_t pair[2];
+            pair[0] = (int32_t)w0; pair[1] = (int32_t)w1;
+            rdp_fifo_append(fifo, pair, 2);
+            break;
+        }
         case F3D_MTX:
         {
             int projection = (int)((w0 >> 16) & F3D_MTX_PROJECTION) ? 1 : 0;
@@ -826,7 +1071,7 @@ void f3d_run_dl(GSPState *gsp, RdpFifo *fifo, unsigned int addr,
             int push       = (int)((w0 >> 16) & F3D_MTX_PUSH)       ? 1 : 0;
             unsigned int ma = seg_phys(w1);
             if ((w0 & 0xffffu) == 64u && in_range(ma, 64u))
-                gsp_matrix_load(gsp, r, ma, projection, load, push);
+                gsp_matrix_load_dma(gsp, r, ma, projection, load, push, 72u);
             break;
         }
 
@@ -915,6 +1160,7 @@ void f3d_run_dl(GSPState *gsp, RdpFifo *fifo, unsigned int addr,
             int32_t cw[GSP_TRI_CMD_WORDS];
             int a, b, c, nc;
             f3d_sync_persp_tex();
+            rsp_four_pair_begin();
             /* GoldenEye/Perfect Dark (Rare's F3DEX-derived GBI1) store the
              * G_TRI1 vertex index as slot*10 -- the value the microcode's
              * 0x2d0 index->offset table emits -- so the slot is byte/10.
@@ -942,6 +1188,8 @@ void f3d_run_dl(GSPState *gsp, RdpFifo *fifo, unsigned int addr,
             int32_t cw[GSP_TRI_CMD_WORDS];
             int nc;
             f3d_sync_persp_tex();
+            rsp_four_pair_begin();
+            if(gsp->clip_reject==2 && fifo->group)fifo->group(1);
             if (s_variant_f3dex)
             {
                 /* GoldenEye/Perfect Dark reuse 0xB1 as Rare's G_TRI4: four
@@ -1025,6 +1273,7 @@ void f3d_run_dl(GSPState *gsp, RdpFifo *fifo, unsigned int addr,
                     if (nc > 0) rdp_fifo_append(fifo, cw, nc);
                 }
             }
+            if(gsp->clip_reject==2 && fifo->group)fifo->group(0);
             break;
         }
 
@@ -1043,7 +1292,12 @@ void f3d_run_dl(GSPState *gsp, RdpFifo *fifo, unsigned int addr,
                 int b = (int)((w1 >>  8) & 0xff) / s;
                 int wd = (int)(w1 & 0xff);
                 int32_t cw[GSP_TRI_CMD_WORDS];
-                int nc = gsp_line(gsp, cw, a, b, wd);
+                int nc;
+                /* The transposed writer leaves its XL/DxL staging words
+                 * untouched; syncs and other packets may have occupied it. */
+                if (fifo->read_staging)
+                    fifo->read_staging(16u, gsp->line_xl, 2u);
+                nc = gsp_line(gsp, cw, a, b, wd);
                 if (nc > 0) rdp_fifo_append(fifo, cw, nc);
                 break;
             }
@@ -1113,7 +1367,10 @@ void f3d_run_dl(GSPState *gsp, RdpFifo *fifo, unsigned int addr,
         case F3D_TEXTURE:
         {
             int on    = (int)(w0 & 0xff);
-            int level = (int)((w0 >> 11) & 0x07);
+            /* The byte above the mip level is the native minimum |dZ/dY|
+             * parameter. Keep it with the serialized texture parameters;
+             * packet builders still mask the mip level to three bits. */
+            int level = (int)(((w0 >> 11) & 0x07) | ((w0 >> 8) & 0xff00));
             int tile  = (int)((w0 >> 8) & 0x07);
             unsigned int ss = (unsigned int)((w1 >> 16) & 0xffff);
             unsigned int ts = (unsigned int)(w1 & 0xffff);
@@ -1202,7 +1459,7 @@ void f3d_run_dl(GSPState *gsp, RdpFifo *fifo, unsigned int addr,
                      * vtrans.y against the LLE RSP (y 88.75 vs 151.25 about
                      * the 120-line centre) with X exact. Negate the loaded
                      * Y scale so the shared vertex pipeline flips to match. */
-                    if (s_variant_seta)
+                    if (s_variant_seta || (s_variant_d64 & 2))
                         gsp->viewport.vscale_y = -gsp->viewport.vscale_y;
                 }
             }
@@ -1372,6 +1629,8 @@ void f3d_run_dl(GSPState *gsp, RdpFifo *fifo, unsigned int addr,
             {
                 unsigned int ud  = seg_phys(s_last_rdphalf1);
                 unsigned int uds = (w0 & 0xffffu) + 1u;
+                if (fifo->load_ucode)
+                    fifo->load_ucode(fifo, seg_phys(w1), ud, uds);
                 /* SimCity 2000 (Japan) hot-swaps its F3DEX.NoN / F3DLX.Rej
                  * vertex lists to S2DEX 1.03 mid-list to blit the composed
                  * terrain map to the framebuffer (G_BG_1CYC splits it into
@@ -1388,18 +1647,15 @@ void f3d_run_dl(GSPState *gsp, RdpFifo *fifo, unsigned int addr,
                 {
                     f3dex2_set_rdram(s_rdram);
                     f3dex2_set_rdram_size(s_rdram_size);
-                    f3dex2_set_task_ucode(s_rdram, seg_phys(w1));
+                    f3dex2_set_task_ucode(s_rdram, seg_phys(w1), ud);
                     f3dex2_force_class_s2dex1();
                     f3dex2_import_segments(s_seg);
-                    /* The RSP's gSPLoadUcode preserves the other-modes state
-                     * across the swap (per-task seeding notes in
-                     * rdp_emit_hle.c, validated pixel-exact on Kirby 64's
-                     * round-trips), so hand the walker's accumulated shadow
-                     * to the S2DEX side: its G_BG_1CYC compositor emits
-                     * SETOTHERMODE from that base, and a stale shadow left
-                     * G_TC_CONV selected -- every CI8 background texel then
-                     * went through the YUV converter and drew black. */
-                    f3dex2_set_othermode_init(s_othermode_h, s_othermode_l);
+                    /* GBI1 replaces the whole data image, including the
+                     * S2DEX other-mode shadow. GBI2's partial data reload
+                     * has different preservation rules. */
+                    if (fifo->dmem && (rd32(fifo->dmem,0xc8u)>>24)==0xefu)
+                        f3dex2_set_othermode_init(rd32(fifo->dmem,0xc8u),
+                                                 rd32(fifo->dmem,0xccu));
                     f3dex2_run_dl(gsp, fifo, pc, s_textured, s_zbuffered);
                     running = 0;
                     break;
@@ -1432,17 +1688,12 @@ void f3d_run_dl(GSPState *gsp, RdpFifo *fifo, unsigned int addr,
              * transform (one vmudm mid read); the LLE oracle's implied
              * per-vertex record S for the 0x0800 patches is exactly
              * (0x800 * 0xFFFF) >> 16 == 2047. */
-            if (s_variant_d64 && ((w0 >> 16) & 0xff) == 0x14)
+            if (s_variant_d64 && !s_variant_ff2d)
             {
-                int slot = (int)(w0 & 0xffff) >> 1;
-                if (slot >= 0 && slot < GSP_MAX_VERTICES)
-                {
-                    GSPVertex *v = &gsp->vtx[slot];
-                    v->sv = (int16_t)((w1 >> 16) & 0xffffu);
-                    v->tv = (int16_t)(w1 & 0xffffu);
-                    v->s = (int32_t)v->sv << 1;
-                    v->t = (int32_t)v->tv << 1;
-                }
+                /* Native G_MODIFYVTX adds the field byte to the vertex
+                 * record pointer and stores the word. RGBA and screen
+                 * fields are supported by the same handler as ST. */
+                gsp_modify_vertex(gsp,(int)(w0&0xffffu)>>1,(w0>>16)&255u,w1);
                 break;
             }
             /* Fighting Force 64's 2D overlay extension (see

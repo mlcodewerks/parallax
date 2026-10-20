@@ -20,6 +20,7 @@
 #include <string.h>
 #include "rdp_emit_s2dex.h"
 #include "rdp_emit_recip.h"
+#include "rdp_emit_rsp.h"
 #include "rdp_emit_frontend.h"
 
 /* S2DEX sprite quad uses four scratch vertex slots at the top of the RSP
@@ -71,6 +72,7 @@ static void s2dex_set_corner(GSPVertex *v, int sx, int sy,
                               : (unsigned short)((arr)[(i) >> 1] & 0xffffu)))
 
 static unsigned int s_obj_rendermode;
+static int s_s2dex2 = 0;
 
 /* DMEM 0x204/0x208: scissor fields split from the G_SETSCISSOR passthrough
  * (shared splitter at IMEM 0x158-0x18c): 10.2 ulx/lrx and uly/lry. */
@@ -106,6 +108,25 @@ void s2dex_emit_scissor(RdpFifo *fifo)
     rdp_fifo_append(fifo, cw, 2);
 }
 
+void s2dex_seed_scissor(const unsigned char *dmem)
+{
+    unsigned int bounds[2];
+    if (!dmem) return;
+    /* Reloads preserve the low resident cache but DMA the split bounds
+     * from the new data image. Keep those two native states distinct. */
+    if (s_s2dex2) {
+        memcpy(&s_scis_w0,dmem+0xc0u,4);
+        memcpy(&s_scis_w1,dmem+0xc4u,4);
+        memcpy(bounds,dmem+0x204u,8);
+    } else {
+        memcpy(bounds,dmem+0xc0u,8);
+        s_scis_w0=0xed000000u | ((bounds[0]>>16)<<12) | (bounds[1]>>16);
+        s_scis_w1=((bounds[0]&0xffffu)<<12) | (bounds[1]&0xffffu);
+    }
+    s_scis_ulx=bounds[0]>>16; s_scis_lrx=bounds[0]&0xffffu;
+    s_scis_uly=bounds[1]>>16; s_scis_lry=bounds[1]&0xffffu;
+}
+
 /* DMEM 0x8c-0x9b: the four texture-load status words used by the
  * G_OBJ_LOADTXTR dedup test: the load runs only when
  * (status[sid >> 2] & mask) != flag, and afterwards stores
@@ -113,6 +134,24 @@ void s2dex_emit_scissor(RdpFifo *fifo)
  * already resident in TMEM emit nothing. Reset on every microcode load
  * (the data segment, status words included, is re-DMAed). */
 static unsigned int s_obj_status[4];
+
+void s2dex_set_status(unsigned int sid, unsigned int value)
+{
+    if (sid < 16u && (sid & 3u) == 0u)
+        s_obj_status[sid >> 2] = value;
+}
+
+int s2dex_select_dl(unsigned int sid, unsigned int flag, unsigned int mask)
+{
+    unsigned int *status;
+    if (sid >= 16u || (sid & 3u) != 0u) return 0;
+    status = &s_obj_status[sid >> 2];
+    /* FIFO 2.05 low overlay 0x24..0x50. Compare to the original flag;
+     * only the update masks that flag, preserving unrelated status bits. */
+    if ((*status & mask) == flag) return 0;
+    *status = (*status & ~mask) | (flag & mask);
+    return 1;
+}
 
 /* DMEM 0x2ae: the tile-7 history byte. G_OBJ_LOADTXTR emits a leading
  * TILESYNC only when the previous tile-7 user was also a texture load
@@ -123,8 +162,6 @@ static unsigned int s_obj_status[4];
  * cleared by the data reload; the load syncs when set. */
 static int s_obj_drawn = 0;            /* a rect consumed the last load */
 static unsigned int s_obj_rtile = 0;    /* S2DEX2 render tile 0 <-> 2 */
-
-static int s_s2dex2 = 0;
 
 void s2dex_set_version2(int on)
 {
@@ -175,6 +212,8 @@ void s2dex_reset(void)
  * words mirror the S2DEX2 RSP output verbatim, including the junk upper
  * bits the microcode leaves in the tile words (0x27000000), so the
  * stream compares byte-exact against the LLE. */
+static void s2dex_bg_append(RdpFifo *fifo, int32_t *cw, unsigned int count);
+
 int s2dex_obj_loadtxtr(const unsigned char *rdram, unsigned int rdram_bytes,
                        unsigned int ta, RdpFifo *fifo,
                        unsigned int (*segfn)(unsigned int))
@@ -214,14 +253,18 @@ int s2dex_obj_loadtxtr(const unsigned char *rdram, unsigned int rdram_bytes,
         return 1;                       /* already resident */
     s_obj_status[sid] = (s_obj_status[sid] & ~mask) | flag;
 
-    if (s_obj_tile7_used && !(s_s2dex2 && type == 0x00001033u))
+    if (s_s2dex2?s_obj_tile7_used:(fifo->dmem && fifo->dmem[0xd2u^3u]==0x81u))
     {
         cw[0] = (int32_t)0x28000000u;   /* tilesync against the last load */
         cw[1] = 0;
-        rdp_fifo_append(fifo, cw, 2);
+        s2dex_bg_append(fifo, cw, 2);
     }
     s_obj_tile7_used = 1;
     drawn_since = s_obj_drawn;
+    if(!s_s2dex2 && fifo->dmem) {
+        drawn_since=(signed char)fifo->dmem[0xd2u^3u]>=0;
+        fifo->dmem[0xd2u^3u]=0x81u;
+    }
     s_obj_drawn = 0;
 
     image = segfn(image);
@@ -235,43 +278,35 @@ int s2dex_obj_loadtxtr(const unsigned char *rdram, unsigned int rdram_bytes,
         cw[2] = (int32_t)(0x35000000u | (tmem & 0x1ffu));
         cw[3] = (int32_t)0x27000000u;
         cw[4] = (int32_t)0x30000000u;
-        cw[5] = (int32_t)(0x27000000u | ((tsize & 0x3ffu) << 14));
-        rdp_fifo_append(fifo, cw, 6);
+        cw[5] = (int32_t)(0x27000000u | ((tsize & 0x3ffu) << 14) | tline);
+        if(!s_s2dex2 && drawn_since) {
+            s2dex_bg_append(fifo,cw,4);
+            {int32_t sync[2]={0x26000000,0};s2dex_bg_append(fifo,sync,2);}
+            s2dex_bg_append(fifo,cw+4,2);
+        } else s2dex_bg_append(fifo, cw, 6);
     }
     else if (type == 0x00001033u)       /* G_OBJLT_TXTRBLOCK */
     {
-        /* SETTIMG width-1 = tsize>>2 (the block's TMEM word span scaled
-         * back to the 16-bit load pitch); without it the LOADBLOCK dxt
-         * walks the wrong DRAM lines and nothing reaches TMEM. tsize is the
-         * 64-bit-TMEM-word count-1 (GS_TB_TSIZE = GS_PIX2TMEM(pix,siz)-1);
-         * the LOADBLOCK lrs is in 16-bit texels, and each TMEM word holds
-         * four of them, so the block span is tsize<<2 (cxd4-verified: 399
-         * words -> lrs 1596, filling the full tile rather than a quarter). */
-        /* S2DEX2 stores the raw TMEM word count in the SETTIMG width
-         * (Worms Armageddon, cxd4-matched: tsize 11 -> 0x3d10000b); the
-         * S2DEX1 build scales it back to the 16-bit load pitch
-         * (Yoshi's Story, cxd4-matched as below). The LOADBLOCK span and
-         * dxt are unchanged between the builds. */
+        /* The native SH copies the raw TMEM word count into SETTIMG.
+         * LOADBLOCK converts that count to four 16-bit texels per word. */
         cw[0] = (int32_t)(0x3d100000u
-                          | ((s_s2dex2 ? tsize : (tsize >> 2)) & 0xfffu));
+                          | (tsize & 0xfffu));
         cw[1] = (int32_t)image;
         cw[2] = (int32_t)(0x35100000u | (tmem & 0x1ffu));
         cw[3] = (int32_t)0x27000000u;
-        rdp_fifo_append(fifo, cw, 4);
-        if (s_s2dex2 && drawn_since)
+        s2dex_bg_append(fifo, cw, 4);
+        if (drawn_since)
         {
-            /* S2DEX2 issues a LOADSYNC between the load tile setup and
-             * the LOADBLOCK when a rectangle consumed the previous load
-             * (the first load of a task goes unsynced); the S2DEX1 build
-             * fences with the leading TILESYNC above instead. */
+            /* A draw changed the tile-history byte to a render tile;
+             * fence the next load before reusing TMEM. */
             cw[0] = (int32_t)0x26000000u;
             cw[1] = 0;
-            rdp_fifo_append(fifo, cw, 2);
+            s2dex_bg_append(fifo, cw, 2);
         }
         cw[0] = (int32_t)0x33000000u;
         cw[1] = (int32_t)(0x27000000u | (((tsize << 2) & 0xfffu) << 12)
                           | (tline & 0xfffu));
-        rdp_fifo_append(fifo, cw, 2);
+        s2dex_bg_append(fifo, cw, 2);
     }
     else if (type == 0x00fc1034u)       /* G_OBJLT_TXTRTILE */
     {
@@ -289,13 +324,17 @@ int s2dex_obj_loadtxtr(const unsigned char *rdram, unsigned int rdram_bytes,
          * SETTILE 0x35100600, LOAD_TILE 0x2702c053. */
         cw[0] = (int32_t)(0x3d100000u | (tsize & 0xfffu));
         cw[1] = (int32_t)image;
-        cw[2] = (int32_t)(0x35100000u | ((((tsize >> 2) + 1u) & 0x1ffu) << 9)
+        cw[2] = (int32_t)(0x35100000u | (((tsize + 1u) & ~3u) << 7)
                           | (tmem & 0x1ffu));
         cw[3] = (int32_t)0x27000000u;
         cw[4] = (int32_t)0x34000000u;
         cw[5] = (int32_t)(0x27000000u | (((tsize << 2) & 0xfffu) << 12)
                           | (tline & 0xfffu));
-        rdp_fifo_append(fifo, cw, 6);
+        if(!s_s2dex2 && drawn_since) {
+            s2dex_bg_append(fifo,cw,4);
+            {int32_t sync[2]={0x26000000,0};s2dex_bg_append(fifo,sync,2);}
+            s2dex_bg_append(fifo,cw+4,2);
+        } else s2dex_bg_append(fifo, cw, 6);
     }
     return 1;
 }
@@ -659,7 +698,7 @@ void s2dex_bg_1cyc(const unsigned char *rdram, unsigned int rdram_bytes,
     cw[3] = (int32_t)(((image_pal & 0xfu) << 20) | S2DEX_SETTILE_W1);
     cw[4] = (int32_t)0x32000000u;
     cw[5] = 0;
-    rdp_fifo_append(fifo, cw, 6);
+    s2dex_bg_append(fifo, cw, 6);
 
     /* ---- strip loop (IMEM 0xcbc-0xd90 head, 0xa18-0xb74 loads, 0xd98
      * texrect). Register model: v1 = image rows left, t6 = clipped frame
@@ -722,6 +761,7 @@ void s2dex_bg_1cyc(const unsigned char *rdram, unsigned int rdram_bytes,
             t2 = t1 + t5;
 
             /* IMEM 0xa18: normal or final-strip load */
+            if(fifo->group)fifo->group(1);
             t9 = a0 + bilerp;
             t8 = v1 - seam_flag;
             if ((int)(t8 - t9) >= 0)
@@ -735,7 +775,7 @@ void s2dex_bg_1cyc(const unsigned char *rdram, unsigned int rdram_bytes,
                 cw[5] = (int32_t)((7u << 24) |
                         ((((line_words - 1u) << 4) & 0xfffu) << 12) |
                         ((t9 * 4u - 1u) & 0xfffu));
-                rdp_fifo_append(fifo, cw, 6);
+                s2dex_bg_append(fifo, cw, 6);
                 v1 -= a0;
                 a1 += adv;
             }
@@ -765,7 +805,7 @@ void s2dex_bg_1cyc(const unsigned char *rdram, unsigned int rdram_bytes,
                     cw[1] = 0;
                     cw[2] = (int32_t)(settile_w0 | ((rrow * line_words) & 0x1ffu));
                     cw[3] = (int32_t)0x27000000u;
-                    rdp_fifo_append(fifo, cw, 4);
+                    s2dex_bg_append(fifo, cw, 4);
                     cw[0] = (int32_t)settimg_w0;
                     cw[1] = (int32_t)rsrc;
                     cw[2] = (int32_t)0x26000000u;
@@ -774,7 +814,7 @@ void s2dex_bg_1cyc(const unsigned char *rdram, unsigned int rdram_bytes,
                     cw[5] = (int32_t)((7u << 24) |
                             ((((line_words - 1u) << 4) & 0xfffu) << 12) |
                             ((rcnt * 4u - 1u) & 0xfffu));
-                    rdp_fifo_append(fifo, cw, 6);
+                    s2dex_bg_append(fifo, cw, 6);
                 }
                 if (seam_flag)
                 {
@@ -793,7 +833,7 @@ void s2dex_bg_1cyc(const unsigned char *rdram, unsigned int rdram_bytes,
                     cw[2] = (int32_t)(settile_w0 |
                             ((t8e * line_words + dw) & 0x1ffu));
                     cw[3] = (int32_t)0x27000000u;
-                    rdp_fifo_append(fifo, cw, 4);
+                    s2dex_bg_append(fifo, cw, 4);
                     cw[0] = (int32_t)settimg_w0;
                     cw[1] = (int32_t)src2;
                     cw[2] = (int32_t)0x26000000u;
@@ -802,7 +842,7 @@ void s2dex_bg_1cyc(const unsigned char *rdram, unsigned int rdram_bytes,
                     cw[5] = (int32_t)((7u << 24) |
                             ((((line_words - dw - 1u) << 4) & 0xfffu) << 12) |
                             ((cnt * 4u - 1u) & 0xfffu));
-                    rdp_fifo_append(fifo, cw, 6);
+                    s2dex_bg_append(fifo, cw, 6);
                     /* row patch: the row past the main load into TMEM
                      * row t8 */
                     cw[0] = (int32_t)0x28000000u;
@@ -810,7 +850,7 @@ void s2dex_bg_1cyc(const unsigned char *rdram, unsigned int rdram_bytes,
                     cw[2] = (int32_t)(settile_w0 |
                             ((t8e * line_words) & 0x1ffu));
                     cw[3] = (int32_t)0x27000000u;
-                    rdp_fifo_append(fifo, cw, 4);
+                    s2dex_bg_append(fifo, cw, 4);
                     cw[0] = (int32_t)settimg_w0;
                     cw[1] = (int32_t)src3;
                     cw[2] = (int32_t)0x26000000u;
@@ -819,7 +859,7 @@ void s2dex_bg_1cyc(const unsigned char *rdram, unsigned int rdram_bytes,
                     cw[5] = (int32_t)((7u << 24) |
                             ((((dw - 1u) << 4) & 0xfffu) << 12) |
                             ((cnt * 4u - 1u) & 0xfffu));
-                    rdp_fifo_append(fifo, cw, 6);
+                    s2dex_bg_append(fifo, cw, 6);
                 }
                 /* main final load (TILESYNC + SETTILE at TMEM 0; the load
                  * itself only when rows remain) */
@@ -829,7 +869,7 @@ void s2dex_bg_1cyc(const unsigned char *rdram, unsigned int rdram_bytes,
                     cw[1] = 0;
                     cw[2] = (int32_t)settile_w0;
                     cw[3] = (int32_t)0x27000000u;
-                    rdp_fifo_append(fifo, cw, 4);
+                    s2dex_bg_append(fifo, cw, 4);
                     cw[0] = (int32_t)settimg_w0;
                     cw[1] = (int32_t)a1;
                     cw[2] = (int32_t)0x26000000u;
@@ -838,13 +878,13 @@ void s2dex_bg_1cyc(const unsigned char *rdram, unsigned int rdram_bytes,
                     cw[5] = (int32_t)((7u << 24) |
                             ((((line_words - 1u) << 4) & 0xfffu) << 12) |
                             ((t8 * 4u - 1u) & 0xfffu));
-                    rdp_fifo_append(fifo, cw, 6);
+                    s2dex_bg_append(fifo, cw, 6);
                 }
                 else
                 {
                     cw[0] = (int32_t)settile_w0;        /* IMEM 0xb10 */
                     cw[1] = (int32_t)0x27000000u;
-                    rdp_fifo_append(fifo, cw, 2);
+                    s2dex_bg_append(fifo, cw, 2);
                 }
                 /* image exhausted: wrap back to the top (IMEM 0xb40-0xb74) */
                 {
@@ -871,8 +911,9 @@ void s2dex_bg_1cyc(const unsigned char *rdram, unsigned int rdram_bytes,
                               ((t1 * 4u) & 0xfffu));
             cw[4] = (int32_t)((s_coord << 16) | tc);
             cw[5] = (int32_t)((scale_w << 16) | scale_h);
-            rdp_fifo_append(fifo, cw, 6);
+            s2dex_bg_append(fifo, cw, 6);
 
+            if(fifo->group)fifo->group(0);
             if ((int)t6 <= 0)                           /* IMEM 0xdd0 */
                 break;
             t1  = t2;
@@ -882,6 +923,27 @@ void s2dex_bg_1cyc(const unsigned char *rdram, unsigned int rdram_bytes,
             tc  = 0;                                    /* IMEM 0xde8 */
         }
     }
+}
+
+/* The background overlay synthesizes syncs with SB, retaining the other
+ * seven bytes of the current output slot. This differs from a display-list
+ * sync, whose first word is copied with SW. */
+static void s2dex_bg_append(RdpFifo *fifo, int32_t *cw, unsigned int count)
+{
+    unsigned int k;
+    if (fifo->read_staging) {
+        for (k=0;k+1u<count;k+=2u) {
+            unsigned int op = (unsigned int)cw[k] >> 24;
+            if (op == 0x26u || op == 0x27u || op == 0x28u) {
+                int32_t previous[2];
+                if (fifo->read_staging(k*4u,previous,2)) {
+                    cw[k] = (int32_t)((op << 24) | ((unsigned int)previous[0] & 0xffffffu));
+                    cw[k+1u] = previous[1];
+                }
+            }
+        }
+    }
+    rdp_fifo_append(fifo,cw,(int)count);
 }
 
 /* ---- G_BG_COPY ----------------------------------------------------------
@@ -1028,7 +1090,7 @@ void s2dex_bg_copy(const unsigned char *rdram, unsigned int rdram_bytes,
     cw[4] = (int32_t)(0x35000000u | ((image_fmt & 7u) << 21) |
                       ((image_siz & 3u) << 19) | ((tmem_w << 9) & 0x3fe00u));
     cw[5] = (int32_t)(((image_pal & 0xfu) << 20) | S2DEX_SETTILE_W1);
-    rdp_fifo_append(fifo, cw, 6);
+    s2dex_bg_append(fifo, cw, 6);
 
     /* per-strip constants (IMEM 0x324-0x37c). The strip loads always
      * address the image as 16-bit RGBA texels regardless of the image's
@@ -1122,7 +1184,7 @@ void s2dex_bg_copy(const unsigned char *rdram, unsigned int rdram_bytes,
         cw[9] = (int32_t)(((clip_ulx & 0xfffu) << 12) | (t1 & 0xfffu));
         cw[10] = (int32_t)(s_flip_coord << 16);     /* s, t */
         cw[11] = (int32_t)0x10000400u;       /* copy dsdx 4.0 */
-        rdp_fifo_append(fifo, cw, 12);
+        s2dex_bg_append(fifo, cw, 12);
 
         t1   = gp + 1u;
         ptr += adv;
@@ -1147,7 +1209,7 @@ void s2dex_bg_copy(const unsigned char *rdram, unsigned int rdram_bytes,
         cw[7]  = (int32_t)((((s5a << 14) - 0x1000u) | 0x06000000u));
         cw[8]  = (int32_t)0x27000000u;      /* pipesync */
         cw[9]  = 0;
-        rdp_fifo_append(fifo, cw, 10);
+        s2dex_bg_append(fifo, cw, 10);
         cw[0]  = (int32_t)settimg_w0;
         cw[1]  = (int32_t)image_ptr;
         cw[2]  = (int32_t)(0x35100000u | (s5a & 0x1ffu));
@@ -1163,7 +1225,7 @@ void s2dex_bg_copy(const unsigned char *rdram, unsigned int rdram_bytes,
         cw[9]  = (int32_t)(((clip_ulx & 0xfffu) << 12) | (t1 & 0xfffu));
         cw[10] = (int32_t)(s_flip_coord << 16);
         cw[11] = (int32_t)0x10000400u;
-        rdp_fifo_append(fifo, cw, 12);
+        s2dex_bg_append(fifo, cw, 12);
         t1 += 4u;
         at -= 4;
         }
@@ -1209,7 +1271,7 @@ void s2dex_bg_copy(const unsigned char *rdram, unsigned int rdram_bytes,
             cw[9] = (int32_t)(((clip_ulx & 0xfffu) << 12) | (t1 & 0xfffu));
             cw[10] = (int32_t)(s_flip_coord << 16);
             cw[11] = (int32_t)0x10000400u;
-            rdp_fifo_append(fifo, cw, 12);
+            s2dex_bg_append(fifo, cw, 12);
             t1   = gp2 + 1u;
             ptr += adv;
         }
@@ -1395,6 +1457,59 @@ static void s2dex_obj_coords(int use_matrix, int objX, int objY,
 
 /* draw a uObjSprite at addr as a TEXTURE_RECTANGLE. use_matrix applies the
  * object matrix translation/scale (gSPObjSprite); gSPObjRectangle passes 0. */
+static void s2dex_rect_r_native(int objX, int objY, unsigned int scaleW,
+    unsigned int scaleH, unsigned int imageW, unsigned int imageH,
+    unsigned int stride, unsigned int address, unsigned int fmt,
+    unsigned int siz, unsigned int palette, unsigned int flags, RdpFifo *fifo)
+{
+    static const unsigned int a01[8] = {0,0x00100020u,0x00200040u,0x00300060u,
+        0x0000fff4u,0x00100014u,0x00200034u,0x00300054u};
+    static const unsigned int a23[4] = {0x0001fffeu,0xfffefffeu,0x00010000u,0};
+    int16_t correction[6];
+    unsigned int row = a01[(s_obj_rendermode >> 4) & 7u];
+    unsigned int rtile, end, tile_size;
+    int x[4], y[4], copy = !!(f3dex2_othermode_high() & 0x200000u);
+    int32_t packet[8];
+    correction[0] = (int16_t)(row >> 16);
+    correction[1] = (int16_t)row;
+    correction[2] = (int16_t)(a23[(s_obj_rendermode >> 3) & 3u] >> 16);
+    correction[3] = (s_obj_rendermode & 8u) ? -1 : -4;
+    correction[4] = (s_obj_rendermode & 8u) ? -16 : 0;
+    correction[5] = (s_obj_rendermode & 8u) ? 3 : 0;
+    if (!rsp_s2dex_rect_axis(objX,scaleW,imageW,s_objmtx_bsx,s_objmtx_x,
+            correction,flags&1u,s_scis_ulx,s_scis_lrx,0,!s_s2dex2,x) ||
+        !rsp_s2dex_rect_axis(objY,scaleH,imageH,s_objmtx_bsy,s_objmtx_y,
+            correction,flags&16u,s_scis_uly,s_scis_lry,0x200,!s_s2dex2,y)) return;
+    rtile = s_obj_rtile;
+    if (fifo->dmem) {
+        unsigned int history=s_s2dex2?0x2aeu:0xd2u;
+        rtile = fifo->dmem[(history+1u) ^ 3u] ^ 2u;
+        fifo->dmem[(history+1u) ^ 3u] = (unsigned char)rtile;
+        if (fifo->dmem[history ^ 3u] == rtile) {
+            int32_t sync[2] = {0,0};
+            if (fifo->read_staging) fifo->read_staging(0,sync,2);
+            sync[0] = (int32_t)(((unsigned int)sync[0] & 0xffffffu) | 0x28000000u);
+            rdp_fifo_append(fifo,sync,2);
+        }
+        fifo->dmem[history ^ 3u] = (unsigned char)rtile;
+    }
+    s_obj_rtile = rtile ^ 2u;
+    end = ((unsigned int)x[1] << 12) | ((unsigned int)y[1] & 0xfffu);
+    if (copy) end -= 0x4004u;
+    tile_size = (((imageW & 0x7ff8u) << 9) | (imageH >> 3)) - 0x4004u;
+    packet[0] = (int32_t)(0x35000000u | (((fmt << 21) | (siz << 19) |
+        (stride << 9) | address) & 0xffffffu));
+    packet[1] = (int32_t)((rtile << 24) | (palette << 20) | 0x80200u);
+    packet[2] = 0x32000000;
+    packet[3] = (int32_t)((rtile << 24) | (tile_size & 0xffffffu));
+    packet[4] = (int32_t)(0x24000000u | (end & 0xffffffu));
+    packet[5] = (int32_t)((rtile << 24) | ((unsigned int)x[0] << 12) | ((unsigned int)y[0] & 0xfffu));
+    packet[6] = (int32_t)(((unsigned int)(uint16_t)x[2] << 16) | (uint16_t)y[2]);
+    packet[7] = (int32_t)(((unsigned int)(uint16_t)(x[3] * (copy ? 4 : 1)) << 16) | (uint16_t)y[3]);
+    rdp_fifo_append(fifo,packet,8);
+    s_obj_drawn = 1;
+}
+
 static void s2dex_draw_obj(GSPState *gsp, const unsigned char *r,
                            unsigned int rdram_bytes,
                            unsigned int addr, int use_matrix, int as_rect,
@@ -1427,6 +1542,60 @@ static void s2dex_draw_obj(GSPState *gsp, const unsigned char *r,
     imageSiz    = r[(addr + 0x15) ^ 3];
     imagePal    = r[(addr + 0x16) ^ 3];
     imageFlags  = r[(addr + 0x17) ^ 3];
+
+    if (!as_rect && !s_s2dex2) {
+        int obj[6]={objX,(int)scaleW,(int)imageW,objY,(int)scaleH,(int)imageH};
+        int32_t matrix[6]={s_objmtx_a,s_objmtx_b,s_objmtx_c,s_objmtx_d,s_objmtx_x,s_objmtx_y};
+        int16_t corners[4][4];
+        int32_t packet[54];
+        unsigned int tile=0,limit=(((imageW&0x7ff8u)<<9)|(imageH>>3))-0x4004u;
+        int k,inside[4]={0,0,0,0};
+        rsp_s2dex_sprite_corners(corners,obj,matrix,s_obj_rendermode,imageFlags);
+        for(k=0;k<4;k++) {
+            inside[0]|=corners[k][2]>=(int)s_scis_ulx;
+            inside[1]|=corners[k][2]<(int)s_scis_lrx;
+            inside[2]|=corners[k][3]>=(int)s_scis_uly;
+            inside[3]|=corners[k][3]<(int)s_scis_lry;
+        }
+        if(!inside[0]||!inside[1]||!inside[2]||!inside[3])return;
+        if(fifo->dmem) {
+            tile=fifo->dmem[0xd3u^3u]^2u;
+            fifo->dmem[0xd3u^3u]=(unsigned char)tile;
+            if(tile==fifo->dmem[0xd2u^3u]) {
+                int32_t sync[2]={0,0};
+                if(fifo->read_staging)fifo->read_staging(0,sync,2);
+                sync[0]=(int32_t)(((unsigned int)sync[0]&0xffffffu)|0x28000000u);
+                rdp_fifo_append(fifo,sync,2);
+            }
+            fifo->dmem[0xd2u^3u]=(unsigned char)tile;
+        }
+        packet[0]=(int32_t)(0x35000000u|(((imageFmt<<21)|(imageSiz<<19)|(imageStride<<9)|imageAdrs)&0xffffffu));
+        packet[1]=(int32_t)((tile<<24)|(imagePal<<20)|0x80200u);
+        packet[2]=0x32000000;
+        packet[3]=(int32_t)((tile<<24)|(limit&0xffffffu));
+        packet[4]=0x27000000;packet[5]=0;
+        if(fifo->read_staging) {
+            fifo->read_staging(16,packet+4,2);
+            packet[4]=(int32_t)(0x27000000u|((uint32_t)packet[4]&0xffffffu));
+        }
+        rsp_s2dex_sprite_triangle(packet+6,corners[2],corners[0],corners[1],tile);
+        rsp_s2dex_sprite_triangle(packet+30,corners[0],corners[1],corners[3],tile);
+        rdp_fifo_append(fifo,packet,54);
+        s_obj_drawn=1;
+        return;
+    }
+
+    if (use_matrix && as_rect) {
+        s2dex_rect_r_native(objX,objY,scaleW,scaleH,imageW,imageH,imageStride,
+            imageAdrs,imageFmt,imageSiz,imagePal,imageFlags,fifo);
+        return;
+    }
+
+    /* Without the wider render-mode corrections, a zero extent fails
+     * the native comparison before tile/rectangle packets are built.
+     * Other correction rows can turn that input into a positive span. */
+    if (as_rect && !(s_obj_rendermode & 0x60u) && (!imageW || !imageH))
+        return;
 
     if (scaleW == 0u) scaleW = 1u;
     if (scaleH == 0u) scaleH = 1u;

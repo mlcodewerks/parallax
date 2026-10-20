@@ -2010,6 +2010,14 @@ Func CPU::jit_region(uint64_t hash, unsigned pc_word, unsigned instruction_count
 	jit_set_code(block_code, code_size);
 
 	auto ret = reinterpret_cast<Func>(jit_emit());
+#ifdef RSP_JIT_CODE_DUMP
+    if(const char *directory=std::getenv("RSP_JIT_CODE_DUMP")) {
+        char path[1024];std::snprintf(path,sizeof(path),"%s/%03x.bin",directory,pc_word*4);
+        if(FILE *file=std::fopen(path,"wb")) {
+            std::fwrite(block_code,size_t(code_size),1,file);std::fclose(file);
+        }
+    }
+#endif
 
 #ifdef TRACE_DISASM
 	printf(" === DISASM ===\n");

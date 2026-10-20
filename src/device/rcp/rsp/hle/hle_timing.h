@@ -17,6 +17,9 @@ enum hle_work_kind {
 };
 struct hle_timing_work {
     uint32_t units[HLE_WORK_COUNT];
+    /* Preserve command identity: setup/no-op/branch commands do not have
+     * interchangeable dispatch and fixed handler costs. */
+    uint32_t commands[256];
     uint32_t override_cycles;
     uint32_t ucode_checksum;
     const char *family;
@@ -26,6 +29,7 @@ void hle_timing_ucode(uint32_t checksum);
 void hle_timing_family(const char *family);
 void hle_timing_graphics_family(const char *family);
 void hle_timing_add(enum hle_work_kind kind, uint32_t units);
+void hle_timing_command(unsigned int opcode);
 void hle_timing_override(uint32_t cycles);
 uint32_t hle_timing_cycles(void);
 void hle_timing_set_slice_limit(uint32_t cycles);

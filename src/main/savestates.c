@@ -60,7 +60,7 @@ enum { GB_CART_FINGERPRINT_OFFSET = 0x134 };
 enum { DD_DISK_ID_OFFSET = 0x43670 };
 
 static const char* savestate_magic = "M64+SAVE";
-static const int savestate_latest_version = 0x00011800;  /* 1.24: fractional RSP slice clock */
+static const int savestate_latest_version = 0x00011900;  /* 1.25: RDP depth address / atomic mode */
 static const unsigned char pj64_magic[4] = { 0xC8, 0xA6, 0xD8, 0x23 };
 
 static savestates_job job = savestates_job_nothing;
@@ -821,6 +821,11 @@ int savestates_load_m64p(struct device* dev, const void *data)
                 dev->dp.timing.scissor_field = GETDATA(curr, uint32_t) & 3;
                 dev->dp.timing.clock_overhang = version >= 0x00011500 ?
                     GETDATA(curr, uint32_t) & 3 : 0;
+                if (version >= 0x00011900) {
+                    curr = data_0001_0200 + 3960;
+                    dev->dp.timing.z_address = GETDATA(curr, uint32_t) & 0xffffff;
+                    dev->dp.timing.atomic_primitive = GETDATA(curr, uint32_t) & 1;
+                }
             }
             if (version >= 0x00011200) {
                 curr = data_0001_0200 + 4032;
@@ -997,6 +1002,12 @@ int savestates_save_m64p(const struct device* dev, void *data)
 
     /* OK to cast away const qualifier */
     const uint32_t* cp0_regs = r4300_cp0_regs((struct cp0*)&dev->r4300.cp0);
+
+    /* GPU-owned framebuffer pixels are guest RAM too. Materialize them
+     * before taking the snapshot: loading clears the framebuffer readback
+     * tracking, so pending pixels would otherwise be replaced by stale RAM. */
+    pre_framebuffer_read_range(&((struct device*)dev)->dp.fb, 0,
+                              (uint32_t)dev->rdram.dram_size);
 
     save = malloc(sizeof(*save));
     if (!save) {
@@ -1393,6 +1404,9 @@ int savestates_save_m64p(const struct device* dev, void *data)
     PUTDATA(curr, uint32_t, dev->dp.timing.fb_address);
     PUTDATA(curr, uint32_t, dev->dp.timing.scissor_field);
     PUTDATA(curr, uint32_t, dev->dp.timing.clock_overhang);
+    curr = save->data + 16788288 + sizeof(queue) + 4 + 3960;
+    PUTDATA(curr, uint32_t, dev->dp.timing.z_address);
+    PUTDATA(curr, uint32_t, dev->dp.timing.atomic_primitive);
 
 
     /* Preserve the oscillator phase used by COUNT-to-AI conversion. These

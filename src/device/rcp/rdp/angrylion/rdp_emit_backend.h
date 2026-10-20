@@ -46,6 +46,9 @@ typedef struct RdpEmitBackend
 
     /* Optional timing-only packet delivery. Rendering remains batched. */
     void           (*time)(const int32_t *words, unsigned int count);
+    /* Native FIFO boot inspects END, CURRENT and STATUS before choosing
+     * its first output cursor. NULL means an idle, reset DPC. */
+    void           (*get_dpc_state)(unsigned int state[3]);
 
 } RdpEmitBackend;
 

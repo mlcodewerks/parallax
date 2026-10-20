@@ -323,6 +323,31 @@ static unsigned char* emit_step(void* block, unsigned index, unsigned phase, ari
     return emit_jump(4);
 }
 
+/* The prepare helper already charged a COP1 transfer's clocks and hazards.
+ * The register-only transfer cannot invalidate code or change mappings.
+ * Commit locally while no event is due; the original helper still handles
+ * exact event boundaries and all preparation faults. */
+static void emit_transfer_commit(void* block, unsigned index,
+    const struct ari64_x64_config* config, ari64_x64_step step,
+    unsigned char** exits, unsigned* exit_count)
+{
+    emit_mem(0x83, 1, 7, R12, -1, 0, offsetof(struct r4300_core, cp0.cycle_count)); output_byte(0);
+    unsigned char* event = emit_jump(13); /* signed >= 0 */
+    emit_state_imm(offsetof(struct r4300_core, interp_PC.addr), config->virtual_pc + (index + 1) * 4, 0);
+    emit_state_imm(gpr_offset(0), 0, 1);
+    if (config->commits) {
+        emit_movimm64((intptr_t)config->commits, R11);
+        emit_mem(0x83, 1, 0, R11, -1, 0, 0); output_byte(1);
+    }
+    emit_movimm64((intptr_t)&breakloop, R11);
+    emit_mem(0x80, 0, 7, R11, -1, 0, 0); output_byte(0);
+    exits[(*exit_count)++] = emit_jump(5);
+    output_byte(0xe9); unsigned char* done = out; output_w32(0);
+    patch_jump(event, out);
+    exits[(*exit_count)++] = emit_step(block, index, 1, step);
+    patch_jump(done, out);
+}
+
 static ari64_x64_entry compile_block(struct ari64_x64* s, void* block,
     const uint32_t* ops, unsigned count, ari64_x64_step step, int optimized, const struct ari64_x64_config* config)
 {
@@ -464,7 +489,7 @@ static ari64_x64_entry compile_block(struct ari64_x64* s, void* block,
         } else if (optimized && native_fpu_transfer(op)) {
             exits[exit_count++] = emit_step(block,i,11,step);
             emit_fpu_transfer(ops[i],op);
-            exits[exit_count++] = emit_step(block,i,1,step);
+            emit_transfer_commit(block,i,config,step,exits,&exit_count);
             ++s->native; ++i;
         } else if (optimized && config->fpu_prepare && config->fpu_finish && native_fpu_instruction(ops[i])) {
             emit_fpu_native(ops[i], i, config, exits, &exit_count); ++s->native; ++i;

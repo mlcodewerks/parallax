@@ -7,9 +7,8 @@ void rsp_capture_imem(const unsigned char *image, const unsigned char *dmem,
 {
     static int initialized;
     static const char *directory;
-    static uint64_t seen[256];
-    static unsigned int nseen;
-    static int truncated;
+    static uint64_t *seen;
+    static unsigned int nseen, capacity;
     uint64_t hash = UINT64_C(1469598103934665603);
     unsigned int bytes = (((encoded & 0xfffu) | 7u) + 1u) *
                          (((encoded >> 12) & 255u) + 1u);
@@ -23,10 +22,15 @@ void rsp_capture_imem(const unsigned char *image, const unsigned char *dmem,
     for (i = 0; i < bytes; i++) hash = (hash ^ image[(begin + i) & 4095u]) * UINT64_C(1099511628211);
     hash ^= (uint64_t)begin << 32 | bytes;
     for (i = 0; i < nseen; i++) if (seen[i] == hash) return;
-    if (nseen == 256) {
-        if (!truncated) fprintf(stderr, "RSP microcode audit truncated after 256 unique IMEM transfers\n");
-        truncated = 1;
-        return;
+    if (nseen == capacity) {
+        unsigned int next = capacity ? capacity * 2 : 256;
+        uint64_t *grown = (uint64_t *)realloc(seen, next * sizeof(*seen));
+        if (!grown) {
+            fprintf(stderr, "RSP microcode audit allocation failed at image %u\n", nseen);
+            return;
+        }
+        seen = grown;
+        capacity = next;
     }
     seen[nseen++] = hash;
     snprintf(path, sizeof(path), "%s/imem-%03u-%016llx.bin", directory, nseen - 1,

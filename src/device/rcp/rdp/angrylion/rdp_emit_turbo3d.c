@@ -134,7 +134,7 @@ static void turbo3d_emit_othermode(GSPState *gsp, RdpFifo *fifo,
     int32_t two[2];
     int zc = (int)((ol >> 4) & 1);
     int zu = (int)((ol >> 5) & 1);
-    two[0] = (int32_t)((0x2fu << 24) | (oh & 0x00ffffffu));
+    two[0] = (int32_t)((0xefu << 24) | (oh & 0x00ffffffu));
     two[1] = (int32_t)ol;
     rdp_fifo_append(fifo, two, 2);
     gsp->t3d_zbuffered = (zc || zu) ? 1 : 0;
@@ -164,7 +164,7 @@ static void turbo3d_process_rdp(GSPState *gsp, RdpFifo *fifo, unsigned int cmds)
         int rdp_id = cmd & 0x3f;
         int extra = 0;
         hle_timing_graphics_family("gfx_turbo3d");
-        hle_timing_add(HLE_WORK_COMMAND, 1);
+        hle_timing_command(cmd);
 
         if (cmd == 0xe4 || cmd == 0xe5)         /* G_TEXRECT / G_TEXRECTFLIP */
             extra = 2;
@@ -195,7 +195,7 @@ static void turbo3d_process_rdp(GSPState *gsp, RdpFifo *fifo, unsigned int cmds)
         }
 
         if (rdp_id == 0x29)                     /* G_RDPFULLSYNC */
-            rdp_fifo_fullsync_note();
+            rdp_fifo_fullsync_append(fifo, w0, w1);
 
         if (rdp_id >= 0x24 && rdp_id <= 0x3f
             && rdp_id != 0x31 && rdp_id != 0x29)
@@ -439,7 +439,7 @@ static void turbo3d_load_object(GSPState *gsp, RdpFifo *fifo,
         }
         {
             int32_t sw[2];
-            sw[0] = (int32_t)0x27000000;
+            sw[0] = (int32_t)0xe7000000;
             sw[1] = 0;
             rdp_fifo_append(fifo, sw, 2);
         }
@@ -484,7 +484,7 @@ static void turbo3d_load_object(GSPState *gsp, RdpFifo *fifo,
      * state changes into the previous object's spans. */
     {
         int32_t sw[2];
-        sw[0] = (int32_t)0x27000000;
+        sw[0] = (int32_t)0xe7000000;
         sw[1] = 0;
         rdp_fifo_append(fifo, sw, 2);
     }
@@ -519,6 +519,8 @@ void turbo3d_run_dl(GSPState *gsp, RdpFifo *fifo, unsigned int dl_addr)
     rsp_set_keep_degenerate(1);
     rsp_set_affine_tex(1);
     rsp_set_attr_lowp(1);
+    /* Native scalar SLT/swap loop preserves operand order on equal Y. */
+    rsp_tri_set_d64_sort(3);
 
 
     while (guard++ < 8192)
@@ -529,7 +531,7 @@ void turbo3d_run_dl(GSPState *gsp, RdpFifo *fifo, unsigned int dl_addr)
         unsigned int ptri    = rd_u32_be(addr + 12u);
 
         hle_timing_graphics_family("gfx_turbo3d");
-        hle_timing_add(HLE_WORK_COMMAND, 1);
+        hle_timing_add(HLE_WORK_COMMAND, 1); /* object descriptor, no opcode */
 
         if (pstate == 0u)
             break;
@@ -541,4 +543,5 @@ void turbo3d_run_dl(GSPState *gsp, RdpFifo *fifo, unsigned int dl_addr)
 
         addr += 16u;
     }
+    rsp_tri_set_d64_sort(0);
 }

@@ -39,5 +39,16 @@ static inline int32_t vmulf(int16_t x, int16_t y)
     return (((int32_t)(x))*((int32_t)(y))+0x4000)>>15;
 }
 
+/* VMADN's ACC_L result saturates when ACC_H:ACC_M is not a signed
+ * 16-bit value. Comparing only the clamped ACC_M to its raw low half
+ * misses overflow whose middle half is already 7fff or 8000. */
+static inline int16_t clamp_rsp_acc_low(int64_t accumulator)
+{
+    int64_t upper = accumulator >> 16;
+    if (upper > 32767) return (int16_t)0xffff;
+    if (upper < -32768) return 0;
+    return (int16_t)(accumulator & 0xffff);
+}
+
 #endif
 

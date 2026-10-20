@@ -3,6 +3,7 @@
 #include <limits.h>
 
 static struct hle_timing_work work;
+static int model_valid;
 static uint32_t slice_limit;
 void hle_timing_set_slice_limit(uint32_t cycles){slice_limit=cycles;}
 uint32_t hle_timing_slice_limit(void){return slice_limit;}
@@ -11,13 +12,23 @@ void hle_timing_begin(void)
 {
     memset(&work, 0, sizeof(work));
     work.family = "unknown";
+    model_valid = 0;
 }
-void hle_timing_family(const char *family) { work.family = family; }
-void hle_timing_ucode(uint32_t checksum) { work.ucode_checksum = checksum; }
+void hle_timing_family(const char *family)
+{
+    if (work.family != family) model_valid = 0;
+    work.family = family;
+}
+void hle_timing_ucode(uint32_t checksum)
+{
+    if (work.ucode_checksum != checksum) model_valid = 0;
+    work.ucode_checksum = checksum;
+}
 void hle_timing_graphics_family(const char *family)
 {
-    if (work.family && !strcmp(work.family, "send_dlist_to_gfx_plugin"))
-        work.family = family;
+    if (work.family && (!strcmp(work.family, "send_dlist_to_gfx_plugin") ||
+                        !strcmp(work.family, "streaming_gfx_task")))
+        hle_timing_family(family);
 }
 void hle_timing_add(enum hle_work_kind kind, uint32_t units)
 {
@@ -26,12 +37,18 @@ void hle_timing_add(enum hle_work_kind kind, uint32_t units)
     old = work.units[kind];
     work.units[kind] = units > UINT_MAX - old ? UINT_MAX : old + units;
 }
+void hle_timing_command(unsigned int opcode)
+{
+    hle_timing_add(HLE_WORK_COMMAND, 1);
+    if (opcode < 256 && work.commands[opcode] != UINT_MAX)
+        ++work.commands[opcode];
+}
 void hle_timing_override(uint32_t cycles)
 {
     work.override_cycles = cycles > 0x7fffffffu ? 0x7fffffffu : cycles;
 }
 struct hle_timing_work hle_timing_get(void) { return work; }
-void hle_timing_restore(struct hle_timing_work saved) { work = saved; }
+void hle_timing_restore(struct hle_timing_work saved) { work = saved; model_valid = 0; }
 
 /* Units: commands, 8-byte DMA beats, 16-byte copies, 16-sample ADPCM
  * frames, 8-sample resample/env/mix/filter groups, vertices, triangles,
@@ -45,21 +62,32 @@ static const struct timing_model fallback = {
 };
 #include "hle_timing_models.h"
 
-uint32_t hle_timing_cycles(void)
+static const struct timing_model *selected;
+
+static void select_model(void)
 {
-    const struct timing_model *model = &fallback;
-    uint64_t cycles;
     unsigned int i;
-    if (work.override_cycles) return work.override_cycles;
+    selected = &fallback;
     for (i = 0; i < sizeof(timing_models) / sizeof(timing_models[0]); i++)
         if (work.family && !strcmp(work.family, timing_models[i].family) &&
             (timing_models[i].checksum == 0xffffffffu || work.ucode_checksum == timing_models[i].checksum))
-        { model = &timing_models[i]; break; }
+        { selected = &timing_models[i]; break; }
+    model_valid = 1;
+}
+
+uint32_t hle_timing_cycles(void)
+{
+    const struct timing_model *model;
+    uint64_t cycles;
+    unsigned int i;
+    if (work.override_cycles) return work.override_cycles;
+    if (!model_valid) select_model();
+    model = selected;
     cycles = model->base;
     for (i = 0; i < HLE_WORK_COUNT; i++) {
         uint64_t cost = (uint64_t)model->cost[i] * work.units[i];
-        if (cycles >= 0x7fffffffu || cost > 0x7fffffffu - cycles) return 0x7fffffffu;
+        if (cycles >= INT_MAX || cost > INT_MAX - cycles) return INT_MAX;
         cycles += cost;
     }
-    return cycles > 0x7fffffffu ? 0x7fffffffu : (uint32_t)(cycles ? cycles : 1);
+    return cycles ? (uint32_t)cycles : 1;
 }

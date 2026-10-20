@@ -44,14 +44,16 @@ void alist_dmem_dma(struct hle_t* hle, uint32_t dmem, uint32_t address, uint32_t
 void alist_nead_s8(struct hle_t* hle, uint32_t w1, uint32_t w2, uint16_t scratch, uint16_t loop_offset, int pipelined);
 uint32_t alist_get_address(struct hle_t* hle, uint32_t so, const uint32_t *segments, size_t n);
 void alist_set_address(struct hle_t* hle, uint32_t so, uint32_t *segments, size_t n);
-void alist_clear(struct hle_t* hle, uint16_t dmem, uint16_t count);
+void alist_clear(struct hle_t* hle, uint16_t dmem, uint32_t count);
 void alist_load(struct hle_t* hle, uint16_t dmem, uint32_t address, uint16_t count);
 void alist_save(struct hle_t* hle, uint16_t dmem, uint32_t address, uint16_t count);
 void alist_move(struct hle_t* hle, uint16_t dmemo, uint16_t dmemi, uint16_t count);
+void alist_move_audio(struct hle_t* hle, uint16_t dmemo, uint16_t dmemi, uint16_t count);
 void alist_copy_every_other_sample(struct hle_t* hle, uint16_t dmemo, uint16_t dmemi, uint16_t count);
 void alist_repeat64(struct hle_t* hle, uint16_t dmemo, uint16_t dmemi, uint8_t count);
 void alist_copy_blocks(struct hle_t* hle, uint16_t dmemo, uint16_t dmemi, uint16_t block_size, uint8_t count);
 void alist_interleave(struct hle_t* hle, uint16_t dmemo, uint16_t left, uint16_t right, uint16_t count);
+void alist_interleave_audio(struct hle_t* hle, uint16_t dmemo, uint16_t left, uint16_t right, uint16_t count);
 
 void alist_envmix_audio1(
         struct hle_t* hle,
@@ -147,6 +149,8 @@ void alist_envmix_nead(
         bool wet_bypass);
 
 void alist_mix(struct hle_t* hle, uint16_t dmemo, uint16_t dmemi, uint16_t count, int16_t gain);
+void alist_mix_audio(struct hle_t* hle, uint16_t dmemo, uint16_t dmemi, uint16_t count, int16_t gain);
+void alist_mix_audio_bc(struct hle_t* hle, uint16_t dmemo, uint16_t dmemi, uint16_t count, int16_t gain);
 void alist_multQ44(struct hle_t* hle, uint16_t dmem, uint16_t count, uint8_t gain);
 void alist_add(struct hle_t* hle, uint16_t dmemo, uint16_t dmemi, uint16_t count);
 
@@ -160,7 +164,8 @@ void alist_adpcm(
         uint16_t count,
         const int16_t* codebook,
         uint32_t loop_address,
-        uint32_t last_frame_address);
+        uint32_t last_frame_address,
+        uint16_t codebook_dmem);
 
 void alist_resample(
         struct hle_t* hle, 
@@ -248,7 +253,8 @@ void alist_polef(
         uint16_t count,
         uint16_t gain,
         int16_t* table,
-        uint32_t address);
+        uint32_t address,
+        uint16_t state_slab);
 
 void alist_iirf(
         struct hle_t* hle,

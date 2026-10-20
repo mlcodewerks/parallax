@@ -45,15 +45,16 @@ GLStateGuard::GLStateGuard() {
     for (unsigned unit = 0; unit < texture_units_.size(); ++unit) {
         glActiveTexture(GL_TEXTURE0 + unit);
         glGetIntegerv(GL_TEXTURE_BINDING_2D, &texture_units_[unit].texture_2d);
-        glGetIntegerv(GL_TEXTURE_BINDING_2D_MULTISAMPLE,
-                      &texture_units_[unit].texture_2d_multisample);
+        if (!glrdp_gles3)
+            glGetIntegerv(GL_TEXTURE_BINDING_2D_MULTISAMPLE,
+                          &texture_units_[unit].texture_2d_multisample);
         glGetIntegerv(GL_SAMPLER_BINDING, &texture_units_[unit].sampler);
     }
     glActiveTexture(GLenum(active_texture_));
 
     glGetIntegerv(GL_VIEWPORT, viewport_.data());
     glGetIntegerv(GL_SCISSOR_BOX, scissor_box_.data());
-    glGetIntegerv(GL_POLYGON_MODE, polygon_mode_.data());
+    if (!glrdp_gles3) glGetIntegerv(GL_POLYGON_MODE, polygon_mode_.data());
     glGetBooleanv(GL_COLOR_WRITEMASK, color_mask_.data());
     glGetFloatv(GL_BLEND_COLOR, blend_color_.data());
     glGetFloatv(GL_COLOR_CLEAR_VALUE, clear_color_.data());
@@ -62,12 +63,14 @@ GLStateGuard::GLStateGuard() {
     blend_enabled_ = glIsEnabled(GL_BLEND);
     depth_test_enabled_ = glIsEnabled(GL_DEPTH_TEST);
     scissor_test_enabled_ = glIsEnabled(GL_SCISSOR_TEST);
-    multisample_enabled_ = glIsEnabled(GL_MULTISAMPLE);
+    if (!glrdp_gles3) multisample_enabled_ = glIsEnabled(GL_MULTISAMPLE);
     cull_face_enabled_ = glIsEnabled(GL_CULL_FACE);
     stencil_test_enabled_ = glIsEnabled(GL_STENCIL_TEST);
     dither_enabled_ = glIsEnabled(GL_DITHER);
-    color_logic_op_enabled_ = glIsEnabled(GL_COLOR_LOGIC_OP);
-    framebuffer_srgb_enabled_ = glIsEnabled(GL_FRAMEBUFFER_SRGB);
+    if (!glrdp_gles3) {
+        color_logic_op_enabled_ = glIsEnabled(GL_COLOR_LOGIC_OP);
+        framebuffer_srgb_enabled_ = glIsEnabled(GL_FRAMEBUFFER_SRGB);
+    }
     sample_alpha_to_coverage_enabled_ = glIsEnabled(GL_SAMPLE_ALPHA_TO_COVERAGE);
     sample_coverage_enabled_ = glIsEnabled(GL_SAMPLE_COVERAGE);
     rasterizer_discard_enabled_ = glIsEnabled(GL_RASTERIZER_DISCARD);
@@ -95,8 +98,10 @@ GLStateGuard::GLStateGuard() {
     // Host-side fixed-function state can otherwise modify fragment writes even
     // when our own shader/FBO state is correct. Disable these while the guard
     // is active and restore them verbatim in the destructor.
-    glDisable(GL_COLOR_LOGIC_OP);
-    glDisable(GL_FRAMEBUFFER_SRGB);
+    if (!glrdp_gles3) {
+        glDisable(GL_COLOR_LOGIC_OP);
+        glDisable(GL_FRAMEBUFFER_SRGB);
+    }
     glDisable(GL_SAMPLE_ALPHA_TO_COVERAGE);
     glDisable(GL_SAMPLE_COVERAGE);
     glDisable(GL_RASTERIZER_DISCARD);
@@ -114,7 +119,7 @@ GLStateGuard::~GLStateGuard() {
 
     if (!draw_buffers_.empty()) {
         if (draw_framebuffer_ == 0)
-            glDrawBuffer(draw_buffers_.front());
+            glrdp_draw_buffer(draw_buffers_.front());
         else
             glDrawBuffers(GLsizei(draw_buffers_.size()), draw_buffers_.data());
     }
@@ -123,8 +128,9 @@ GLStateGuard::~GLStateGuard() {
     for (unsigned unit = 0; unit < texture_units_.size(); ++unit) {
         glActiveTexture(GL_TEXTURE0 + unit);
         glBindTexture(GL_TEXTURE_2D, GLuint(texture_units_[unit].texture_2d));
-        glBindTexture(GL_TEXTURE_2D_MULTISAMPLE,
-                      GLuint(texture_units_[unit].texture_2d_multisample));
+        if (!glrdp_gles3)
+            glBindTexture(GL_TEXTURE_2D_MULTISAMPLE,
+                          GLuint(texture_units_[unit].texture_2d_multisample));
         glBindSampler(unit, GLuint(texture_units_[unit].sampler));
     }
     glActiveTexture(GLenum(active_texture_));
@@ -142,14 +148,15 @@ GLStateGuard::~GLStateGuard() {
 
     glViewport(viewport_[0], viewport_[1], viewport_[2], viewport_[3]);
     glScissor(scissor_box_[0], scissor_box_[1], scissor_box_[2], scissor_box_[3]);
-    glPolygonMode(GL_FRONT_AND_BACK, GLenum(polygon_mode_[0]));
+    if (!glrdp_gles3) glPolygonMode(GL_FRONT_AND_BACK, GLenum(polygon_mode_[0]));
 
     glColorMask(color_mask_[0], color_mask_[1], color_mask_[2], color_mask_[3]);
     glDepthMask(depth_mask_);
     glDepthFunc(GLenum(depth_func_));
     glBlendColor(blend_color_[0], blend_color_[1], blend_color_[2], blend_color_[3]);
     glClearColor(clear_color_[0], clear_color_[1], clear_color_[2], clear_color_[3]);
-    glClearDepth(clear_depth_);
+    if (glrdp_gles3) glClearDepthf(clear_depth_);
+    else glClearDepth(clear_depth_);
     glBlendFuncSeparate(GLenum(blend_src_rgb_), GLenum(blend_dst_rgb_), GLenum(blend_src_alpha_),
                         GLenum(blend_dst_alpha_));
     glBlendEquationSeparate(GLenum(blend_equation_rgb_), GLenum(blend_equation_alpha_));
@@ -160,12 +167,14 @@ GLStateGuard::~GLStateGuard() {
     restore_enable(GL_BLEND, blend_enabled_);
     restore_enable(GL_DEPTH_TEST, depth_test_enabled_);
     restore_enable(GL_SCISSOR_TEST, scissor_test_enabled_);
-    restore_enable(GL_MULTISAMPLE, multisample_enabled_);
+    if (!glrdp_gles3) restore_enable(GL_MULTISAMPLE, multisample_enabled_);
     restore_enable(GL_CULL_FACE, cull_face_enabled_);
     restore_enable(GL_STENCIL_TEST, stencil_test_enabled_);
     restore_enable(GL_DITHER, dither_enabled_);
-    restore_enable(GL_COLOR_LOGIC_OP, color_logic_op_enabled_);
-    restore_enable(GL_FRAMEBUFFER_SRGB, framebuffer_srgb_enabled_);
+    if (!glrdp_gles3) {
+        restore_enable(GL_COLOR_LOGIC_OP, color_logic_op_enabled_);
+        restore_enable(GL_FRAMEBUFFER_SRGB, framebuffer_srgb_enabled_);
+    }
     restore_enable(GL_SAMPLE_ALPHA_TO_COVERAGE, sample_alpha_to_coverage_enabled_);
     restore_enable(GL_SAMPLE_COVERAGE, sample_coverage_enabled_);
     restore_enable(GL_RASTERIZER_DISCARD, rasterizer_discard_enabled_);

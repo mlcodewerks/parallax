@@ -495,7 +495,7 @@ static void ADPCM(struct hle_t* hle, uint32_t w1, uint32_t w2)
                 (count + 0x1f) & ~0x1f,
                 table,
                 naudio_state_read_word(hle, 0x10) & 0x7fffffu,
-                address);
+                address, 0);
     }
 }
 

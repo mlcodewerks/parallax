@@ -59,6 +59,10 @@ typedef struct GSPVertex
      * normalizer, integer colours). */
     int     flat2d;
 } GSPVertex;
+void gsp_set_clip_spill(void (*spill)(const GSPVertex *, const GSPVertex *));
+void gsp_set_vertex_spill(void (*spill)(int));
+void gsp_set_legacy_lighting(int on);
+void gsp_set_vertex_cache(int (*cache)(int,unsigned int,int32_t[4]));
 
 /* VCH clip outcode bits, matching the F3DEX2 VTX_CLIP screen layout:
  * N flags at bits 4..7 (x, y, z, w), P flags at bits 12..15. The reject
@@ -101,7 +105,7 @@ typedef struct GSPState
      * 0 = NoN microcode (near plane is w >= 0 only), 1 = standard near
      * clipping (z + w >= 0). Selects the near plane the polygon clipper
      * uses and the VCH outcode bit that gates and rejects against it. */
-    int clip_near_z;
+    int clip_near_z; /* -1: early NoN stores neither near-Z nor W flag */
     /* The reduced line microcodes (gspL3DEX and Blast Corps' Fast3D line
      * build) have no lighting or fog block: vertex alpha stays the display
      * list's raw byte even with G_FOG set in the geometry mode. */
@@ -129,6 +133,7 @@ typedef struct GSPState
     int line_z;            /* Body Harvest's line build: z-buffered lines
                               (emit the triangle's z block, interpolated
                               along the segment) */
+    int line_native;
     int line_alpha_mask;   /* gspL3DEX: shade alpha & 0xfc on line commands */
     int line_clip_3d;      /* gspL3DEX: 3D-clip flagged line segments; Blast
                               Corps' Fast3D line build draws them raw */
@@ -216,6 +221,8 @@ typedef struct GSPState
 
 /* lifecycle */
 void gsp_init(GSPState *s);
+void gsp_seed_matrices(GSPState *s, const unsigned char *dmem,
+                       unsigned int modelview, unsigned int projection);
 void gsp_detect_ucode_params(GSPState *st, const unsigned char *rdram,
                              unsigned int rdram_size,
                              unsigned int ud, unsigned int ut);
@@ -239,6 +246,8 @@ void gsp_task_reset(GSPState *s);
 /* matrix ops (addr is an RDRAM byte address to a 4x4 N64 fixed-point matrix) */
 void gsp_matrix_load(GSPState *s, const unsigned char *rdram, unsigned int addr,
                      int projection, int load, int push);
+void gsp_matrix_load_dma(GSPState *s, const unsigned char *rdram, unsigned int addr,
+                         int projection, int load, int push, unsigned int push_bytes);
 void gsp_matrix_pop(GSPState *s, const unsigned char *rdram);
 void gsp_set_matrix_stack(GSPState *s, unsigned char *rdram,
                           unsigned int base, unsigned int size);
@@ -259,6 +268,8 @@ void gsp_set_texture(GSPState *s, unsigned int scale_s, unsigned int scale_t,
 /* load+transform n vertices starting at index v0 from RDRAM addr */
 void gsp_vertex(GSPState *s, const unsigned char *rdram, unsigned int addr,
                 int n, int v0);
+void gsp_vertex_cbfd(GSPState *s, const unsigned char *rdram,
+    const unsigned char *dmem, unsigned int addr, int n, int v0);
 
 /* DKR (F3DDKR) 10-byte pos+RGBA vertex load (see rdp_emit_frontend.c). */
 void gsp_vertex_dkr(GSPState *s, const unsigned char *rdram, unsigned int addr,
@@ -306,6 +317,11 @@ void gsp_modify_vertex(GSPState *s, int vtx, unsigned int where,
 
 int gsp_triangle(GSPState *s, int32_t *cmd, int i0, int i1, int i2,
                  int textured, int z_buffered);
+void gsp_sdk_vertex_memory(unsigned char *memory,unsigned int base);
+void gsp_sdk_vertex_store(GSPState *s,unsigned int vertex);
+void gsp_sdk_matrix_store(GSPState *s);
+int gsp_triangle_with_texrecip(GSPState *s, int32_t *cmd, int i0, int i1, int i2,
+                 int textured, int z_buffered, int native_texrecip);
 /* Expand a G_LINE3D (gSPLine3D) between two stored vertices into a thin
  * screen-space quad and emit it; used by the Doom 64 automap line ucode. */
 int gsp_line(GSPState *s, int32_t *cmd, int i0, int i1, int width_q);

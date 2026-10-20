@@ -6,6 +6,9 @@
 #include "hle_timing.h"
 #include "memory.h"
 #include <string.h>
+#ifdef HLE_ALIST_TRACE
+#include "../../../../../benchmarks/abi1_trace_hook.h"
+#endif
 
 static uint32_t staged_word(struct hle_t* hle, uint32_t at)
 {
@@ -32,9 +35,12 @@ void alist_nead_walk(struct hle_t* hle, const acmd_callback_t abi[],
             hle->alist_next += 8;hle->alist_remaining -= 8;
             hle->alist_chunk -= 8;hle->alist_chunk_offset += 8;
             hle->alist_processed += 8;
-            hle_timing_add(HLE_WORK_COMMAND, 1);
+            hle_timing_command(acmd);
             if (acmd < abi_size) abi[acmd](hle, w1, w2);
             else HleWarnMessage(hle->user_defined, "Invalid NEAD command %u", acmd);
+#ifdef HLE_ALIST_TRACE
+            abi1_trace_command(hle, w1, w2);
+#endif
         } while ((int32_t)hle->alist_chunk > 0);
     } while ((int32_t)hle->alist_remaining > 0);
     memcpy(hle->dmem, hle->alist_buffer, sizeof(hle->alist_buffer));

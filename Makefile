@@ -140,16 +140,15 @@ ifneq (,$(findstring unix,$(platform)))
 # Raspberry Pi
 else ifneq (,$(findstring rpi,$(platform)))
    TARGET := $(TARGET_NAME)_libretro.so
-   LDFLAGS += -shared -Wl,--version-script=$(LIBRETRO_DIR)/link.T -Wl,--no-undefined -ldl
-   ifeq ($(FORCE_GLES3),1)
-      GLES3 = 1
-   else
-      GLES = 1
-   endif
+   LDFLAGS += -shared -Wl,--version-script=$(ROOT_DIR)/src/link.T -Wl,--no-undefined -ldl
+   GLES3 = 1
    ifneq (,$(findstring mesa,$(platform)))
       MESA = 1
    endif
    ifneq (,$(findstring rpi4,$(platform)))
+      MESA = 1
+   endif
+   ifneq (,$(findstring rpi5,$(platform)))
       MESA = 1
    endif
    ifeq ($(MESA), 1)
@@ -162,7 +161,10 @@ else ifneq (,$(findstring rpi,$(platform)))
       INCFLAGS += -I/opt/vc/include -I/opt/vc/include/interface/vcos -I/opt/vc/include/interface/vcos/pthreads
    endif
    HAVE_NEON = 1
-   ifneq (,$(findstring rpi2,$(platform)))
+   ifneq (,$(findstring rpi5,$(platform)))
+      CPUFLAGS += -march=armv8.2-a+crc -mtune=cortex-a76
+      ARM_CPUFLAGS = -mfpu=neon-fp-armv8
+   else ifneq (,$(findstring rpi2,$(platform)))
       CPUFLAGS += -mcpu=cortex-a7
       ARM_CPUFLAGS = -mfpu=neon-vfpv4
    else ifneq (,$(findstring rpi3,$(platform)))
@@ -558,7 +560,10 @@ CFLAGS += -DM64P_HEADLESS_BENCH_PURE
 endif
 endif
 CXXFLAGS += -std=c++17 -D_CRT_SECURE_NO_WARNINGS
-CXXFLAGS += -fpermissive -msse4.1
+CXXFLAGS += -fpermissive
+ifneq (,$(filter x86_64 amd64 x86 i386 i486 i586 i686,$(ARCH)))
+CXXFLAGS += -msse4.1
+endif
 
 ifeq ($(HAVE_LTCG),1)
    CPUFLAGS += -flto

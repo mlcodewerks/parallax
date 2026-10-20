@@ -1,6 +1,8 @@
 #pragma once
 #include "shader_config.hpp"
 #include "primitive_batch.hpp"
+#include "primitive_footprint.hpp"
+#include "primitive_scheduler.hpp"
 #include "texture_atlas.hpp"
 #include "framebuffer_manager.hpp"
 #include "gl_loader.hpp"
@@ -37,8 +39,10 @@ class RDPRenderer {
         std::uint64_t primitives = 0, draws = 0, batches = 0, batched_primitives = 0;
         std::uint64_t atlas_hits = 0, atlas_uploads = 0, atlas_resets = 0, standalone_uploads = 0;
         std::uint64_t framebuffer_tiles = 0, framebuffer_readbacks = 0;
+        std::uint64_t queues = 0, queue_flushes = 0, state_flushes = 0;
     };
     const SubmissionStats &submission_stats() const { return stats_; }
+    unsigned batch_capacity() const { return primitive_uniforms_.capacity; }
     void set_display_resolution(int width, int height);
     void set_display_aspect_mode(int mode);
     int internal_resolution_scale() const {
@@ -74,14 +78,19 @@ class RDPRenderer {
     unsigned current_tile_count_ = 1;
     std::vector<PrimitiveUniforms::Slot> batch_records_;
     std::vector<PrimitiveBounds> batch_bounds_;
+    std::vector<PrimitiveFootprint> batch_footprints_;
+    PrimitiveScheduler batch_schedule_;
+    RDPEdgeCoefficients triangle_edge_{};
     GLFramebuffer *batch_target_ = nullptr;
     GPUDepthBuffer::Surface *batch_depth_ = nullptr;
     GLuint batch_program_ = 0;
     bool batch_writes_z_ = false, batch_reads_color_ = false;
     SubmissionStats stats_;
     void primitive_geometry(const std::vector<GLVertex> &);
-    void submit_records(const PrimitiveUniforms::Slot *, unsigned, GLuint);
+    void bind_primitive_pipeline(GLuint);
+    void submit_records(const PrimitiveUniforms::Slot *, unsigned);
     void bind_tiles();
+    void flush_batch(const std::vector<PrimitiveUniforms::Slot> &, const std::vector<PrimitiveBounds> &);
     void uniform_1i(GLint l, GLint x) { if (!primitive_uniforms_.store(l, &x, 4)) glUniform1i(l, x); }
     void uniform_1ui(GLint l, GLuint x) { if (!primitive_uniforms_.store(l, &x, 4)) glUniform1ui(l, x); }
     void uniform_1f(GLint l, GLfloat x) { if (!primitive_uniforms_.store(l, &x, 4)) glUniform1f(l, x); }

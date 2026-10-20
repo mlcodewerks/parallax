@@ -34,6 +34,9 @@
 #include "hle_internal.h"
 #include "memory.h"
 #include "hle_timing.h"
+#ifdef HLE_ALIST_TRACE
+#include "../../../../../benchmarks/abi1_trace_hook.h"
+#endif
 
 struct ramp_t
 {
@@ -145,12 +148,15 @@ void alist_process(struct hle_t* hle, const acmd_callback_t abi[], unsigned int 
         hle->alist_remaining = (uint32_t)(alist_end - alist) * 4;
 
         acmd = (w1 >> 24) & 0x7f;
-        hle_timing_add(HLE_WORK_COMMAND, 1);
+        hle_timing_command(acmd);
 
         if (acmd < abi_size)
             (*abi[acmd])(hle, w1, w2);
         else
             HleWarnMessage(hle->user_defined, "Invalid ABI command %u", acmd);
+#ifdef HLE_ALIST_TRACE
+        abi1_trace_command(hle, w1, w2);
+#endif
     }
 }
 
@@ -180,7 +186,7 @@ void alist_set_address(struct hle_t* hle, uint32_t so, uint32_t *segments, size_
     segments[segment] = offset;
 }
 
-void alist_clear(struct hle_t* hle, uint16_t dmem, uint16_t count)
+void alist_clear(struct hle_t* hle, uint16_t dmem, uint32_t count)
 {
     hle_timing_add(HLE_WORK_COPY, (count + 15u) / 16u);
 
@@ -260,6 +266,26 @@ void alist_move(struct hle_t* hle, uint16_t dmemo, uint16_t dmemi, uint16_t coun
     while (count != 0) {
         *alist_u8(hle, dmemo++) = *alist_u8(hle, dmemi++);
         --count;
+    }
+}
+
+/* ABI1 IMEM 0x424..0x440: both LDVs precede both SDVs.  Snapshot each
+ * 16-byte block, rather than copying byte by byte or snapshotting the
+ * whole command: overlap between successive blocks remains observable. */
+void alist_move_audio(struct hle_t* hle, uint16_t dmemo, uint16_t dmemi, uint16_t count)
+{
+    unsigned remaining = count;
+    hle_timing_add(HLE_WORK_COPY, (count + 15u) / 16u);
+    while (remaining != 0) {
+        uint8_t block[16];
+        unsigned i, n = remaining < 16 ? remaining : 16;
+        for (i = 0; i < n; ++i)
+            block[i] = *alist_u8(hle, dmemi + i);
+        for (i = 0; i < n; ++i)
+            *alist_u8(hle, dmemo + i) = block[i];
+        dmemi += n;
+        dmemo += n;
+        remaining -= n;
     }
 }
 
@@ -353,6 +379,34 @@ void alist_interleave(struct hle_t* hle, uint16_t dmemo, uint16_t left, uint16_t
     }
 }
 
+/* ABI1 IMEM 0x3a8..0x400 loads eight samples from each channel before
+ * its sixteen SSVs. Inputs are vector aligned; output is sample aligned. */
+void alist_interleave_audio(struct hle_t* hle, uint16_t dmemo, uint16_t left, uint16_t right, uint16_t count)
+{
+    unsigned remaining = count;
+    if ((left | right) & 15) {
+        alist_interleave(hle, dmemo, left, right, count);
+        return;
+    }
+    hle_timing_add(HLE_WORK_COPY, (count + 7u) / 8u);
+    while (remaining != 0) {
+        int16_t l[8], r[8];
+        unsigned i, n = remaining < 16 ? remaining / 2 : 8;
+        for (i = 0; i < n; ++i) {
+            l[i] = *alist_s16(hle, left + 2*i);
+            r[i] = *alist_s16(hle, right + 2*i);
+        }
+        for (i = 0; i < n; ++i) {
+            *alist_s16(hle, dmemo + 4*i) = l[i];
+            *alist_s16(hle, dmemo + 4*i + 2) = r[i];
+        }
+        left += 2*n;
+        right += 2*n;
+        dmemo += 4*n;
+        remaining -= 2*n;
+    }
+}
+
 
 /* ENVMIXER as the audio 1.0 aspMain microcode computes it: the state is
  * the raw 0x50-byte DMEM image of five vector quads -- the left volume
@@ -401,11 +455,7 @@ static int16_t ev_clamp_am(int64_t a) /* SIGNED_CLAMP_AM: acc[47:16] to s16 */
 
 static int16_t ev_clamp_al(int64_t a) /* SIGNED_CLAMP_AL: saturate ACC_L */
 {
-    int16_t clamped = ev_clamp_am(a);
-    int16_t raw_m   = (int16_t)((a >> 16) & 0xFFFF);
-    if (clamped != raw_m)
-        return (int16_t)(clamped ^ (int16_t)0x8000);
-    return (int16_t)(a & 0xFFFF);
+    return clamp_rsp_acc_low(a);
 }
 
 /* vt operand: full vector when e < 0, else broadcast of lane e */
@@ -1508,6 +1558,87 @@ void alist_mix(struct hle_t* hle, uint16_t dmemo, uint16_t dmemi, uint16_t count
     }
 }
 
+/* ABI1 IMEM 0xe4c..0xe90. Its prefetch order differs from NEAD MIXER:
+ * store the first output vector, fetch BOTH next source vectors, store
+ * the second output vector, then fetch both next destination vectors.
+ * Counts arrive rounded to 32 and the SDK's buffers are vector aligned.
+ * Keep the old path for unaligned inputs, whose partial LQVs additionally
+ * depend on vector-register residue outside this command's HLE state. */
+void alist_mix_audio(struct hle_t* hle, uint16_t dmemo, uint16_t dmemi, uint16_t count, int16_t gain)
+{
+    int16_t d0[8], d1[8], s0[8], s1[8], r0[8], r1[8];
+    int remaining = count;
+    unsigned i;
+    if ((dmemo | dmemi) & 15) {
+        alist_mix(hle, dmemo, dmemi, count, gain);
+        return;
+    }
+    hle_timing_add(HLE_WORK_MIX, (count + 15u) / 16u);
+    if (!remaining)
+        return;
+    for (i = 0; i < 8; ++i) {
+        d0[i] = *alist_s16(hle, dmemo + 2*i);
+        d1[i] = *alist_s16(hle, dmemo + 16 + 2*i);
+        s0[i] = *alist_s16(hle, dmemi + 2*i);
+        s1[i] = *alist_s16(hle, dmemi + 16 + 2*i);
+    }
+    do {
+        for (i = 0; i < 8; ++i) {
+            r0[i] = d0[i];
+            r1[i] = d1[i];
+            sample_mix(&r0[i], s0[i], gain);
+            sample_mix(&r1[i], s1[i], gain);
+        }
+        remaining -= 32;
+        dmemi += 32;
+        for (i = 0; i < 8; ++i)
+            *alist_s16(hle, dmemo + 2*i) = r0[i];
+        for (i = 0; i < 8; ++i) {
+            s0[i] = *alist_s16(hle, dmemi + 2*i);
+            s1[i] = *alist_s16(hle, dmemi + 16 + 2*i);
+        }
+        for (i = 0; i < 8; ++i)
+            *alist_s16(hle, dmemo + 16 + 2*i) = r1[i];
+        dmemo += 32;
+        for (i = 0; i < 8; ++i) {
+            d0[i] = *alist_s16(hle, dmemo + 2*i);
+            d1[i] = *alist_s16(hle, dmemo + 16 + 2*i);
+        }
+    } while (remaining > 0);
+}
+
+/* Blast Corps / DKR IMEM 0xe7c..0xf30 unrolls the mixer with four
+ * vectors of lookahead. Each SQV precedes the LQVs four vectors ahead.
+ * The standard ABI1 helper has two-vector lookahead and a different
+ * second-vector prefetch, so sharing it corrupts overlapping delay mixes. */
+void alist_mix_audio_bc(struct hle_t* hle, uint16_t dmemo, uint16_t dmemi, uint16_t count, int16_t gain)
+{
+    int16_t dst[4][8], src[4][8];
+    unsigned block, i, blocks = (count + 15u) / 16u;
+    if ((dmemo | dmemi) & 15) {
+        alist_mix(hle, dmemo, dmemi, count, gain);
+        return;
+    }
+    hle_timing_add(HLE_WORK_MIX, blocks);
+    for (block = 0; block < 4; ++block)
+        for (i = 0; i < 8; ++i) {
+            dst[block][i] = *alist_s16(hle, dmemo + 16*block + 2*i);
+            src[block][i] = *alist_s16(hle, dmemi + 16*block + 2*i);
+        }
+    for (block = 0; block < blocks; ++block) {
+        unsigned slot = block & 3;
+        for (i = 0; i < 8; ++i) {
+            int16_t value = dst[slot][i];
+            sample_mix(&value, src[slot][i], gain);
+            *alist_s16(hle, dmemo + 16*block + 2*i) = value;
+        }
+        for (i = 0; i < 8; ++i) {
+            src[slot][i] = *alist_s16(hle, dmemi + 16*(block + 4) + 2*i);
+            dst[slot][i] = *alist_s16(hle, dmemo + 16*(block + 4) + 2*i);
+        }
+    }
+}
+
 void alist_multQ44(struct hle_t* hle, uint16_t dmem, uint16_t count, uint8_t gain)
 {
     hle_timing_add(HLE_WORK_MIX, (count + 15u) / 16u);
@@ -1707,6 +1838,8 @@ void alist_resample_audio(
         uint32_t pitch,     /* Q16.16 */
         uint32_t address)
 {
+    /* The native handler tests its remaining count after the first SQV. */
+    if (count == 0) count = 16;
     hle_timing_add(HLE_WORK_RESAMPLE, (count + 15u) / 16u);
 
     /* The plain audio (aspMain) microcode's RESAMPLE, modelled after
@@ -1766,37 +1899,45 @@ void alist_resample_audio(
     ipos = in >> 1;
 
     while (count != 0) {
-        const int16_t* lut = RESAMPLE_LUT + ((pitch_accu & 0xfc00) >> 8);
+        int16_t block[8];
+        unsigned lane, batch = count < 8 ? count : 8;
+        /* Native 0x9d8..0xa3c loads all taps before the output SQV at
+         * 0xac4. Slow-pitch in-place resampling can otherwise overwrite
+         * samples that later lanes in the same block still need. */
+        for (lane = 0; lane < batch; ++lane) {
+            const int16_t* lut = RESAMPLE_LUT + ((pitch_accu & 0xfc00) >> 8);
 
-        /* Identical arithmetic to alist_resample: per-tap vmulf with
-         * a tree of saturating vadds. */
-        int16_t hq_out;
+            /* Per-tap VMULF followed by a tree of saturating VADDs. */
+            int16_t hq_out;
 
-        if (resample_hq_sample(hle, ipos, pitch, pitch_accu, &hq_out)) {
-            *sample(hle, opos++) = hq_out;
+            if (resample_hq_sample(hle, ipos, pitch, pitch_accu, &hq_out)) {
+                block[lane] = hq_out;
+                pitch_accu += pitch;
+                ipos       += (pitch_accu >> 16);
+                pitch_accu &= 0xffff;
+                --count;
+                continue;
+            }
+
+            int32_t q0 = (int32_t)(((int64_t)2 * *sample(hle, ipos    ) * lut[0] + 0x8000) >> 16);
+            int32_t q1 = (int32_t)(((int64_t)2 * *sample(hle, ipos + 1) * lut[1] + 0x8000) >> 16);
+            int32_t q2 = (int32_t)(((int64_t)2 * *sample(hle, ipos + 2) * lut[2] + 0x8000) >> 16);
+            int32_t q3 = (int32_t)(((int64_t)2 * *sample(hle, ipos + 3) * lut[3] + 0x8000) >> 16);
+
+            q0 = clamp_s16(q0);
+            q1 = clamp_s16(q1);
+            q2 = clamp_s16(q2);
+            q3 = clamp_s16(q3);
+
+            block[lane] = clamp_s16(clamp_s16(q0 + q1) + clamp_s16(q2 + q3));
+
             pitch_accu += pitch;
-            ipos       += (pitch_accu >> 16);
+            ipos += (pitch_accu >> 16);
             pitch_accu &= 0xffff;
             --count;
-            continue;
         }
-
-        int32_t q0 = (int32_t)(((int64_t)2 * *sample(hle, ipos    ) * lut[0] + 0x8000) >> 16);
-        int32_t q1 = (int32_t)(((int64_t)2 * *sample(hle, ipos + 1) * lut[1] + 0x8000) >> 16);
-        int32_t q2 = (int32_t)(((int64_t)2 * *sample(hle, ipos + 2) * lut[2] + 0x8000) >> 16);
-        int32_t q3 = (int32_t)(((int64_t)2 * *sample(hle, ipos + 3) * lut[3] + 0x8000) >> 16);
-
-        q0 = clamp_s16(q0);
-        q1 = clamp_s16(q1);
-        q2 = clamp_s16(q2);
-        q3 = clamp_s16(q3);
-
-        *sample(hle, opos++) = clamp_s16(clamp_s16(q0 + q1) + clamp_s16(q2 + q3));
-
-        pitch_accu += pitch;
-        ipos += (pitch_accu >> 16);
-        pitch_accu &= 0xffff;
-        --count;
+        for (lane = 0; lane < batch; ++lane)
+            *sample(hle, opos++) = block[lane];
     }
 
     for (i = 0; i < 4; ++i)
@@ -1952,10 +2093,19 @@ void alist_resample_naudio(
      * window+accumulator block plus six bytes of the argument latch,
      * which only these transfers touch */
     uint8_t* scratch = hle->alist_naudio.state_scratch;
+    /* The first VSUB of the ramp setup consumes retained VCO_LO. Its
+     * per-lane borrow subtracts one encoded (half) pitch before the
+     * second VSUB clears carry. Only the first batch retains all eight
+     * offsets; subsequent batches broadcast lane 7 as their phase base. */
+    uint8_t entry_carry = (uint8_t)hle->rsp_vco;
+    int first_batch = 1;
     uint32_t pitch_accu;
     uint16_t ipos;
     uint16_t opos = dmemo >> 1;
     unsigned i, b;
+
+    hle->rsp_vco = 0;
+    hle->rsp_vco_written = 1;
 
     ipos = (dmemi >> 1) - 4;
 
@@ -1981,11 +2131,14 @@ void alist_resample_naudio(
         unsigned n = (count < 8) ? count : 8;
 
         for (b = 0; b < n; ++b) {
-            p[b]      = (uint16_t)((pitch_accu & 0xfc00) >> 8);
-            accu[b]   = pitch_accu;
-            ipos_b[b] = ipos;
+            unsigned carry_lane = first_batch ? b : 7;
+            int32_t phase = (int32_t)pitch_accu - (((entry_carry >> carry_lane) & 1u) ? (int32_t)(pitch >> 1) : 0);
+            uint16_t position = (uint16_t)(ipos + (phase >> 16));
+            p[b]      = (uint16_t)(((uint32_t)phase & 0xfc00) >> 8);
+            accu[b]   = (uint16_t)phase;
+            ipos_b[b] = position;
             for (i = 0; i < 4; ++i)
-                win[b][i] = *sample(hle, (uint16_t)(ipos + i));
+                win[b][i] = *sample(hle, (uint16_t)(position + i));
             pitch_accu += pitch;
             ipos += (pitch_accu >> 16);
             pitch_accu &= 0xffff;
@@ -2018,8 +2171,14 @@ void alist_resample_naudio(
             *sample(hle, opos++) = clamp_s16(clamp_s16(q0 + q1) + clamp_s16(q2 + q3));
         }
         count -= n;
+        first_batch = 0;
     }
 
+    if (entry_carry & 0x80u) {
+        int32_t phase = (int32_t)pitch_accu - (int32_t)(pitch >> 1);
+        ipos = (uint16_t)(ipos + (phase >> 16));
+        pitch_accu = (uint16_t)phase;
+    }
     alist_resample_save(hle, address, ipos, pitch_accu);
     /* the six bytes past the ten-byte state are the scratch residue */
     for (i = 0; i < 6; ++i)
@@ -2115,11 +2274,15 @@ void alist_adpcm(
         uint16_t count,
         const int16_t* codebook,
         uint32_t loop_address,
-        uint32_t last_frame_address)
+        uint32_t last_frame_address,
+        uint16_t codebook_dmem)
 {
     hle_timing_add(HLE_WORK_ADPCM, (count + 31u) / 32u);
 
     int16_t last_frame[16];
+    int16_t frame[16], live_book[16];
+    const int16_t* cb_entry = NULL;
+    int prepared = 0;
     size_t i;
 
     adpcm_predict_frame_t predict_frame = (two_bit_per_sample)
@@ -2137,15 +2300,36 @@ void alist_adpcm(
         *alist_s16(hle, dmemo) = last_frame[i];
 
     while (count != 0) {
-        int16_t frame[16];
-        uint8_t code = *alist_u8(hle, dmemi++);
-        unsigned char scale = (code & 0xf0) >> 4;
-        const int16_t* const cb_entry = codebook + ((code & 0xf) << 4);
-
-        dmemi += predict_frame(hle, frame, dmemi, scale);
+        if (!prepared) {
+            uint8_t code = *alist_u8(hle, dmemi++);
+            unsigned char scale = (code & 0xf0) >> 4;
+            cb_entry = codebook + ((code & 0xf) << 4);
+            if (codebook_dmem) {
+                uint16_t base = codebook_dmem + ((code & 0xf) << 5);
+                for (i = 0; i < 16; ++i)
+                    live_book[i] = *alist_s16(hle, base + 2*i);
+                cb_entry = live_book;
+            }
+            dmemi += predict_frame(hle, frame, dmemi, scale);
+        }
 
         adpcm_compute_residuals(last_frame    , frame    , cb_entry, last_frame + 14, 8);
         adpcm_compute_residuals(last_frame + 8, frame + 8, cb_entry, last_frame + 6 , 8);
+
+        prepared = 0;
+        if (codebook_dmem && count > 32) {
+            /* ABI1 prefetches the next compressed block and both book
+             * vectors before its four SDVs commit the current frame.
+             * Upper predictor entries overlap live PCM in DMEM. */
+            uint8_t code = *alist_u8(hle, dmemi++);
+            unsigned char scale = (code & 0xf0) >> 4;
+            uint16_t base = codebook_dmem + ((code & 0xf) << 5);
+            dmemi += predict_frame(hle, frame, dmemi, scale);
+            for (i = 0; i < 16; ++i)
+                live_book[i] = *alist_s16(hle, base + 2*i);
+            cb_entry = live_book;
+            prepared = 1;
+        }
 
         for(i = 0; i < 16; ++i, dmemo += 2)
             *alist_s16(hle, dmemo) = last_frame[i];
@@ -2377,7 +2561,8 @@ void alist_polef(
         uint16_t count,
         uint16_t gain,
         int16_t* table,
-        uint32_t address)
+        uint32_t address,
+        uint16_t state_slab)
 {
     hle_timing_add(HLE_WORK_FILTER, (count + 15u) / 16u);
 
@@ -2404,7 +2589,21 @@ void alist_polef(
 
     count = align(count, 16);
 
-    if (init) {
+    if (state_slab) {
+        /* ABI1 IMEM 0x76c clears only the first four state bytes on
+         * initialization. LDV at 0x7b4 still reads the two feedback
+         * samples at +4/+6 from the shared slab. A continued command
+         * replaces all eight bytes by DMA. The final state DMA reads
+         * directly from the output buffer, leaving this slab intact. */
+        for (i = 0; i < (init ? 2u : 4u); ++i)
+            *alist_s16(hle, state_slab + 2*i) = init ? 0 :
+                (int16_t)*dram_u16(hle, address + 2*i);
+        l1 = *alist_s16(hle, state_slab + 4);
+        l2 = *alist_s16(hle, state_slab + 6);
+        hq_l1 = (int64_t)l1 << 14;
+        hq_l2 = (int64_t)l2 << 14;
+    }
+    else if (init) {
         l1 = 0;
         l2 = 0;
     }
@@ -2426,6 +2625,8 @@ void alist_polef(
         uint16_t mult = (uint16_t)(gain << 2);
         h2_before[i] = h2[i];
         h2[i] = (int16_t)(((int64_t)h2[i] * mult) >> 16);
+        if (state_slab)
+            *alist_s16(hle, 0x4d0 + 2*i) = h2[i];
     }
 
     do

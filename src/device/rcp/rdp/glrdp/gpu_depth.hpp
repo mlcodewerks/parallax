@@ -38,7 +38,8 @@ class GPUDepthBuffer {
     bool has_pending_read(std::uint32_t address) const;
     bool flush_range(std::uint32_t address, std::uint32_t size, N64Memory &memory);
 
-    bool begin_pass(Surface &surface, int x, int y, int width, int height, bool in_place = false);
+    bool begin_pass(Surface &surface, int x, int y, int width, int height,
+                    bool in_place = false, bool combined_color = false);
     void finish_pass(Surface &surface, bool writes_z = true);
 
     GLuint source_state_texture(const Surface &surface) const;

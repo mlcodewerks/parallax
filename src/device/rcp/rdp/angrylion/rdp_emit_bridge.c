@@ -208,7 +208,8 @@ static int try_rsp_tri_write(int32_t *cmd,
                              int smooth,
                              int tile, int level,
                              int32_t dx_scale, int32_t idy_scale,
-                             int32_t frac_mask, int32_t vcr_bound)
+                             int32_t frac_mask, int32_t vcr_bound,
+                             int native_texrecip)
 {
     RspTriVtx r[3];
     const EmitVertex *ev[3];
@@ -250,9 +251,9 @@ static int try_rsp_tri_write(int32_t *cmd,
         r[i].pw = ev[i]->rs_pw;
         r[i].flat2d = bv[i]->flat2d;
     }
-    return rsp_tri_write(cmd, &r[0], &r[1], &r[2],
+    return rsp_tri_write_with_texrecip(cmd, &r[0], &r[1], &r[2],
                          textured, z_buffered, shaded, smooth, tile, level,
-                         dx_scale, idy_scale, frac_mask, vcr_bound);
+                         dx_scale, idy_scale, frac_mask, vcr_bound, native_texrecip);
 }
 
 int bridge_add_triangle(int32_t *cmd,
@@ -262,6 +263,17 @@ int bridge_add_triangle(int32_t *cmd,
                         int textured, int z_buffered, int shaded, int smooth,
                         int cull_mode,
                         int tile, int max_level, int tex_w, int tex_h)
+{
+    return bridge_add_triangle_with_texrecip(cmd,v0,v1,v2,vp,textured,z_buffered,
+        shaded,smooth,cull_mode,tile,max_level,tex_w,tex_h,0);
+}
+
+int bridge_add_triangle_with_texrecip(int32_t *cmd,
+                        const BridgeVertex *v0, const BridgeVertex *v1,
+                        const BridgeVertex *v2, const BridgeViewport *vp,
+                        int textured, int z_buffered, int shaded, int smooth,
+                        int cull_mode, int tile, int max_level, int tex_w, int tex_h,
+                        int native_texrecip)
 {
     EmitVertex a, b, c;
     int n;
@@ -297,16 +309,24 @@ int bridge_add_triangle(int32_t *cmd,
         int32_t x0 = a.x >> 14, y0 = a.y >> 14;
         int32_t x1 = b.x >> 14, y1 = b.y >> 14;
         int32_t x2 = c.x >> 14, y2 = c.y >> 14;
+        /* Rej's VLT of the Y extrema rejects a horizontal triangle,
+         * independently of the area sign test below. */
+        if (native_texrecip == 2 && y0 == y1 && y1 == y2)
+            return 0;
         int64_t cr = (int64_t)(x0 - x1) * (y0 - y2)
                    + (int64_t)(x0 - x2) * (y1 - y0);
         int32_t c6 = (cr > 32767) ? 32767 : (cr < -32768) ? -32768
                    : (int32_t)cr;
-        if (!((magic[cull_mode & 3] + (unsigned int)c6) & 0x80000000u))
+        if (!((magic[cull_mode & 3] + (unsigned int)c6) & 0x80000000u)) {
+            if(native_texrecip)rsp_vertex_spill_cull(y0,y1,y2,0);
             return 0;
-        if (c6 == 0)
+        }
+        if (c6 == 0) {
+            if(native_texrecip)rsp_vertex_spill_cull(y0,y1,y2,1);
             return 0;
+        }
     }
-    else if (s_clip_degenerate_cull
+    else if (s_clip_degenerate_cull && native_texrecip != 2
              && v0->scr_valid && v1->scr_valid && v2->scr_valid)
     {
         /* Clip-generated vertices carry authoritative screen positions
@@ -334,7 +354,8 @@ int bridge_add_triangle(int32_t *cmd,
                           vp->tri_dx_scale ? vp->tri_dx_scale : 0x4000,
                           vp->tri_idy_scale ? vp->tri_idy_scale : 0x0008,
                           vp->tri_frac_mask ? vp->tri_frac_mask : (int32_t)0xffff,
-                          vp->tri_vcr_bound ? vp->tri_vcr_bound : 0x1cc);
+                          vp->tri_vcr_bound ? vp->tri_vcr_bound : 0x1cc,
+                          native_texrecip);
     if (n >= 0)
         return n;
 

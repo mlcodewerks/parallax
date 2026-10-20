@@ -15,24 +15,4 @@ linker.list
 
 # Native GLRDP build and validation artifacts
 .cpu-jit-config
-benchmarks/.optimization-baseline/
-benchmarks/*.exe
-benchmarks/*.log
-benchmarks/__pycache__/
-benchmarks/results/glrdp-hle-performance/
-benchmarks/results/glrdp-interlace-wdc/
-benchmarks/results/audio-clock/
-benchmarks/results/knife-pace/
-
-# User-ROM audit listings, captures and local emulator saves.
-benchmarks/zboss-audit/*
-!benchmarks/zboss-audit/README.md
-benchmarks/hle-timing/*
-benchmarks/hle-timing-extra/
-!benchmarks/hle-timing/README.md
-!benchmarks/hle-timing/calibration.json
-!benchmarks/hle-timing/nead-late-calibration.json
-!benchmarks/hle-timing/factor5-calibration.json
-benchmarks/ucode-audit/*
-!benchmarks/ucode-audit/README.md
-!benchmarks/ucode-audit/factor5-validation.json
+benchmarks/*

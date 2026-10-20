@@ -3253,6 +3253,13 @@ _simplify(jit_state_t *_jit)
 		 * The sign extension may be elided on 64-bit. */
 		if (simplify_ldxi(prev, node))
 		    simplify_spill(node = prev, regno);
+#else
+                /* Loads still replace their destination when the load
+                 * redundancy optimization is disabled. Otherwise a later
+                 * movi can reuse the value from before the load, deleting
+                 * a required register reset under RSP register pressure. */
+                _jitc->values[regno].kind = 0;
+                ++_jitc->gen[regno];
 #endif
 		break;
 	    case jit_code_stxi_c:	case jit_code_stxi_s:

@@ -48,7 +48,7 @@ static void t3dux_emit_othermode(GSPState *gsp, RdpFifo *fifo,
     int32_t two[2];
     int zc = (int)((ol >> 4) & 1);
     int zu = (int)((ol >> 5) & 1);
-    two[0] = (int32_t)((0x2fu << 24) | (oh & 0x00ffffffu));
+    two[0] = (int32_t)((0xefu << 24) | (oh & 0x00ffffffu));
     two[1] = (int32_t)ol;
     rdp_fifo_append(fifo, two, 2);
     gsp->t3d_zbuffered = (zc || zu) ? 1 : 0;
@@ -144,8 +144,10 @@ static void t3dux_process_rdp(GSPState *gsp, RdpFifo *fifo, unsigned int cmds)
 {
     unsigned int addr;
     unsigned int w0, w1;
-    if (cmds == 0u)
+    if (cmds == 0u) {
+        if (fifo->drain) fifo->drain();
         return;
+    }
     addr = t3d_seg_addr(cmds);
     if (addr == 0u)
         return;
@@ -158,7 +160,7 @@ static void t3dux_process_rdp(GSPState *gsp, RdpFifo *fifo, unsigned int cmds)
         int rdp_id = cmd & 0x3f;
         int extra = 0;
         hle_timing_graphics_family("gfx_t3dux");
-        hle_timing_add(HLE_WORK_COMMAND, 1);
+        hle_timing_command(cmd);
 
         if (cmd == 0xe4 || cmd == 0xe5)         /* G_TEXRECT / G_TEXRECTFLIP */
             extra = 2;                          /* two trailing words follow */
@@ -178,7 +180,7 @@ static void t3dux_process_rdp(GSPState *gsp, RdpFifo *fifo, unsigned int cmds)
         }
 
         if (rdp_id == 0x29)                     /* G_RDPFULLSYNC */
-            rdp_fifo_fullsync_note();
+            rdp_fifo_fullsync_append(fifo, w0, w1);
 
         if (rdp_id >= 0x24 && rdp_id <= 0x3f
             && rdp_id != 0x31 && rdp_id != 0x29)
@@ -209,6 +211,7 @@ static void t3dux_process_rdp(GSPState *gsp, RdpFifo *fifo, unsigned int cmds)
         w0 = rd_u32_be(addr); addr += 4u;
         w1 = rd_u32_be(addr); addr += 4u;
     }
+    if (fifo->drain) fifo->drain();
 }
 
 /* Load the global-state block: othermode, the 16 segment bases, the viewport
@@ -464,7 +467,7 @@ void t3dux_run_dl(GSPState *gsp, RdpFifo *fifo, unsigned int dl_addr)
         unsigned int pcol    = rd_u32_be(addr + 16u);
 
         hle_timing_graphics_family("gfx_t3dux");
-        hle_timing_add(HLE_WORK_COMMAND, 1);
+        hle_timing_add(HLE_WORK_COMMAND, 1); /* object descriptor, no opcode */
 
         if (pstate == 0u)
             break;

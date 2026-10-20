@@ -18,6 +18,7 @@ extern "C" {
 typedef struct RdpFifo
 {
     unsigned char *storage; /* host backing store for the command words */
+    unsigned char *dmem;    /* transient native scratch/state, never serialized */
     unsigned int   base;    /* virtual RDRAM byte address reported to the
                                DPC registers; never dereferenced into guest
                                memory (the rasterizer's command fetch is
@@ -33,22 +34,31 @@ typedef struct RdpFifo
      * interrupt (video freezes while audio keeps running). */
     void         (*flush)(struct RdpFifo *f);
     void         (*time)(const int32_t *words, unsigned int count);
+    void         (*write)(int32_t *words, unsigned int count);
+    unsigned int spnoop;    /* verified native copy handler: 0/1/2 words */
+    void         (*store_indices)(unsigned int packed);
+    void         (*fetch_dl)(unsigned int pc, unsigned int w0);
+    unsigned int matrix_dma_table;
+    unsigned int dl_end; /* native prefetch boundary, transient */
+    void         (*drain)(void); /* explicit native staging DMA */
+    int          (*read_staging)(unsigned int offset, int32_t *words, unsigned int count);
+    void         (*group)(int begin); /* native compound packet DMA */
+    void         (*load_ucode)(struct RdpFifo *f, unsigned int text,
+                              unsigned int data, unsigned int data_bytes);
 } RdpFifo;
 
 void rdp_fifo_init(RdpFifo *f, unsigned char *storage,
                    unsigned int base, unsigned int cap);
 void rdp_fifo_append(RdpFifo *f, const int32_t *words, int count);
 
-/* Tracks whether the display list being parsed contained a G_RDPFULLSYNC
- * (RDP command 0x29). The parsers drop the command itself (the HLE
- * activation appends the frame terminator), but the activation must know
- * whether the list requested one at all: on hardware a task whose display
- * list never issues G_RDPFULLSYNC raises no DP interrupt, and games track
- * which tasks full-sync (Blast Corps' scheduler faults on a NULL frame
- * pointer if a DP-done arrives for a task that never requested one). */
+/* Track requested and already-emitted FullSyncs. Ordinary display lists
+ * forward the original words in place; native packet builders can request
+ * a deferred terminator. A list without FullSync must not gain a DP IRQ. */
 void rdp_fifo_fullsync_reset(void);
 void rdp_fifo_fullsync_note(void);
 int  rdp_fifo_fullsync_seen(void);
+int  rdp_fifo_fullsync_pending(void);
+void rdp_fifo_fullsync_append(RdpFifo *f, unsigned int w0, unsigned int w1);
 
 /* Walk an F3DEX2 display list starting at RDRAM byte address `addr`,
  * transforming geometry through `gsp` and appending RDP commands to `fifo`.
@@ -60,12 +70,18 @@ void f3dex2_seg_reset(void);
 
 /* seed the other-modes mirror from the microcode data defaults */
 void f3dex2_set_othermode_init(unsigned int h, unsigned int l);
+unsigned int f3dex2_othermode_high(void);
 
 /* set the RDRAM size so the walker can bound display-list and geometry reads;
  * call before f3dex2_run_dl. 0 means assume the default 8 MiB. */
 void f3dex2_set_rdram_size(unsigned int size);
 void f3dex2_set_rdram(unsigned char *rdram);
-void f3dex2_set_task_ucode(const unsigned char *rdram, unsigned int text);
+void f3dex2_set_task_ucode(const unsigned char *rdram, unsigned int text,
+                          unsigned int data);
+/* F3DEX FIFO 2.05: GBI2 despite the banner omitting the trailing "2". */
+int f3dex205_ucode_match(const unsigned char *rdram, unsigned int size,
+                        unsigned int text);
+int f3dex2_native_texrecip(void);
 void f3dex2_set_variant_cbfd(const unsigned char *rdram, unsigned int ud, unsigned int uds);
 void f3dex2_set_variant_acclaim(const unsigned char *rdram, unsigned int text);
 int f3dex2_variant_acclaim(void);
