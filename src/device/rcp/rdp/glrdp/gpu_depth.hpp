@@ -36,6 +36,7 @@ class GPUDepthBuffer {
     Surface *find(std::uint32_t address);
     const Surface *find(std::uint32_t address) const;
     bool has_pending_read(std::uint32_t address) const;
+    bool has_surface_range(std::uint32_t address, std::uint32_t size) const;
     bool flush_range(std::uint32_t address, std::uint32_t size, N64Memory &memory);
 
     bool begin_pass(Surface &surface, int x, int y, int width, int height,
@@ -55,6 +56,9 @@ class GPUDepthBuffer {
 
   private:
     std::unordered_map<std::uint32_t, Surface> surfaces_;
+    // Allocation cache only: invalidated contents never retain ownership of RAM.
+    std::vector<Surface> spare_surfaces_;
+    std::size_t spare_pixels_ = 0;
 
     static constexpr std::uint32_t kMaxZ = 0x3ffffu;
     static constexpr std::uint32_t kDefaultState = kMaxZ | (15u << 18);

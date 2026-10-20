@@ -71,6 +71,9 @@ void GPUDepthBuffer::clear() {
     for (auto &[_, surface] : surfaces_)
         destroy_surface(surface);
     surfaces_.clear();
+    for (auto &surface : spare_surfaces_) destroy_surface(surface);
+    spare_surfaces_.clear();
+    spare_pixels_ = 0;
 }
 
 void GPUDepthBuffer::invalidate_range(std::uint32_t address, std::uint32_t size) {
@@ -80,7 +83,16 @@ void GPUDepthBuffer::invalidate_range(std::uint32_t address, std::uint32_t size)
         const std::uint64_t surface_begin = it->first;
         const std::uint64_t surface_end = surface_begin + surface_bytes(it->second);
         if (begin < surface_end && end > surface_begin) {
-            destroy_surface(it->second);
+            auto &surface = it->second;
+            const auto pixels = std::size_t(surface.width) * surface.height;
+            // CPU writes and color reuse invalidate the content, not the size
+            // of these GL objects. Reimport both images on reuse. Bound spare
+            // storage to two allocations and 262144 pixels (about 6 MiB).
+            if (surface.fbo[0] && spare_surfaces_.size() < 2 &&
+                pixels <= 262144 - spare_pixels_) {
+                spare_pixels_ += pixels;
+                spare_surfaces_.push_back(std::move(surface));
+            } else destroy_surface(surface);
             it = surfaces_.erase(it);
         } else {
             ++it;
@@ -95,6 +107,25 @@ bool GPUDepthBuffer::allocate_surface(Surface &surface, std::uint32_t address, i
     surface.width = width;
     surface.height = height;
     surface.active = 0;
+
+    for (auto it = spare_surfaces_.begin(); it != spare_surfaces_.end(); ++it) {
+        if (it->width != width || it->height != height) continue;
+        surface = std::move(*it);
+        spare_pixels_ -= std::size_t(width) * height;
+        spare_surfaces_.erase(it);
+        surface.address = address;
+        surface.active = 0;
+        surface.changed_x = surface.changed_y = surface.changed_w = surface.changed_h = 0;
+        surface.initialized = surface.gpu_dirty = surface.in_place = false;
+        for (auto fbo : surface.fbo) {
+            glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+            glFramebufferTexture2D(GL_FRAMEBUFFER, glrdp_combined_attachment(), GL_TEXTURE_2D, 0, 0);
+            const GLenum buffers[4] = {GL_NONE, GL_NONE, GL_COLOR_ATTACHMENT2, GL_COLOR_ATTACHMENT3};
+            const GLenum desktop[2] = {GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1};
+            glDrawBuffers(glrdp_gles3 ? 4 : 2, glrdp_gles3 ? buffers : desktop);
+        }
+        return true;
+    }
 
     glGenFramebuffers(2, surface.fbo);
     glGenTextures(2, surface.state_texture);
@@ -147,7 +178,7 @@ bool GPUDepthBuffer::allocate_surface(Surface &surface, std::uint32_t address, i
 void GPUDepthBuffer::initialize_default(Surface &surface) {
     const std::size_t pixels = std::size_t(surface.width) * std::size_t(surface.height);
     std::vector<std::uint32_t> states(pixels, kDefaultState);
-    surface.visible_words.resize(pixels);
+    surface.visible_words.assign(pixels, 0);
     std::vector<std::uint8_t> accept(pixels, 0);
     std::vector<float> linear(pixels, 1.0f);
     for (int i = 0; i < 2; ++i) {
@@ -337,6 +368,14 @@ bool GPUDepthBuffer::has_pending_read(std::uint32_t address) const {
     for (const auto &[base, surface] : surfaces_)
         if (surface.initialized && surface.gpu_dirty && std::uint64_t(address) >= base &&
             std::uint64_t(address) < std::uint64_t(base) + surface_bytes(surface))
+            return true;
+    return false;
+}
+
+bool GPUDepthBuffer::has_surface_range(std::uint32_t address, std::uint32_t size) const {
+    const auto end = std::uint64_t(address) + size;
+    for (const auto &[base, surface] : surfaces_)
+        if (std::uint64_t(address) < std::uint64_t(base) + surface_bytes(surface) && base < end)
             return true;
     return false;
 }

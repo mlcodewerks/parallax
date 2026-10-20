@@ -1935,6 +1935,13 @@ void RDPRenderer::initialize_samplers(GLuint program) {
 }
 void RDPRenderer::shutdown() {
     flush();
+    if (stats_.primitives)
+        std::fprintf(stderr, "GLRDP CPU writes = metadata=%llu batch_flushes=%llu\n",
+            (unsigned long long)stats_.metadata_writes, (unsigned long long)stats_.write_flushes);
+    if (stats_.primitives)
+        std::fprintf(stderr, "GLRDP immediate reasons = raw_z=%llu alias=%llu depth=%llu texture=%llu\n",
+            (unsigned long long)stats_.immediate_raw_z, (unsigned long long)stats_.immediate_alias,
+            (unsigned long long)stats_.immediate_depth, (unsigned long long)stats_.immediate_texture);
         if (stats_.primitives)
         std::fprintf(stderr, "GLRDP batch limits = capacity=%u queues=%llu queue_full=%llu state=%llu\n",
             primitive_uniforms_.capacity, (unsigned long long)stats_.queues,
@@ -2771,8 +2778,17 @@ void RDPRenderer::draw_vertices(const std::vector<GLVertex> &v, bool textured, c
     // The in-place depth barrier also makes prior colour writes visible.
     const bool combined = depth_surface && target.internal_scale == 1 && cycle_type < 2 &&
                           target.address != s.z_image_address;
-    const bool can_batch = !standalone_tiles_ && !fill_writes_z_image && target.address != target.z_address &&
+    // SetZImage can keep naming an allocation after a game reuses it for
+    // ordinary color copies. With Z disabled these are normal color draws;
+    // address equality alone must not force one submission per rectangle.
+    const bool can_batch = !standalone_tiles_ && !fill_writes_z_image &&
         (!needs_depth || combined);
+    if (!can_batch) {
+        stats_.immediate_raw_z += fill_writes_z_image;
+        stats_.immediate_alias += target.address == target.z_address;
+        stats_.immediate_depth += needs_depth && !combined;
+        stats_.immediate_texture += standalone_tiles_;
+    }
     if (can_batch) {
         const PrimitiveBounds bounds{bounds_x_, bounds_y_, bounds_w_, bounds_h_};
         const PrimitiveFootprint footprint{bounds, triangle_edge_,
@@ -2795,6 +2811,11 @@ void RDPRenderer::draw_vertices(const std::vector<GLVertex> &v, bool textured, c
         batch_program_ = program_; batch_writes_z_ |= (s.other_modes & 0x20u) != 0;
         batch_reads_color_ |= rdp_reads_color_memory(s);
         target.raw_z = false; target.gpu_dirty = true;
+        if (target.address == target.z_address) {
+            const auto bytes = std::uint64_t(target.native_width) * target.native_height *
+                               (4u << unsigned(target.size)) / 8u;
+            gpu_depth_.invalidate_range(target.address, std::uint32_t(bytes));
+        }
         return;
     }
     flush();
@@ -3194,15 +3215,21 @@ void RDPRenderer::present(const RDPState &state, std::uint32_t vi_status, std::u
     draw_final_present();
 }
 
-void RDPRenderer::fb_read(std::uint32_t address) {
+bool RDPRenderer::pending_batch_overlaps(std::uint32_t address, std::uint32_t size) const {
     if (batch_target_) {
+        const auto end = std::uint64_t(address) + size;
         const auto color_bytes = (std::uint64_t(batch_target_->native_width) * batch_target_->native_height *
                                   (4u << unsigned(batch_target_->size)) + 7) / 8;
-        const bool color = address >= batch_target_->address && std::uint64_t(address) < batch_target_->address + color_bytes;
-        const bool depth = batch_depth_ && address >= batch_depth_->address &&
+        const bool color = end > batch_target_->address && std::uint64_t(address) < batch_target_->address + color_bytes;
+        const bool depth = batch_depth_ && end > batch_depth_->address &&
             std::uint64_t(address) < std::uint64_t(batch_depth_->address) + std::uint64_t(batch_depth_->width) * batch_depth_->height * 2;
-        if (color || depth) { GLStateGuard guard; flush(); }
+        return color || depth;
     }
+    return false;
+}
+
+void RDPRenderer::fb_read(std::uint32_t address) {
+    if (pending_batch_overlaps(address, 1)) { GLStateGuard guard; flush(); }
     if (!memory_)
         return;
     auto *framebuffer = fb_.find_containing(address);
@@ -3223,9 +3250,17 @@ void RDPRenderer::fb_read(std::uint32_t address) {
 }
 
 void RDPRenderer::fb_write(std::uint32_t address, std::uint32_t size) {
-    GLStateGuard guard;
-    flush();
     size = std::max(size, 1u);
+    const bool queued = pending_batch_overlaps(address, size);
+    if (!queued && !gpu_depth_.has_surface_range(address, size)) {
+        // An old color image still needs its CPU-byte overlay, but does not
+        // require GL queries or submission of an unrelated target's queue.
+        fb_.invalidate_cpu_write(address, size);
+        ++stats_.metadata_writes;
+        return;
+    }
+    GLStateGuard guard;
+    if (queued) { ++stats_.write_flushes; flush(); }
     fb_.invalidate_cpu_write(address, size);
     // Flush untouched pending depth before invalidating. Explicit store bytes
     // win even when their values equal the original RAM snapshot.

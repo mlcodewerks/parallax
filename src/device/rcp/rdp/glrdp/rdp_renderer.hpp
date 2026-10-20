@@ -41,6 +41,8 @@ class RDPRenderer {
         std::uint64_t atlas_hits = 0, atlas_uploads = 0, atlas_resets = 0, standalone_uploads = 0;
         std::uint64_t framebuffer_tiles = 0, framebuffer_readbacks = 0, decode_cache_hits = 0;
         std::uint64_t queues = 0, queue_flushes = 0, state_flushes = 0;
+        std::uint64_t immediate_raw_z = 0, immediate_alias = 0, immediate_depth = 0, immediate_texture = 0;
+        std::uint64_t metadata_writes = 0, write_flushes = 0;
     };
     const SubmissionStats &submission_stats() const { return stats_; }
     unsigned batch_capacity() const { return primitive_uniforms_.capacity; }
@@ -93,6 +95,7 @@ class RDPRenderer {
     void submit_records(const PrimitiveUniforms::Slot *, unsigned);
     void bind_tiles();
     void flush_batch(const std::vector<PrimitiveUniforms::Slot> &, const std::vector<PrimitiveBounds> &);
+    bool pending_batch_overlaps(std::uint32_t address, std::uint32_t size) const;
     void uniform_1i(GLint l, GLint x) { if (!primitive_uniforms_.store(l, &x, 4)) glUniform1i(l, x); }
     void uniform_1ui(GLint l, GLuint x) { if (!primitive_uniforms_.store(l, &x, 4)) glUniform1ui(l, x); }
     void uniform_1f(GLint l, GLfloat x) { if (!primitive_uniforms_.store(l, &x, 4)) glUniform1f(l, x); }
