@@ -59,8 +59,13 @@ enum { GB_CART_FINGERPRINT_OFFSET = 0x134 };
 
 enum { DD_DISK_ID_OFFSET = 0x43670 };
 
+_Static_assert(16384 + 4 + PARALLEL_RSP_STATE_WORDS * 4 + 24 <= RDP_RASTER_STATE_OFFSET,
+    "RDP raster state overlaps native RSP state");
+_Static_assert(RDP_RASTER_STATE_OFFSET + 192 <= 20480,
+    "RDP raster state overlaps optional HLE state");
+
 static const char* savestate_magic = "M64+SAVE";
-static const int savestate_latest_version = 0x00011900;  /* 1.25: RDP depth address / atomic mode */
+static const int savestate_latest_version = 0x00011a00;  /* 1.26: queued RDP busy counters */
 static const unsigned char pj64_magic[4] = { 0xC8, 0xA6, 0xD8, 0x23 };
 
 static savestates_job job = savestates_job_nothing;
@@ -167,7 +172,7 @@ int savestates_load_m64p(struct device* dev, const void *data)
     unsigned char *savestateData, *curr;
     char queue[1024];
     unsigned char using_tlb_data[4];
-    unsigned char data_0001_0200[151552]; // cache, LLE RSP and optional HLE state
+    unsigned char data_0001_0200[RDP_EXTRA_STATE_BYTES]; // cache, LLE RSP and optional HLE state
 
     uint32_t* cp0_regs = r4300_cp0_regs(&dev->r4300.cp0);
 
@@ -215,7 +220,7 @@ int savestates_load_m64p(struct device* dev, const void *data)
         memcpy(queue, data + 44 + savestateSize, sizeof(queue));
         memcpy(using_tlb_data, data + 44 + savestateSize + sizeof(queue), sizeof(using_tlb_data));
         memcpy(data_0001_0200, data + 44 + savestateSize + sizeof(queue) + sizeof(using_tlb_data),
-            version >= 0x00010e00 ? 151552 : version >= 0x00010d00 ? 20480 : version >= 0x00010c00 ? 16384 :
+            version >= 0x00011a00 ? RDP_EXTRA_STATE_BYTES : version >= 0x00010e00 ? 151552 : version >= 0x00010d00 ? 20480 : version >= 0x00010c00 ? 16384 :
             version >= 0x00010b00 ? 8192 : 4096);
     }
 
@@ -404,7 +409,7 @@ int savestates_load_m64p(struct device* dev, const void *data)
          * its fractional oscillator phase, even before COUNT wraps. */
         curr = data_0001_0200 + 3900;
         int64_t clock = GETDATA(curr, int64_t);
-        if (clock < 0 || clock > INT64_MAX - INT64_C(0x100000000)) {
+        if (clock < 0 || clock > INT64_MAX / 4 - INT64_C(0x100000000)) {
             free(savestateData); return 0;
         }
         for (struct node* n = dev->r4300.cp0.q.first; n; n = n->next)
@@ -920,7 +925,8 @@ int savestates_load_m64p(struct device* dev, const void *data)
         input.controllerCommand(-1, NULL);
     }
 
-    /* reset fb state */
+    /* Retire old CPU mappings before dropping their range records. */
+    unprotect_framebuffers(&dev->dp.fb);
     poweron_fb(&dev->dp.fb);
 
     dev->sp.rsp_task_locked = 0;
@@ -957,6 +963,36 @@ int savestates_load_m64p(struct device* dev, const void *data)
     else if (version >= 0x00011000) optional_rsp_load_legacy_stream(data_0001_0200 + 20480);
     else optional_rsp_load_legacy(version >= 0x00010e00 ? data_0001_0200 + 20480 : NULL);
 #endif
+    if (version >= 0x00011a00) {
+        curr = data_0001_0200 + RDP_RASTER_STATE_OFFSET;
+        dev->dp.timing.primitive_color = GETDATA(curr, uint32_t);
+        dev->dp.timing.environment_color = GETDATA(curr, uint32_t);
+        dev->dp.timing.blend_color = GETDATA(curr, uint32_t);
+        dev->dp.timing.fill_color = GETDATA(curr, uint32_t);
+        dev->dp.timing.combine_hi = GETDATA(curr, uint32_t);
+        dev->dp.timing.combine_lo = GETDATA(curr, uint32_t);
+        dev->dp.timing.primitive_depth = GETDATA(curr, uint32_t);
+        dev->dp.timing.reject = GETDATA(curr, uint32_t);
+        for (i = 0; i < 8; ++i) {
+            struct rdp_uniform_depth *u = &dev->dp.timing.uniform[i];
+            u->address = GETDATA(curr, uint32_t); u->width = GETDATA(curr, uint32_t);
+            u->height = GETDATA(curr, uint32_t); u->z = GETDATA(curr, uint32_t);
+            u->valid = GETDATA(curr, uint32_t);
+            if (u->width > 1024 || u->height > 1024 || u->z > 0x3ffff ||
+                (uint64_t)u->address + (uint64_t)u->width * u->height * 2 > 0x1000000) u->valid = 0;
+        }
+        if (!rdp_counters_load(&dev->dp.counters,
+                data_0001_0200 + RDP_COUNTER_STATE_OFFSET, RDP_COUNTER_STATE_BYTES)) {
+            free(savestateData); return 0;
+        }
+    } else {
+        rdp_counters_reset(&dev->dp.counters);
+        dev->dp.counters.epoch = dev->r4300.cp0.count_clock * 4;
+        for (i = 0; i < 3; ++i)
+            dev->dp.counters.accumulated[i] =
+                (uint64_t)(dev->dp.dpc_regs[DPC_BUFBUSY_REG + i] & 0xffffff) * 3;
+    }
+    dev->dp.timing.validate_uniform_ram = 1;
     ai_rebase_timing(&dev->ai);
     if (version >= 0x00011400) {
         curr = data_0001_0200 + 3908;
@@ -1022,7 +1058,7 @@ int savestates_save_m64p(const struct device* dev, void *data)
     save_eventqueue_infos(&dev->r4300.cp0, queue);
 
     // Allocate memory for the save state data
-    save->size = 16788288 + sizeof(queue) + 4 + 151552;
+    save->size = 16788288 + sizeof(queue) + 4 + RDP_EXTRA_STATE_BYTES;
     save->data = curr = malloc(save->size);
     if (save->data == NULL)
     {
@@ -1452,6 +1488,23 @@ int savestates_save_m64p(const struct device* dev, void *data)
     if (optional_rsp_state_size() > 131072) { free(save->data); free(save); return 0; }
     optional_rsp_save(save->data + 16788288 + sizeof(queue) + 4 + 20480);
 #endif
+    curr = save->data + 16788288 + sizeof(queue) + 4 + RDP_RASTER_STATE_OFFSET;
+    PUTDATA(curr, uint32_t, dev->dp.timing.primitive_color);
+    PUTDATA(curr, uint32_t, dev->dp.timing.environment_color);
+    PUTDATA(curr, uint32_t, dev->dp.timing.blend_color);
+    PUTDATA(curr, uint32_t, dev->dp.timing.fill_color);
+    PUTDATA(curr, uint32_t, dev->dp.timing.combine_hi);
+    PUTDATA(curr, uint32_t, dev->dp.timing.combine_lo);
+    PUTDATA(curr, uint32_t, dev->dp.timing.primitive_depth);
+    PUTDATA(curr, uint32_t, dev->dp.timing.reject);
+    for (i = 0; i < 8; ++i) {
+        const struct rdp_uniform_depth *u = &dev->dp.timing.uniform[i];
+        PUTDATA(curr, uint32_t, u->address); PUTDATA(curr, uint32_t, u->width);
+        PUTDATA(curr, uint32_t, u->height); PUTDATA(curr, uint32_t, u->z); PUTDATA(curr, uint32_t, u->valid);
+    }
+    if (!rdp_counters_save(&dev->dp.counters,
+            save->data + 16788288 + sizeof(queue) + 4 + RDP_COUNTER_STATE_OFFSET,
+            RDP_COUNTER_STATE_BYTES)) { free(save->data); free(save); return 0; }
     memcpy(save->mempointer, save->data, save->size);
     free(save->data);
     free(save);

@@ -709,6 +709,7 @@ void retro_unload_game(void)
      * first so closing content can release the decoded CPU cache too. */
     CoreDoCommand(M64CMD_STOP, 0, NULL);
     CoreDoCommand(M64CMD_ROM_CLOSE, 0, NULL);
+    rdp_counters_reset(&g_dev.dp.counters);
     CoreShutdown();
 
     cleanup_global_paths();
@@ -847,7 +848,7 @@ size_t retro_get_memory_size(unsigned type)
 
 size_t retro_serialize_size(void)
 {
-    return 16788288 + 1024 + 4 + 151552;
+    return 16788288 + 1024 + 4 + RDP_EXTRA_STATE_BYTES;
 }
 
 bool retro_serialize(void *data, size_t size)
@@ -862,7 +863,7 @@ bool retro_unserialize(const void *data, size_t size)
     const unsigned char* header = data;
     unsigned version = ((unsigned)header[8] << 24) | ((unsigned)header[9] << 16) |
                        ((unsigned)header[10] << 8) | header[11];
-    size_t extra = version >= 0x00010e00 ? 151552 : version >= 0x00010d00 ? 20480 : version >= 0x00010c00 ? 16384 :
+    size_t extra = version >= 0x00011a00 ? RDP_EXTRA_STATE_BYTES : version >= 0x00010e00 ? 151552 : version >= 0x00010d00 ? 20480 : version >= 0x00010c00 ? 16384 :
                    version >= 0x00010b00 ? 8192 : version >= 0x00010200 ? 4096 : 0;
     if (size < 16788288 + 1024 + 4 + extra) return false;
     return main_stateload(data) != 0;

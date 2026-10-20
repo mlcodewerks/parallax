@@ -20,6 +20,7 @@
  * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
 
 #include "fb.h"
+#include "rdp_timing.h"
 
 #include "api/m64p_types.h"
 #include "api/callbacks.h"
@@ -86,6 +87,7 @@ void pre_framebuffer_read_range(struct fb* fb, uint32_t address, uint32_t length
 
 void post_framebuffer_write(struct fb* fb, uint32_t address, uint32_t length)
 {
+    if (fb->timing && length) rdp_timing_invalidate_range(fb->timing, address, length);
     if (!fb->infos[0].addr) {
         return;
     }
@@ -121,6 +123,7 @@ void init_fb(struct fb* fb,
              struct rdram* rdram,
              struct r4300_core* r4300)
 {
+    fb->timing = NULL;
     fb->mem = mem;
     fb->rdram = rdram;
     fb->r4300 = r4300;
@@ -131,6 +134,7 @@ void poweron_fb(struct fb* fb)
     memset(fb->dirty_page, 0, FB_DIRTY_PAGES_COUNT*sizeof(fb->dirty_page[0]));
     memset(fb->infos, 0, FB_INFOS_COUNT*sizeof(fb->infos[0]));
     fb->once = 1;
+    memset(fb->timing_bytes, 0, sizeof(fb->timing_bytes));
 }
 
 void read_rdram_fb(void* opaque, uint32_t address, uint32_t* value)
@@ -215,23 +219,27 @@ void write_rdram_fb(void* opaque, uint32_t address, uint32_t value, uint32_t mas
 #define W(x) write_ ## x
 #define RW(x) R(x), W(x)
 
+static void unprotect_timing_ranges(struct fb *fb)
+{
+    struct mem_mapping mapping = {0, 0, M64P_MEM_RDRAM, {fb->rdram, RW(rdram_dram)}};
+    for (unsigned i = 0; i < 8; ++i) if (fb->timing_bytes[i]) {
+        mapping.begin = fb->timing_address[i];
+        mapping.end = mapping.begin + fb->timing_bytes[i] - 1;
+        apply_mem_mapping(fb->mem, &mapping);
+        fb->timing_bytes[i] = 0;
+    }
+}
+
 void protect_framebuffers(struct fb* fb)
 {
     size_t i, j;
     struct mem_mapping fb_mapping = { 0, 0, M64P_MEM_RDRAM, { fb, RW(rdram_fb) } };
 
-    /* check API support */
-    if (!(gfx.fBGetFrameBufferInfo && gfx.fBRead && gfx.fBWrite)) {
-        return;
-    }
-
-    /* ask fb info to gfx plugin */
-    gfx.fBGetFrameBufferInfo(fb->infos);
-
-    /* return early if not FB info is present */
-    if (fb->infos[0].addr == 0) {
-        return;
-    }
+    unprotect_timing_ranges(fb);
+    if (gfx.fBGetFrameBufferInfo && gfx.fBRead && gfx.fBWrite)
+        gfx.fBGetFrameBufferInfo(fb->infos);
+    else
+        memset(fb->infos, 0, sizeof(fb->infos));
 
     for (i = 0; i < FB_INFOS_COUNT; ++i) {
 
@@ -258,12 +266,32 @@ void protect_framebuffers(struct fb* fb)
             invalidate_r4300_cached_code(fb->r4300, 0, 0);
         }
     }
+    /* Timing proofs need CPU store notifications even on backends without
+     * FBInfo. Preserve the mapped ranges separately: a CPU store can discard
+     * its proof before the following unprotect, and must not strand a mapping. */
+    if (fb->timing) for (unsigned n = 0; n < 8; ++n) {
+        const struct rdp_uniform_depth *u = &fb->timing->uniform[n];
+        uint64_t bytes = (uint64_t)u->width * u->height * 2;
+        if (!u->valid || !bytes || (uint64_t)u->address + bytes > fb->rdram->dram_size) continue;
+        fb->timing_address[n] = u->address;
+        fb->timing_bytes[n] = (uint32_t)bytes;
+        fb_mapping.begin = u->address;
+        fb_mapping.end = u->address + (uint32_t)bytes - 1;
+        apply_mem_mapping(fb->mem, &fb_mapping);
+        if (fb->once) {
+            fb->once = 0;
+            invalidate_r4300_cached_code(fb->r4300, 0, 0);
+        }
+    }
+
 }
 
 void unprotect_framebuffers(struct fb* fb)
 {
     size_t i;
     struct mem_mapping ram_mapping = { 0, 0, M64P_MEM_RDRAM, { fb->rdram, RW(rdram_dram) } };
+
+    unprotect_timing_ranges(fb);
 
     /* return early if FB info is not supported or empty */
     if (!fb->infos[0].addr) {

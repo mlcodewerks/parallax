@@ -46,11 +46,42 @@ static int hle_submission;
 static int hle_timed;
 static struct rdp_timing_sync hle_sync;
 
+static void observe_busy(void *context, int64_t begin, int64_t end, unsigned mask)
+{
+    rdp_counters_work(&((struct rdp_core *)context)->counters, begin, end, mask);
+}
+static void attach_timing(struct rdp_core *dp)
+{
+    dp->timing.observe_busy = observe_busy;
+    dp->timing.busy_context = dp;
+    dp->timing.rdram_bytes = dp->fb.rdram ? dp->fb.rdram->dram_size : 0;
+    if (dp->timing.validate_uniform_ram) {
+        /* Restoring clears frontend framebuffer protection. Verify every
+         * saved proof against synchronized RDRAM before its first use, so
+         * intervening untracked CPU stores cannot leave a stale proof. */
+        for (unsigned n = 0; n < 8; ++n) {
+            struct rdp_uniform_depth *u = &dp->timing.uniform[n];
+            if (!u->valid) continue;
+            uint64_t pixels = (uint64_t)u->width * u->height;
+            if ((u->address & 7) || (uint64_t)u->address + pixels * 2 > dp->timing.rdram_bytes) {
+                u->valid = 0; continue;
+            }
+            for (uint64_t i = 0; i < pixels; ++i) {
+                uint32_t address = u->address + (uint32_t)(i * 2);
+                uint16_t packed = (uint16_t)(dp->fb.rdram->dram[address >> 2] >> ((address & 2) ? 0 : 16));
+                if ((packed & 3) || rdp_timing_decompress_z(packed) != u->z) { u->valid = 0; break; }
+            }
+        }
+        dp->timing.validate_uniform_ram = 0;
+    }
+}
+
 void rdp_time_hle(struct rdp_core *dp, const uint32_t *words, uint32_t count, uint32_t rsp_cycles)
 {
     if (!dp->instruction_timing || (dp->dpc_regs[DPC_STATUS_REG] & DPC_STATUS_FREEZE)) return;
     cp0_update_count(dp->mi->r4300);
     int64_t submitted = dp->sp->slice_start_clock + rsp_count_ticks(rsp_cycles, dp->sp->slice_overhang);
+    attach_timing(dp);
     rdp_timing_words_sync(&dp->timing, words, count, submitted, &hle_sync);
     hle_timed = 1;
 }
@@ -144,6 +175,33 @@ static uint32_t dpc_clock_now(struct rdp_core* dp, int from_rsp)
     return clock & UINT32_C(0x00ffffff);
 }
 
+static int64_t busy_now(struct rdp_core *dp, int from_rsp)
+{
+    cp0_update_count(dp->mi->r4300);
+#if defined(HAVE_PARALLEL_RSP)
+    if (from_rsp) return dp->sp->slice_start_clock * 4 +
+        (int64_t)rsp_submission_cycles() * 3 - dp->sp->slice_overhang;
+#else
+    (void)from_rsp;
+#endif
+    return dp->mi->r4300->cp0.count_clock * 4;
+}
+static void retire_counters(struct rdp_core *dp, int64_t now)
+{
+    int64_t horizon = dp->mi->r4300->cp0.count_clock * 4;
+    if (dp->sp->rsp_task_locked && dp->sp->slice_start_clock * 4 < horizon)
+        horizon = dp->sp->slice_start_clock * 4;
+    if (now < horizon) horizon = now;
+    rdp_counters_advance(&dp->counters, horizon);
+}
+static void read_busy(struct rdp_core *dp, unsigned reg, int from_rsp)
+{
+    if (!dp->instruction_timing || reg < DPC_BUFBUSY_REG || reg > DPC_TMEM_REG) return;
+    int64_t now = busy_now(dp, from_rsp);
+    dp->dpc_regs[reg] = rdp_counter_value(&dp->counters, reg - DPC_BUFBUSY_REG, now);
+    retire_counters(dp, now);
+}
+
 uint32_t rdp_sync_full_delay(const struct rdp_core* dp)
 {
     /* Whole-frame completion approximation used by simple64. Unlike the
@@ -179,6 +237,7 @@ static void process_dpc_commands(struct rdp_core* dp, int from_rsp)
     if (dp->dpc_regs[DPC_CURRENT_REG] == dp->dpc_regs[DPC_END_REG])
         return;
 
+    attach_timing(dp);
     dp_pending = dp->mi->regs[MI_INTR_REG] & MI_INTR_DP;
     if (hle_submission && hle_timed) sync = hle_sync;
     else if (dp->vi_regs && dp->instruction_timing) {
@@ -226,6 +285,7 @@ static void process_dpc_commands(struct rdp_core* dp, int from_rsp)
             at += count * 4;
         }
     }
+    retire_counters(dp, dp->mi->r4300->cp0.count_clock * 4);
     unprotect_framebuffers(&dp->fb);
     gfx.processRDPList();
     protect_framebuffers(&dp->fb);
@@ -297,6 +357,13 @@ static void update_dpc_status(struct rdp_core* dp, uint32_t w, int from_rsp)
     if (w & DPC_CLR_FLUSH) dp->dpc_regs[DPC_STATUS_REG] &= ~DPC_STATUS_FLUSH;
     if (w & DPC_SET_FLUSH) dp->dpc_regs[DPC_STATUS_REG] |= DPC_STATUS_FLUSH;
 
+    if (dp->instruction_timing && (w & (DPC_CLR_TMEM_CTR | DPC_CLR_PIPE_CTR | DPC_CLR_CMD_CTR))) {
+        int64_t now = busy_now(dp, from_rsp);
+        unsigned mask = ((w & DPC_CLR_CMD_CTR) ? 1 : 0) |
+            ((w & DPC_CLR_PIPE_CTR) ? 2 : 0) | ((w & DPC_CLR_TMEM_CTR) ? 4 : 0);
+        rdp_counters_clear(&dp->counters, now, mask);
+        retire_counters(dp, now);
+    }
     if (w & DPC_CLR_TMEM_CTR) dp->dpc_regs[DPC_TMEM_REG] = 0;
     if (w & DPC_CLR_PIPE_CTR) dp->dpc_regs[DPC_PIPEBUSY_REG] = 0;
     if (w & DPC_CLR_CMD_CTR) dp->dpc_regs[DPC_BUFBUSY_REG] = 0;
@@ -338,6 +405,7 @@ void init_rdp(struct rdp_core* dp,
 #endif
 
     init_fb(&dp->fb, mem, rdram, r4300);
+    dp->fb.timing = &dp->timing;
 }
 
 void poweron_rdp(struct rdp_core* dp)
@@ -351,6 +419,7 @@ void poweron_rdp(struct rdp_core* dp)
     dp->do_on_unfreeze = 0;
     dp->clock_base = 0;
     dp->clock_offset = 0;
+    rdp_counters_reset(&dp->counters);
     memset(&dp->timing, 0, sizeof(dp->timing));
     dp->timing.right = dp->timing.bottom = 4095;
 
@@ -366,6 +435,7 @@ void read_dpc_regs(void* opaque, uint32_t address, uint32_t* value)
     if (reg == DPC_CLOCK_REG)
         dp->dpc_regs[DPC_CLOCK_REG] = dpc_clock_now(dp, 0);
 
+    read_busy(dp, reg, 0);
     *value = dp->dpc_regs[reg];
 #ifdef RDP_TIMING_OBSERVE_READ
     RDP_TIMING_OBSERVE_READ(reg, 0, dp->mi->r4300->cp0.count_clock,
@@ -378,6 +448,7 @@ void read_rsp_dpc_regs(void* opaque, uint32_t address, uint32_t* value)
     struct rdp_core* dp = (struct rdp_core*)opaque;
     if (dpc_reg(address) == DPC_CLOCK_REG)
         dp->dpc_regs[DPC_CLOCK_REG] = dpc_clock_now(dp, 1);
+    read_busy(dp, dpc_reg(address), 1);
     *value = dp->dpc_regs[dpc_reg(address)];
 #if defined(RDP_TIMING_OBSERVE_READ) && defined(HAVE_PARALLEL_RSP)
     RDP_TIMING_OBSERVE_READ(dpc_reg(address), 1, dp->sp->slice_start_clock +

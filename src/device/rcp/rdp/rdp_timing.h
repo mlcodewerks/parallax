@@ -17,6 +17,8 @@
 /* Reserved extra-state space before the CPU-cache extension at 4096. */
 #define RDP_TIMING_STATE_OFFSET 4000
 
+#define RDP_RASTER_STATE_OFFSET 18432u
+struct rdp_uniform_depth { uint32_t address, width, height, z, valid; };
 struct rdp_timing {
     int64_t deadline;
     uint32_t words[8];
@@ -28,7 +30,90 @@ struct rdp_timing {
     /* Quarter COUNT ticks by which the rounded deadline exceeds real work. */
     uint32_t clock_overhang;
     uint32_t z_address, atomic_primitive;
+    uint32_t primitive_color, environment_color, blend_color, fill_color;
+    uint32_t combine_hi, combine_lo, primitive_depth, reject;
+    struct rdp_uniform_depth uniform[8];
+    void (*observe_busy)(void *, int64_t, int64_t, unsigned);
+    void *busy_context;
+    uint32_t rdram_bytes, validate_uniform_ram;
 };
+
+/* Command-derived uniform regions are proofs, not samples from GPU-stale
+ * RDRAM. CPU/DMA and overlapping raster writes invalidate them. Unknown or
+ * partially overwritten regions retain conservative work. */
+static void rdp_timing_invalidate_range(struct rdp_timing *t, uint32_t address, uint64_t bytes)
+{
+    address &= 0xffffffu;
+    uint64_t end_write = (uint64_t)address + bytes;
+    for (unsigned i = 0; i < 8; ++i) {
+        struct rdp_uniform_depth *u = &t->uniform[i];
+        uint64_t end = (uint64_t)u->address + (uint64_t)u->width * u->height * 2;
+        if (u->valid && (bytes >= 0x1000000 ||
+            (address < end && u->address < end_write) ||
+            (end_write > 0x1000000 && u->address < end_write - 0x1000000))) u->valid = 0;
+    }
+}
+static uint32_t rdp_timing_decompress_z(uint32_t packed)
+{
+    static const unsigned shift[8] = {6,5,4,3,2,1,0,0};
+    static const uint32_t add[8] = {0,0x20000,0x30000,0x38000,0x3c000,0x3e000,0x3f000,0x3f800};
+    unsigned exponent = (packed >> 13) & 7;
+    return add[exponent] + (((packed >> 2) & 0x7ff) << shift[exponent]);
+}
+static uint32_t rdp_timing_quantize_z(uint32_t z)
+{
+    unsigned shift = z < 0x20000 ? 6 : z < 0x30000 ? 5 : z < 0x38000 ? 4 :
+        z < 0x3c000 ? 3 : z < 0x3e000 ? 2 : z < 0x3f000 ? 1 : 0;
+    return (z >> shift) << shift;
+}
+static struct rdp_uniform_depth *rdp_timing_uniform(struct rdp_timing *t, uint32_t address)
+{
+    for (unsigned i = 0; i < 8; ++i)
+        if (t->uniform[i].valid && t->uniform[i].address == address) return &t->uniform[i];
+    return NULL;
+}
+static void rdp_timing_record_uniform(struct rdp_timing *t, uint32_t address,
+    uint32_t width, uint32_t height, uint32_t z)
+{
+    if ((address & 7) || !t->rdram_bytes || (uint64_t)address + (uint64_t)width * height * 2 > t->rdram_bytes) return;
+    struct rdp_uniform_depth *u = rdp_timing_uniform(t, address);
+    if (!u) {
+        for (unsigned i = 0; i < 8; ++i) if (!t->uniform[i].valid) { u = &t->uniform[i]; break; }
+        if (!u) u = &t->uniform[(address >> 10) & 7];
+    }
+    u->address = address; u->width = width; u->height = height; u->z = z; u->valid = 1;
+}
+/* -1 unknown, 0 passes, 1 rejected. The cancelled alpha mux leaves only D.
+ * Coverage-dependent alpha and noise thresholds need per-pixel information. */
+static int rdp_timing_alpha_result(const struct rdp_timing *t)
+{
+    if (!(t->modes & 1)) return 0;
+    if (t->modes & (2u | 0x3000u)) return -1;
+    unsigned a = (t->combine_lo >> 21) & 7, b = (t->combine_lo >> 3) & 7;
+    unsigned c = (t->combine_lo >> 18) & 7, d = t->combine_lo & 7;
+    if (a != b && c != 7) return -1;
+    unsigned alpha;
+    if (d == 3) alpha = t->primitive_color & 255;
+    else if (d == 5) alpha = t->environment_color & 255;
+    else if (d == 6) alpha = 255;
+    else if (d == 7) alpha = 0;
+    else return -1;
+    return alpha < (t->blend_color & 255);
+}
+static int rdp_timing_depth_result(struct rdp_timing *t, unsigned x1, unsigned y1)
+{
+    if (!(t->modes & 0x10)) return 0;
+    if (!(t->modes & 4) || (t->modes & (0xc00u | 0x3000u | 8u))) return -1;
+    struct rdp_uniform_depth *u = rdp_timing_uniform(t, t->z_address);
+    if (!u || u->width != t->fb_width || u->height < y1 || x1 > u->width) return -1;
+    unsigned z = ((t->primitive_depth >> 16) & 0x7fff) << 3;
+    if (u->z == 0x3ffff || z < u->z) return 0;
+    /* Known regions have DZ=1. Even at the coarsest Z precision the opaque
+     * tolerance is at most 16 << 3. Close/equal depth remains unknown because
+     * coverage selects strict versus tolerance comparison. */
+    if (!(t->primitive_depth & 0xffff) && z > u->z + 128) return 1;
+    return -1;
+}
 
 static int32_t rdp_timing_signed(uint32_t value, unsigned bits)
 {
@@ -53,7 +138,8 @@ static int rdp_timing_keeps_row(const struct rdp_timing* t, int y)
  * The 15-clock span startup, 5-clock transaction and 3-clock turnaround
  * overheads are estimates checked against Thar0/RDP-Timing-Tests, not
  * constants fitted to a game.
- * This does not model other RCP clients or depth/alpha rejection. */
+ * Other RCP clients and read-response buffering remain unmodeled. Uniform
+ * command-derived rejection suppresses stores while retaining earlier reads. */
 static uint64_t rdp_timing_span(const struct rdp_timing* t, int y, int left, int right)
 {
     if (right <= left || !rdp_timing_keeps_row(t, y)) return 0;
@@ -68,25 +154,31 @@ static uint64_t rdp_timing_span(const struct rdp_timing* t, int y, int left, int
     unsigned z = (op >= 8 && op <= 15 && (op & 1)) || (t->modes & 4);
     unsigned color_read = (t->modes >> 6) & 1;
     unsigned depth_read = z && (t->modes & 0x10);
-    unsigned depth_write = z && (t->modes & 0x20);
+    unsigned depth_write = z && (t->modes & 0x20) && !t->reject;
+    unsigned color_write = !t->reject;
     uint64_t segments = ((unsigned)right + 7) / 8 - (unsigned)left / 8;
-    uint64_t bus = color * (1 + color_read);
+    uint64_t bus = color * (color_write + color_read);
     uint64_t depth = (uint64_t)t->z_address * 8 +
         ((uint64_t)y * t->fb_width + (unsigned)left) * 16;
     bus += rdp_timing_bus_words(depth, pixels * 16) * (depth_read + depth_write);
-    bus += segments * 5 * (1 + color_read + depth_read + depth_write);
+    bus += segments * 5 * (color_write + color_read + depth_read + depth_write);
     /* Reads precede writes in a span segment. Changing bus direction costs
      * time even when color/depth occupy separate banks. If the last read is
      * depth, its transition to the color write can overlap the row change;
      * count that boundary once rather than adding two turnaround penalties.
      * The three-clock estimate comes from console color read/write tests. */
-    unsigned turnarounds = color_read || depth_read;
+    unsigned turnarounds = color_write && (color_read || depth_read);
     /* Alternating color/depth in the same 1 MiB bank closes its open
      * 2 KiB row. Account for the remaining boundaries in each segment. */
     if ((depth_read || depth_write) && (first >> 23) == (depth >> 23) &&
         (first >> 14) != (depth >> 14)) {
         unsigned switches = (color_read && depth_read) + depth_read + depth_write;
         turnarounds += switches - depth_read;
+        /* With both stores suppressed, the final Z read switches back to
+         * the color row for the following segment. The old read/write
+         * boundary formula omitted these read-to-read row changes. */
+        if (!color_write && !depth_write && color_read && depth_read && segments > 1)
+            bus += (segments - 1) * 3;
     }
     bus += segments * 3 * turnarounds;
     uint64_t raster = pixels * (t->cycle_type + 1);
@@ -99,7 +191,8 @@ static uint64_t rdp_timing_span(const struct rdp_timing* t, int y, int left, int
     uint64_t response = (color_read + depth_read) * (32u + 16u * t->cycle_type);
     uint64_t uncovered = response > raster ? response - raster : 0;
     RDP_TIMING_OBSERVE_RESPONSE(t, uncovered);
-    return 15 + (bus > raster ? bus : raster) + uncovered;
+    unsigned startup = t->reject ? 4u + 2u * t->cycle_type : 15u;
+    return startup + (bus > raster ? bus : raster) + uncovered;
 }
 
 /* Fill spans repeat their bus alignment within 16 rows even for 4-bit
@@ -166,6 +259,13 @@ static uint64_t rdp_timing_clocks(struct rdp_timing* t)
     const uint32_t* w = t->words;
     unsigned op = (w[0] >> 24) & 63;
     uint64_t work = 0;
+    t->reject = 0;
+    if (op == 0x3a) t->primitive_color = w[1];
+    if (op == 0x3b) t->environment_color = w[1];
+    if (op == 0x39) t->blend_color = w[1];
+    if (op == 0x37) t->fill_color = w[1];
+    if (op == 0x2e) t->primitive_depth = w[1];
+    if (op == 0x3c) { t->combine_hi = w[0]; t->combine_lo = w[1]; }
     if (op == 0x2f) {
         t->cycle_type = (w[0] >> 20) & 3; t->modes = w[1];
         t->atomic_primitive = (w[0] >> 23) & 1;
@@ -187,6 +287,7 @@ static uint64_t rdp_timing_clocks(struct rdp_timing* t)
         t->scissor_field = (w[1] >> 24) & 3;
     }
     if (op >= 8 && op <= 15) {
+        t->reject = rdp_timing_alpha_result(t) == 1;
         int yh = rdp_timing_signed(w[1], 14), ym = rdp_timing_signed(w[1] >> 16, 14);
         int yl = rdp_timing_signed(w[0], 14);
         int first = yh >> 2, last = (yl + 3) >> 2;
@@ -246,8 +347,33 @@ static uint64_t rdp_timing_clocks(struct rdp_timing* t)
                 rows = y0 < ((bottom+3)>>2) ? (((bottom+3)>>2)-y0+1)/2 : 0;
             }
             RDP_TIMING_OBSERVE_SPAN(t, x1-x0, rows);
+            int alpha = rdp_timing_alpha_result(t);
+            int depth = rdp_timing_depth_result(t, x1, (bottom + 3) >> 2);
+            t->reject = t->cycle_type < 2 && (alpha == 1 || depth == 1);
             work = rdp_timing_rectangle(t, x0, top >> 2, x1, (bottom + 3) >> 2);
+            uint64_t bytes = (uint64_t)t->fb_width * ((bottom + 3) >> 2) * (4u << t->fb_size) / 8;
+            if (!t->reject) rdp_timing_invalidate_range(t, t->fb_address, bytes);
+            if (t->cycle_type == 3 && t->fb_size == 2 && !left && !top &&
+                !(t->scissor_field & 2) && !(bottom & 3) &&
+                (unsigned)x1 == t->fb_width && !(t->fill_color & 3) &&
+                (t->fill_color >> 16) == (t->fill_color & 0xffff))
+                rdp_timing_record_uniform(t, t->fb_address, t->fb_width, (bottom + 3) >> 2,
+                    rdp_timing_decompress_z(t->fill_color));
+            if (t->cycle_type < 2 && (t->modes & 0x24u) == 0x24u && !t->reject) {
+                rdp_timing_invalidate_range(t, t->z_address, (uint64_t)t->fb_width * ((bottom + 3) >> 2) * 2);
+                if (!left && !top && !(t->scissor_field & 2) && !((right | bottom) & 3) &&
+                    !(t->modes & (8u | 0x3000u)) &&
+                    (unsigned)x1 == t->fb_width && alpha == 0 && depth == 0 &&
+                    !(t->primitive_depth & 0xffff))
+                    rdp_timing_record_uniform(t, t->z_address, t->fb_width, (bottom + 3) >> 2,
+                        rdp_timing_quantize_z(((t->primitive_depth >> 16) & 0x7fff) << 3));
+            }
         }
+    }
+    if (op >= 8 && op <= 15 && !t->reject) {
+        rdp_timing_invalidate_range(t, t->fb_address, (uint64_t)t->fb_width * ((t->bottom + 3) >> 2) * (4u << t->fb_size) / 8);
+        if (t->modes & 0x20) rdp_timing_invalidate_range(t, t->z_address,
+            (uint64_t)t->fb_width * ((t->bottom + 3) >> 2) * 2);
     }
     /* Loads use texture-image size, not framebuffer size or cycle type.
      * LoadBlock coordinates are integers; Tile/TLUT coordinates are 10.2.
@@ -284,6 +410,10 @@ static uint64_t rdp_timing_clocks(struct rdp_timing* t)
             }
         }
     }
+    /* No-memory alpha failure: 4/6 clocks per span plus eleven drain clocks.
+     * Including the rectangle delivery clock gives the measured twelve-clock
+     * primitive overhead, independently of width, height or ROM identity. */
+    if (work && t->reject && !(t->modes & 0x50u)) work += 11;
     if (work && t->atomic_primitive &&
         ((op >= 8 && op <= 15) || op == 0x24 || op == 0x25 || op == 0x36))
         work += 35; /* SDK specifies 30-40 idle clocks per primitive. */
@@ -323,6 +453,8 @@ static void rdp_timing_finish(struct rdp_timing* t, int64_t submitted,
         t->deadline = submitted;
         t->clock_overhang = 0;
     }
+    int64_t begin = t->deadline >= INT64_MIN / 4 && t->deadline <= INT64_MAX / 4 ?
+        t->deadline * 4 - t->clock_overhang : INT64_MAX;
     uint64_t quarters = rdp_timing_clocks(t) * 3 - t->clock_overhang;
     uint64_t ticks = (quarters + 3) / 4;
     if (ticks > (uint64_t)INT64_MAX || t->deadline > INT64_MAX - (int64_t)ticks) {
@@ -331,6 +463,18 @@ static void rdp_timing_finish(struct rdp_timing* t, int64_t submitted,
     } else {
         t->deadline += (int64_t)ticks;
         t->clock_overhang = (uint32_t)(ticks * 4 - quarters);
+    }
+    if (t->observe_busy && begin != INT64_MAX && t->deadline <= INT64_MAX / 4) {
+        unsigned op = (t->words[0] >> 24) & 63;
+        unsigned primitive = (op >= 8 && op <= 15) || op == 0x24 || op == 0x25 || op == 0x36;
+        unsigned sync_op = op >= 0x26 && op <= 0x29;
+        unsigned load = op == 0x30 || op == 0x33 || op == 0x34;
+        unsigned mask = 1u | ((primitive || sync_op || load) ? 2u : 0u) | (load ? 4u : 0u);
+        int64_t end = t->deadline * 4 - t->clock_overhang;
+        if (primitive && t->reject && !(t->modes & 0x50u)) {
+            t->observe_busy(t->busy_context, begin, end, 1);
+            t->observe_busy(t->busy_context, begin, end - (t->cycle_type + 1) * 3, 2);
+        } else t->observe_busy(t->busy_context, begin, end, mask);
     }
     if (sync && !sync->seen && ((t->words[0] >> 24) & 63) == 0x29) {
         sync->seen = 1;

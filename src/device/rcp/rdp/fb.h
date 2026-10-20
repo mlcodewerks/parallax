@@ -33,8 +33,10 @@ struct r4300_core;
 enum { FB_INFOS_COUNT = 6 };
 enum { FB_DIRTY_PAGES_COUNT = 0x800 };
 
+struct rdp_timing;
 struct fb
 {
+    struct rdp_timing *timing;
     struct memory* mem;
     struct rdram* rdram;
     struct r4300_core* r4300;
@@ -42,6 +44,7 @@ struct fb
     unsigned char dirty_page[FB_DIRTY_PAGES_COUNT];
     FrameBufferInfo infos[FB_INFOS_COUNT];
     unsigned int once;
+    uint32_t timing_address[8], timing_bytes[8];
 };
 
 void init_fb(struct fb* fb,

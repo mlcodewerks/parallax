@@ -82,6 +82,7 @@ enum
 };
 
 #include "rdp_timing.h"
+#include "rdp_counters.h"
 
 struct rdp_core
 {
@@ -97,6 +98,7 @@ struct rdp_core
     struct mi_controller* mi;
     const uint32_t* vi_regs;
     struct rdp_timing timing;
+    struct rdp_counters counters;
     int instruction_timing;
 };
 
