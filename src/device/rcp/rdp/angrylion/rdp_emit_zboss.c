@@ -1281,8 +1281,17 @@ static int zb_compute(unsigned int handler, unsigned int w0, unsigned int w1)
         zb_charge(14u); zb_dma_cost(128u); zb_dma_cost(8u);
         zb_audio3(w0, w1); break;
     case 0xd20:
-        count = ((w0 & 0xffffu) + 8u) / 9u;
-        zb_charge(40u + count * 167u); zb_dma_cost(w0 & 0xffffu);
+        /* 0xd28/0xd3c mask the byte count to twelve bits. Bits 12..15
+         * select the offset within the input DMA, not additional frames.
+         * The DMA length register receives count + 15 at 0xd30; decode
+         * its row/length fields exactly as the SP DMA controller does. */
+        len = w0 & 0xfffu;
+        count = (len + 8u) / 9u;
+        /* Native handler measurement: 29 fixed instructions and 178 per
+         * nine-byte ADPCM block (DMA transfer clocks are charged below). */
+        zb_charge(29u + count * 178u);
+        len += 15u;
+        zb_dma_cost((((len & 0xfffu) | 7u) + 1u) * (((len >> 12) & 255u) + 1u));
         zb_audio4(w0, w1); break;
     default: return 0;
     }

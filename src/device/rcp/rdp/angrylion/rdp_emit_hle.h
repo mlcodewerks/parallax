@@ -17,6 +17,7 @@ extern "C" {
  * geometry path, and rasterize the emitted RDP command FIFO. */
 void rdp_emit_hle_process_dlist(void);
 int rdp_emit_hle_supported(const unsigned char *, unsigned int, unsigned int, unsigned int, unsigned int);
+int rdp_emit_hle_yield_supported(const unsigned char *, unsigned int, unsigned int, unsigned int, unsigned int);
 void rdp_emit_hle_reset(void);
 unsigned int rdp_emit_hle_state_size(void);
 void rdp_emit_hle_save(void *);

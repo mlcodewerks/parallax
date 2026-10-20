@@ -39,6 +39,7 @@ int32_t rsp_rsq32(int32_t in32);
 void rsp_light_dir_xfrm_one(const int32_t mv[4][4],
                             const int32_t dir[3], int32_t out[3]);
 void rsp_light_dir_xfrm_four(const int32_t mv[4][4],const int32_t dir[3],int32_t out[4]);
+void rsp_light_dir_xfrm_legacy(const int32_t mv[4][4],const int32_t dir[3],int32_t out[3]);
 void rsp_light_dir_xfrm_cached(const int32_t mv[4][4],const int32_t dir[3],int32_t out[4]);
 void rsp_light_vtx_legacy(const int32_t normal[3],const int32_t ambient[3],
     const int32_t (*rgb)[3],const int32_t (*dirs)[3],int num,int32_t out[3]);
@@ -78,6 +79,7 @@ int32_t rsp_z_gradient_min(int32_t gradient, unsigned int minimum);
 void rsp_set_attr_lowp(int on);
 void rsp_set_clip_lerp_wo64(int on);
 void rsp_set_clip_lerp_l3dex(int on);
+void rsp_set_clip_lerp_early(void);
 void rsp_clip_lerp(const int32_t on_pos[4], const int32_t off_pos[4],
                    const int16_t cr[4],
                    const int16_t on_attr[8], const int16_t off_attr[8],
@@ -110,6 +112,7 @@ void rsp_vtx_screen_dkr(int32_t cx, int32_t cy, int32_t cz, int32_t cw,
     int32_t *sx, int32_t *sy, int32_t *sz, int32_t *iw, int32_t *ndcz);
 int32_t rsp_vtx_last_ndc2z(void);
 int32_t rsp_vtx_last_pw(void);
+int32_t rsp_vtx_scaled_w(int32_t w, int32_t persp_norm);
 int32_t rsp_vtx_last_outcode(void);
 void rsp_clip_weights_rs(const int32_t in4[4], const int32_t out4[4],
                          const int16_t P[4], int32_t *wc, int32_t *wt);
@@ -160,6 +163,7 @@ int rsp_line_write(int32_t *cmd, const RspTriVtx *e0, const RspTriVtx *e1,
 void rsp_tri_set_rs_sort(int on);
 void rsp_tri_set_zboss_attr(int on);
 void rsp_tri_set_d64_sort(int on);
+int rsp_tri_early_writer(void);
 int rsp_tri_write(int32_t *ew,
                   const RspTriVtx *v1c, const RspTriVtx *v2c,
                   const RspTriVtx *v3c,

@@ -49,6 +49,17 @@ void hle_init(struct hle_t* hle,
     void* user_defined);
 
 void hle_execute(struct hle_t* hle);
+/* Active command servers keep their identity until their task completes. */
+enum hle_graphics_resume {
+    HLE_RESUME_NONE,
+    HLE_RESUME_STREAMING,
+    HLE_RESUME_RS,
+    HLE_RESUME_ZBOSS,
+    HLE_RESUME_NABOO
+};
+enum hle_graphics_resume hle_graphics_resume_pending(struct hle_t* hle);
+void hle_resume_graphics(struct hle_t* hle, enum hle_graphics_resume resume,
+                         unsigned int checksum);
 
 enum hle_task_kind {
     HLE_TASK_UNKNOWN,

@@ -77,8 +77,8 @@ contains VI_ORIGIN cannot displace another view that covers the picture. This
 handles WDC's selection menus, where 482-row render targets start 480 rows apart.
 Equally complete views retain the usual preference for the newest image.
 
-For HLE, enable `wtfn64_rsp_hle` and disable both `wtfn64_lle_graphics` and
-`wtfn64_lle_audio`. Unsupported tasks retain their LLE fallback. The CPU selector
+Supported RSP tasks use HLE automatically; undetected tasks, including custom
+homebrew programs, execute on the native RSP. The CPU selector
 and per-cycle timing are independent of GLRDP. Use 1x resolution when measuring
 native rendering performance. See [intro benchmark instructions](../../../../../benchmarks/README.md).
 

@@ -1939,6 +1939,9 @@ void RDPRenderer::shutdown() {
         std::fprintf(stderr, "GLRDP batch limits = capacity=%u queues=%llu queue_full=%llu state=%llu\n",
             primitive_uniforms_.capacity, (unsigned long long)stats_.queues,
             (unsigned long long)stats_.queue_flushes, (unsigned long long)stats_.state_flushes);
+    if (stats_.decode_cache_hits)
+        std::fprintf(stderr, "GLRDP texture decode cache = hits=%llu\n",
+                     (unsigned long long)stats_.decode_cache_hits);
     if (primitive_ubo_ && stats_.primitives)
         std::fprintf(stderr, "GLRDP submission = primitives=%llu draws=%llu batches=%llu batched=%llu atlas_hits=%llu atlas_uploads=%llu atlas_resets=%llu standalone=%llu framebuffer_tiles=%llu framebuffer_readbacks=%llu\n",
             (unsigned long long)stats_.primitives, (unsigned long long)stats_.draws,
@@ -1949,7 +1952,7 @@ void RDPRenderer::shutdown() {
     if (primitive_ubo_) glDeleteBuffers(1, &primitive_ubo_);
     if (atlas_texture_) glDeleteTextures(1, &atlas_texture_);
     primitive_ubo_ = atlas_texture_ = 0;
-    atlas_.clear(); tile_regions_ = {};
+    atlas_.clear(); texture_decode_cache_.clear(); tile_regions_ = {};
     field_history_.reset();
     uniforms_.clear();
     combiner_values_.clear();
@@ -1997,7 +2000,7 @@ void RDPRenderer::shutdown() {
     gpu_depth_.clear();
 }
 void RDPRenderer::reset() {
-    flush(); atlas_.clear(); tile_regions_ = {};
+    flush(); atlas_.clear(); texture_decode_cache_.clear(); tile_regions_ = {};
     field_history_.reset();
     gpu_depth_.clear();
     fb_.clear();
@@ -2154,18 +2157,30 @@ void RDPRenderer::upload_tile(const RDPState &s, std::uint8_t ti, unsigned unit)
     const bool framebuffer_tile = fb_.find_containing(s.texture_image.address) != nullptr ||
         gpu_depth_.find(s.texture_image.address) != nullptr;
     if (framebuffer_tile) ++stats_.framebuffer_tiles;
-    if (sig == tile_signature_[unit] && !(framebuffer_tile && tile_regions_[unit][2])) {
+    if (sig == tile_signature_[unit]) {
         standalone_tiles_ |= tile_regions_[unit][2] == 0;
+        return;
+    }
+    const auto decode_key = TextureDecodeCache::key(s, ti);
+    if (const auto *region = texture_decode_cache_.find(decode_key, s.tmem)) {
+        tile_regions_[unit] = *region;
+        tile_signature_[unit] = sig;
+        ++stats_.atlas_hits;
+        ++stats_.decode_cache_hits;
         return;
     }
     auto d = rdp_decode_tile(s, ti);
     if (d.rgba.empty())
         return;
-    if (!framebuffer_tile && int(d.width) <= atlas_.size && int(d.height) <= atlas_.size) {
+    // The load pipe already copied the source into TMEM. These pixels are
+    // immutable even when the source address belongs to a framebuffer;
+    // later framebuffer writes do not change the loaded TMEM snapshot.
+    if (int(d.width) <= atlas_.size && int(d.height) <= atlas_.size) {
         const auto key = TextureAtlas::key(d.width, d.height, d.rgba);
         if (const auto *entry = atlas_.find(key, d.width, d.height, d.rgba)) {
             tile_regions_[unit] = entry->region;
             tile_signature_[unit] = sig;
+            texture_decode_cache_.insert(decode_key, s.tmem, entry->region);
             ++stats_.atlas_hits;
             return;
         }
@@ -2180,6 +2195,7 @@ void RDPRenderer::upload_tile(const RDPState &s, std::uint8_t ti, unsigned unit)
         glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
         glTexSubImage2D(GL_TEXTURE_2D, 0, region[0], region[1], region[2], region[3], GL_RGBA, GL_UNSIGNED_BYTE, d.rgba.data());
         atlas_.insert(key, region, std::move(d.rgba));
+        texture_decode_cache_.insert(decode_key, s.tmem, region);
         tile_regions_[unit] = region; tile_signature_[unit] = sig; ++stats_.atlas_uploads;
         return;
         }
@@ -2588,7 +2604,7 @@ void RDPRenderer::draw_vertices(const std::vector<GLVertex> &v, bool textured, c
     if (v.empty())
         return;
     if (atlas_full_) {
-        flush(); atlas_.clear(); tile_signature_.fill(~0ull);
+        flush(); atlas_.clear(); texture_decode_cache_.clear(); tile_signature_.fill(~0ull);
         atlas_full_ = false; ++stats_.atlas_resets;
     }
     standalone_tiles_ = false;

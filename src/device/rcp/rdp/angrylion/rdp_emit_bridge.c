@@ -311,7 +311,7 @@ int bridge_add_triangle_with_texrecip(int32_t *cmd,
         int32_t x2 = c.x >> 14, y2 = c.y >> 14;
         /* Rej's VLT of the Y extrema rejects a horizontal triangle,
          * independently of the area sign test below. */
-        if (native_texrecip == 2 && y0 == y1 && y1 == y2)
+        if ((native_texrecip == 2 || rsp_tri_early_writer()) && y0 == y1 && y1 == y2)
             return 0;
         int64_t cr = (int64_t)(x0 - x1) * (y0 - y2)
                    + (int64_t)(x0 - x2) * (y1 - y0);
@@ -321,7 +321,7 @@ int bridge_add_triangle_with_texrecip(int32_t *cmd,
             if(native_texrecip)rsp_vertex_spill_cull(y0,y1,y2,0);
             return 0;
         }
-        if (c6 == 0) {
+        if (c6 == 0 && !rsp_tri_early_writer()) {
             if(native_texrecip)rsp_vertex_spill_cull(y0,y1,y2,1);
             return 0;
         }

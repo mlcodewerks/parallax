@@ -1,5 +1,5 @@
-/* Optional task HLE and streaming graphics walkers. The native RSP remains
- * connected for unknown code, forced-LLE lists and unsupported overlays. */
+/* Automatic task HLE and streaming graphics walkers. The native RSP remains
+ * connected for undetected programs and their instruction continuations. */
 #include "optional_rsp.h"
 #include "renderer_options.h"
 #include "device/device.h"
@@ -54,6 +54,7 @@ static unsigned int graphics_checksum;
 static const char *graphics_capture_prefix;
 static unsigned int graphics_capture_started, graphics_capture_count;
 static unsigned long long graphics_tasks, audio_tasks, other_tasks, boot_tasks, lle_tasks;
+static unsigned long long graphics_resumes[HLE_RESUME_NABOO + 1];
 static int timing_probe_active, timing_probe_failed;
 static uint32_t timing_probe_status;
 uint32_t optional_rsp_timing_status(void){return timing_probe_status;}
@@ -104,7 +105,7 @@ static void submit(const unsigned char *storage, unsigned int base, unsigned int
     uint32_t cursor=*info.DPC_CURRENT_REG,start=*info.DPC_START_REG;
     int factor5=work.family && (!strcmp(work.family,"rs_gfx_task") || !strcmp(work.family,"naboo_gfx_task"));
     rdp_submit_hle(&g_dev.dp, (const uint32_t *)storage, base, bytes, hle_timing_cycles());
-    if(factor5 && first<last && last<=0x800000u){
+    if(factor5 && storage && !(*info.DPC_STATUS_REG & DPC_STATUS_FREEZE) && first<last && last<=0x800000u){
         const uint32_t *words=(const uint32_t*)storage;
         unsigned int at=0;
         if(cursor<first || cursor>last)cursor=last;
@@ -132,7 +133,9 @@ static void get_dpc_state(unsigned int state[3])
 {
     state[0]=*info.DPC_END_REG;state[1]=*info.DPC_CURRENT_REG;state[2]=*info.DPC_STATUS_REG;
 }
-static const RdpEmitBackend backend = {get_rdram, get_rdram_size, get_dmem, submit, time_packet, get_dpc_state};
+static void publish_fifo(unsigned int base,unsigned int bytes,int xbus)
+{ rdp_publish_hle_fifo(&g_dev.dp,base,bytes,xbus); }
+static const RdpEmitBackend backend = {get_rdram, get_rdram_size, get_dmem, submit, time_packet, get_dpc_state, publish_fifo};
 
 void optional_rsp_init(RSP_INFO rsp_info)
 {
@@ -147,6 +150,7 @@ void optional_rsp_init(RSP_INFO rsp_info)
     graphics_capture_started = graphics_capture_count = 0;
     memset(&hle, 0, sizeof(hle));
     graphics_tasks = audio_tasks = other_tasks = boot_tasks = lle_tasks = 0;
+    memset(graphics_resumes, 0, sizeof(graphics_resumes));
     hle_init(&hle, info.RDRAM, info.DMEM, info.IMEM, info.MI_INTR_REG,
         info.SP_MEM_ADDR_REG, info.SP_DRAM_ADDR_REG, info.SP_RD_LEN_REG,
         info.SP_WR_LEN_REG, info.SP_STATUS_REG, info.SP_DMA_FULL_REG,
@@ -171,9 +175,12 @@ static int graphics_supported_memory(const uint32_t *task, unsigned char *ram, u
         sum += ram[task[4] + i];
     graphics_checksum=sum;
     /* A yielded task resumes from its saved DMEM, not TASK_DATA_PTR.
-     * Only a walker with a live continuation may consume it. Otherwise
-     * let the native boot restore the yield buffer and saved registers. */
-    if ((task[1] & 1u) && !hle_stream_can_resume(sum)) return 0;
+     * Only resident layouts with a recognized restore entry may import it;
+     * rdp_emit_hle_yield_supported keeps uncertified layouts disabled. */
+    if ((task[1] & 1u) && !hle_stream_can_resume(sum)) {
+        if (!rdp_emit_hle_yield_supported(ram,0x800000u,task[4],task[14],task[15]))
+            return 0;
+    }
 
     if (zsort_ucode_match(ram, 0x800000, task[6], task[7]))
     {
@@ -277,19 +284,26 @@ unsigned int optional_rsp_execute(unsigned int cycles)
 {
     const uint32_t *task = (const uint32_t *)(info.DMEM + 0xfc0);
     enum hle_task_kind kind;
+    /* Fresh launches and OS yield relaunches still validate their ucode.
+     * Only the unfinished task that already owns the SP may reuse it. */
+    enum hle_graphics_resume resume = g_dev.sp.rsp_task_locked
+        ? hle_graphics_resume_pending(&hle) : HLE_RESUME_NONE;
     if (!renderer_settings.rsp_hle || (*info.SP_PC_REG & 0xfff) != 0)
         goto native;
     /* Upstream identifies direct programs by boot size. Their DMEM tail is
-     * not an OSTask and must not be subjected to guest-pointer checks. */
+     * not an OSTask and must not be subjected to guest-pointer checks.
+     * Graphics streams terminate with commands; their unused data_size
+     * field can contain unrelated words. Each walker bounds its reads. */
     if (task[3] <= 0x1000 && (
         (task[4] & 3) || task[4] > 0x7ff000 ||
         (task[6] & 3) || task[6] > 0x7ff000 || task[7] > 0x1000 ||
-        (task[12] & 3) || task[12] >= 0x800000 || task[13] > 0x800000 - task[12]))
+        (task[12] & 3) || task[12] >= 0x800000 ||
+        (task[0] != 1u && task[13] > 0x800000 - task[12])))
         goto native;
-    kind = hle_get_task_kind(&hle);
+    kind = resume ? HLE_TASK_GRAPHICS : hle_get_task_kind(&hle);
     if (kind == HLE_TASK_UNKNOWN ||
         (kind == HLE_TASK_GRAPHICS && (renderer_settings.lle_graphics ||
-            (*info.DPC_STATUS_REG & DPC_STATUS_FREEZE) || !graphics_supported(task))) ||
+            (!resume && !graphics_supported(task)))) ||
         (kind == HLE_TASK_AUDIO && ((task[12] & 7) ||
             renderer_settings.lle_audio || !audio_supported(task))))
         goto native;
@@ -316,7 +330,11 @@ unsigned int optional_rsp_execute(unsigned int cycles)
         uint32_t state[PARALLEL_RSP_STATE_WORDS];parallelRSPSaveState(state);
         boot_probe(&hle,state,1);
     }
-    hle_execute(&hle);
+    if (resume) {
+        graphics_resumes[resume]++;
+        hle_resume_graphics(&hle, resume, graphics_checksum);
+    }
+    else hle_execute(&hle);
     if(!forwarded && hle.rsp_vco_written)parallelRSPSetVCO(hle.rsp_vco);
     if(!forwarded){
         if(kind==HLE_TASK_GRAPHICS)hle.rsp_t6_written=naboo_get_phase(&hle.rsp_t6);
@@ -377,6 +395,9 @@ void optional_rsp_report(void)
 {
     DebugMessage(M64MSG_INFO, "RSP tasks: HLE graphics=%llu audio=%llu LLE=%llu other=%llu boot=%llu",
         graphics_tasks, audio_tasks, lle_tasks, other_tasks, boot_tasks);
+    DebugMessage(M64MSG_INFO, "RSP streaming continuations: F3DEX2=%llu Rogue=%llu BOSS=%llu Naboo=%llu",
+        graphics_resumes[HLE_RESUME_STREAMING], graphics_resumes[HLE_RESUME_RS],
+        graphics_resumes[HLE_RESUME_ZBOSS], graphics_resumes[HLE_RESUME_NABOO]);
 }
 
 #define AUDIO_STATE_OFFSET offsetof(struct hle_t, alist_buffer)
@@ -445,6 +466,12 @@ static unsigned char *probe_get_dmem(void) { return probe_dmem; }
 static void probe_submit(const unsigned char *p, unsigned int base, unsigned int bytes)
 {
     unsigned int i, shift;
+    /* An invalid list can loop until the worker timeout. Bound the
+     * benchmark dump too, so failed replay cannot exhaust the drive. */
+    if(probe_rdp_words>0x400000u || bytes/4u>0x400000u-probe_rdp_words) {
+        timing_probe_failed=1;
+        return;
+    }
     FILE *dump = getenv("HLE_TIMING_RDP_DUMP") ? fopen(getenv("HLE_TIMING_RDP_DUMP"), "ab") : NULL;
     (void)base;
     for (i = 0; i + 4u <= bytes; i += 4u) {
@@ -533,7 +560,8 @@ unsigned int optional_rsp_timing_replay(const char *path, char *family,
         timing_probe_supported=probe_kind!=HLE_TASK_UNKNOWN;
         if(task[3]<=0x1000 && ((task[4]&3) || task[4]>0x7ff000 ||
             (task[6]&3) || task[6]>0x7ff000 || task[7]>0x1000 ||
-            (task[12]&3) || task[12]>=0x800000 || task[13]>0x800000-task[12]))
+            (task[12]&3) || task[12]>=0x800000 ||
+            (task[0]!=1u && task[13]>0x800000-task[12])))
             timing_probe_supported=0;
         if(timing_probe_supported && probe_kind==HLE_TASK_GRAPHICS)
             timing_probe_supported=graphics_supported_memory(task,memory,probe.dmem);

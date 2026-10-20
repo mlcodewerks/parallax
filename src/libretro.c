@@ -579,6 +579,21 @@ bool retro_load_game(const struct retro_game_info *game)
     char *gamePath;
     char *newPath;
     renderer_read_options(environ_cb);
+#if defined(M64P_HEADLESS_BENCHMARK)
+    /* Isolated comparison builds can still force native task execution.
+     * These controls are absent from production core options. */
+    {
+        struct retro_variable route = {"wtfn64_rsp_hle", NULL};
+        if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &route) && route.value)
+            renderer_settings.rsp_hle = strcmp(route.value, "disabled") != 0;
+        route.key = "wtfn64_lle_graphics"; route.value = NULL;
+        if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &route) && route.value)
+            renderer_settings.lle_graphics = strcmp(route.value, "enabled") == 0;
+        route.key = "wtfn64_lle_audio"; route.value = NULL;
+        if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &route) && route.value)
+            renderer_settings.lle_audio = strcmp(route.value, "enabled") == 0;
+    }
+#endif
     current_rdp_type = renderer_settings.renderer == RENDERER_ANGRYLION ? RDP_PLUGIN_ANGRYLION : renderer_settings.renderer == RENDERER_GLRDP ? RDP_PLUGIN_GLRDP : RDP_PLUGIN_PARALLEL;
     if (log_cb)
         log_cb(RETRO_LOG_INFO, "Renderer: %s, upscale %ux, performance cores %s.\n",

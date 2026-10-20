@@ -87,6 +87,7 @@ void f3dex2_set_variant_acclaim(const unsigned char *rdram, unsigned int text);
 int f3dex2_variant_acclaim(void);
 void f3dex2_force_class_s2dex1(void);
 void f3dex2_import_segments(const unsigned int *src);
+unsigned int f3dex2_restore_yield(GSPState *gsp,const unsigned char *dmem);
 /* Data-segment name probe for the standalone S2DEX 1.xx (GBI 1) sprite/BG
  * microcode (defined in rdp_emit_hle.c, shared with the mid-list G_LOAD_UCODE
  * handoff in the F3D walker). */

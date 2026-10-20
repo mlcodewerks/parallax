@@ -79,6 +79,11 @@ unsigned int f3d_get_resume_pc(void);
 unsigned int f3d_get_half1(void);
 int f3d_stopped_at_ucode(void);
 void f3d_import_segments(const unsigned int *src);
+void f3d_restore_yield(GSPState *gsp,const unsigned char *dmem,unsigned int vertex_base,int compact);
+void f3d_restore_prefetch(const unsigned char *dmem,unsigned int pc,
+                         unsigned int cursor,unsigned int bytes);
+int f3d_ucode_family(const unsigned char *rdram,unsigned int size,
+                     unsigned int data,unsigned int bytes);
 
 #ifdef __cplusplus
 }

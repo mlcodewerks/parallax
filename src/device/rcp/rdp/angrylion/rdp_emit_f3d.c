@@ -22,6 +22,7 @@
 #include "rdp_emit_bridge.h"
 #include "rdp_emit_frontend.h"
 #include "rdp_emit_rsp.h"
+#include <string.h>
 
 /* ---- F3D command bytes (high byte of w0) ---------------------------------*/
 #define F3D_MTX                0x01
@@ -85,6 +86,12 @@ static unsigned int   s_othermode_h;
 static unsigned int   s_othermode_l;
 static int            s_dl_depth;
 static unsigned int   s_geom;   /* geometry mode in native F3D bit layout */
+static unsigned int s_yield_returns[32];
+static unsigned int s_yield_depth;
+static int s_yield_restored;
+static unsigned int s_yield_vertex_base;
+static unsigned int s_yield_prefetch_base, s_yield_prefetch_bytes;
+static unsigned char s_yield_prefetch[0x140];
 
 /* ---- Wipeout 64 sprite microcode (custom F3DLX-derived ucode) -------------
  * Its 2D content (menu background, text, intro screens) is drawn by a custom
@@ -106,6 +113,7 @@ static int          s_spr_have;          /* a 0x09 struct is loaded */
 static unsigned int s_spr_struct[6];     /* the 24-byte struct */
 static unsigned int s_spr_size;          /* BE operand (dsdx/dtdy) */
 static unsigned int s_spr_flip;          /* BE w0 low 16: mirror flags */
+static int s_spr_disjoint_bands;
 
 static unsigned int seg_phys(unsigned int w1);
 
@@ -321,7 +329,8 @@ static void f3d_emit_sprite(RdpFifo *fifo, unsigned int pos)
              * exactly as the microcode does. Band height is a fixed ceil-to-
              * pixel of the advance; the last band fills to the true extent. The
              * accumulated sub-texel fraction lands in each band's T coordinate. */
-            unsigned int adv   = (max_rows > 1u) ? (max_rows - 1u) : 1u;
+            unsigned int adv   = s_spr_disjoint_bands ? max_rows
+                                : (max_rows > 1u) ? (max_rows - 1u) : 1u;
             unsigned int dt4   = dtdy << 2;
             unsigned int bandh = (dtdy != 0u)
                                ? ((((adv << 12) + dt4 - 1u) / dt4) << 2)
@@ -348,6 +357,22 @@ static void f3d_emit_sprite(RdpFifo *fifo, unsigned int pos)
                 unsigned int tc   = b * bfrac;
                 unsigned int ldl  = tflip ? (tend - th) : tl;
                 unsigned int ldh  = tflip ? (tend - tl) : th;
+                if(s_spr_disjoint_bands) {
+                    /* The early XBUS sprite loop reloads each complete
+                     * TMEM band and starts T at its tile origin. Its last
+                     * loaded row is inclusive; it does not carry a bilerp
+                     * overlap or fractional T residue between bands. */
+                    unsigned int end = tl + max_rows - 1u;
+                    if(end >= tend)end=tend-1u;
+                    ldl=tl;ldh=end;lrt=end-tl;tc=0;
+                    yh_b+=yh;yl_b+=yh;
+                    if(b) {
+                        w[0]=(int32_t)(0xfd000000u|(fsbyte<<16)|timgw);
+                        w[1]=(int32_t)texaddr;rdp_fifo_append(fifo,w,2);
+                        w[0]=(int32_t)(0xf5000000u|(fmt<<21)|(1u<<19)|(line<<9));
+                        w[1]=(int32_t)0x07080200u;rdp_fifo_append(fifo,w,2);
+                    }
+                }
                 if (tflip)
                     tc = ((tend << 5) - b * cstep) - (ldl << 5);
 
@@ -380,6 +405,27 @@ static unsigned int rd32(const unsigned char *r, unsigned int a)
     /* RDRAM is stored host-native (byte-swapped on load); read native, the
      * same way the F3DEX2 walker and the rasterizer's command fetch do. */
     return *(const unsigned int *)(r + a);
+}
+
+static unsigned int command_word(const unsigned char *r, unsigned int a)
+{
+    if (s_yield_prefetch_bytes && a >= s_yield_prefetch_base &&
+        a - s_yield_prefetch_base <= s_yield_prefetch_bytes - 4u) {
+        unsigned int value;
+        memcpy(&value,s_yield_prefetch+a-s_yield_prefetch_base,4);
+        return value;
+    }
+    return rd32(r,a);
+}
+
+void f3d_restore_prefetch(const unsigned char *dm,unsigned int pc,
+                          unsigned int cursor,unsigned int bytes)
+{
+    s_yield_prefetch_bytes=0;
+    if(bytes<8u || bytes>sizeof(s_yield_prefetch) || cursor>0x1000u-bytes)return;
+    memcpy(s_yield_prefetch,dm+cursor,bytes);
+    s_yield_prefetch_base=pc;
+    s_yield_prefetch_bytes=bytes;
 }
 
 /* Resolve a segmented/virtual address: seg_table[(w1>>24)&0xf] + low24. KSEG0
@@ -444,6 +490,81 @@ void f3d_seg_reset(void)
     s_zbuffered = 0;
     s_dl_depth  = 0;
     s_geom      = 0;
+    s_yield_depth=0;
+    s_yield_restored=0;
+    s_yield_vertex_base=0;
+    s_yield_prefetch_bytes=0;
+}
+
+void f3d_restore_yield(GSPState *s,const unsigned char *dm,unsigned int vertex_base,int compact)
+{
+    unsigned int i,k,texture=rd32(dm,0x120u),scale=rd32(dm,0x124u),count=rd32(dm,0x12cu);
+    unsigned int text=rd32(dm,0xfd0u)&0x7fffffu,viewport=0x320u;
+    if(text<=s_rdram_size && 0xf80u<=s_rdram_size-text)
+        for(i=0;i+32u<=0xf80u;i+=4u)
+            if((rd32(s_rdram,text+i)&0xffff0000u)==0x20080000u &&
+               rd32(s_rdram,text+i+16u)==0xc9001800u &&
+               rd32(s_rdram,text+i+20u)==0xc9011801u &&
+               rd32(s_rdram,text+i+24u)==0xc9001c00u) {
+                unsigned int address=rd32(s_rdram,text+i)&0xffffu;
+                if(address<=0xfc0u)viewport=address;
+                break;
+            }
+    s_yield_restored=1;
+    s->clip_ratio=(int16_t)*(const uint16_t *)(dm+(0x76u^2u));
+    for(i=0;i<16;i++)s_seg[i]=rd32(dm,0x160u+i*4u);
+    s_geom=rd32(dm,0x114u);
+    gsp_set_geometry_mode(s,f3d_xlate_geom(s_geom));
+    s_textured=(s_geom&2u)!=0;s_zbuffered=(s_geom&1u)!=0;
+    f3d_set_othermode_init(rd32(dm,0x118u),rd32(dm,0x11cu));
+    gsp_set_texture(s,scale>>16,scale&0xffffu,(texture>>8)&7u,(texture>>11)&7u,0,0);
+    gsp_set_viewport(s,dm,viewport);
+    gsp_set_persp_norm(s,rd32(dm,0x110u)&0xffffu);
+    /* Matrix loads update the resident combined slot immediately; force-
+     * matrix writes can make it differ from modelview * projection. */
+    if (vertex_base >= 64u)
+        for (i=0;i<4u;i++)
+            gsp_force_matrix_chunk(s,dm,vertex_base-64u+i*16u,i*16u);
+    s->fog_m=(int16_t)(rd32(dm,viewport+16u)>>16);s->fog_o=(int16_t)rd32(dm,viewport+16u);
+    /* +20 is the stack base; POPMTX and push update the cursor at +24. */
+    s->mtx_stack_ptr=rd32(dm,0x134u);
+    /* The sign byte invalidates transformed lights; native lighting masks
+     * the byte count with ANDI 0xfff before indexing the ambient record. */
+    gsp_set_num_lights(s,(int)((count&0xfffu)/32u)-1);
+    for(i=0;i<2;i++) {
+        gsp_set_lookat(s,dm,0x1b0u+i*32u,1u-i);
+        for(k=0;k<3;k++)s->lookat[1u-i][k]=(signed char)dm[(0x1c0u+i*32u+k)^3u];
+    }
+    for(i=0;i<8;i++) {
+        gsp_set_light(s,dm,0x1f0u+i*32u,i);
+        for(k=0;k<3;k++)s->light_dir[i][k]=(signed char)dm[(0x200u+i*32u+k)^3u];
+    }
+    s->lights_valid=!(count&0x80000000u);
+    /* The text probes in the outer walk distinguish compact paired writers
+     * even when the yield image has overwritten the microcode ID string.
+     * Import vertex records after those probes select the native layout. */
+    s_yield_vertex_base=vertex_base;
+    (void)compact;
+    {
+        unsigned int at,depth=0x148u,returns=0x336u;
+        if(text<=s_rdram_size && 0xf80u<=s_rdram_size-text)
+            for(at=0;at+16u<=0xf80u;at+=4u)
+                if((rd32(s_rdram,text+at)&0xffff0000u)==0x83a20000u &&
+                   rd32(s_rdram,text+at+4u)==0x2042fffcu &&
+                   (rd32(s_rdram,text+at+12u)&0xffff0000u)==0x20430000u &&
+                   (rd32(s_rdram,text+at+12u)&0xffffu)<=0xf40u) {
+                    depth=0x110u+(rd32(s_rdram,text+at)&0xffffu);
+                    returns=rd32(s_rdram,text+at+12u)&0xffffu;
+                    break;
+                }
+        s_yield_depth=dm[depth^3u]/4u;
+        if(s_yield_depth>32u)s_yield_depth=32u;
+        for(i=0;i<s_yield_depth;i++) {
+        unsigned int at=returns+i*4u;
+        s_yield_returns[i]=(((unsigned int)*(const uint16_t *)(dm+(at^2u))<<16)
+            |*(const uint16_t *)(dm+((at+2u)^2u)))&0x7fffffu;
+        }
+    }
 }
 
 void f3d_set_rdram(unsigned char *rdram)        { s_rdram = rdram; }
@@ -491,15 +612,6 @@ void f3d_set_othermode_init(unsigned int h, unsigned int l)
  * F3DEX2 titles on their existing path unchanged. */
 int f3d_is_early_ucode(const unsigned char *rdram, unsigned int size, unsigned int text)
 {
-#ifndef HLE_EARLY_F3D_EXPERIMENTAL
-    /* The recovered 2D stream is verified; the 3D edge/attribute arithmetic
-     * still differs from native execution. Keep this program on the native
-     * production path until the controlled geometry witnesses also match. */
-    (void)rdram;
-    (void)size;
-    (void)text;
-    return 0;
-#else
     unsigned int i, hash = 2166136261u;
     if (!rdram || !text || text > size || size-text < 0xfb0u)
         return 0;
@@ -511,7 +623,6 @@ int f3d_is_early_ucode(const unsigned char *rdram, unsigned int size, unsigned i
     for (i=0;i<0xfb0u;++i)
         hash=(hash^rdram[(text+i)^3u])*16777619u;
     return hash==0xd81ace31u;
-#endif
 }
 
 int f3d_is_ucode(const unsigned char *rdram, unsigned int rdram_size,
@@ -737,20 +848,14 @@ static void rdp_passthrough(GSPState *gsp, RdpFifo *fifo, int cmd,
 }
 
 /* ---- the F3D walker ------------------------------------------------------*/
-void f3d_run_dl(GSPState *gsp, RdpFifo *fifo, unsigned int addr,
-                int textured, int z_buffered)
+static void f3d_prepare_writer(GSPState *gsp,RdpFifo *fifo)
 {
-    int guard = 0;
-    unsigned int pc = addr;
-    int running = 1;
-    const unsigned char *r = s_rdram;
-
-    if (textured)   s_textured  = textured;
-    if (z_buffered) s_zbuffered = z_buffered;
-    if (r == 0)
-        return;
-    if (s_dl_depth == 0)
-    {
+    const unsigned char *r=s_rdram;
+    gsp->mvp_trans_last=(s_variant_d64&2)!=0;
+        unsigned int text=fifo->dmem?rd32(fifo->dmem,0xfd0u)&0x7fffffu:0;
+        s_spr_disjoint_bands=text && text<=s_rdram_size && 16u<=s_rdram_size-text &&
+            rd32(r,text)==0x201d0110u && rd32(r,text+4u)==0x34022800u &&
+            rd32(r,text+8u)==0x40822000u && rd32(r,text+12u)==0xc81f2003u;
         /* SM64-era plain Fast3D clips triangles against the near plane
          * (z + w >= 0); enabling the frontend's near-plane clip keeps its
          * large camera-straddling quads (the water/mist sheets in Jolly Roger
@@ -788,7 +893,8 @@ void f3d_run_dl(GSPState *gsp, RdpFifo *fifo, unsigned int addr,
          * cart's sliding doors). The real microcode passes those triangles
          * to the rasterizer whole, so widen the band to match; GoldenEye
          * keeps the narrow ratio. */
-        gsp->clip_ratio = s_variant_pd ? 2 : 1;
+        if (!s_yield_restored)
+            gsp->clip_ratio = s_variant_pd ? 2 : 1;
         /* The Doom 64 lineage (Doom 64, Rayman 2, ...) keeps the 2.04H-era
          * clip fan: pivot on the FIRST polygon vertex and walk the pairs
          * downward from the end -- (0,n-2,n-1), (0,n-3,n-2), ..., (0,1,2).
@@ -799,6 +905,10 @@ void f3d_run_dl(GSPState *gsp, RdpFifo *fifo, unsigned int addr,
          * triangles with the correct fan). */
         if (s_variant_d64)
             gsp->clip_fan_first = 1;
+        if (s_variant_d64 & 2) {
+            gsp->clip_fan_first=3;
+            rsp_set_clip_lerp_early();
+        }
         if (fifo->dmem) {
             unsigned int text=rd32(fifo->dmem,0xfd0u)&0x7fffffu,at;
             /* This overlay seeds C,B,A, walks outgoing edges in ascending
@@ -849,6 +959,15 @@ void f3d_run_dl(GSPState *gsp, RdpFifo *fifo, unsigned int addr,
         if (fifo->dmem) {
             unsigned int text = rd32(fifo->dmem,0xfd0u) & 0x7fffffu;
             unsigned int at;
+            if(text<=s_rdram_size && 0xf80u<=s_rdram_size-text)
+                for(at=0;at+12u<=0xf80u;at+=4u)
+                    if(rd32(r,text+at)==0x4b3f7f0eu &&
+                       rd32(r,text+at+8u)==0x4b3f5f4fu) {
+                        /* This projector latches the position fraction
+                         * before its final translation-integer VMADH. */
+                        gsp->mvp_trans_last=1;
+                        break;
+                    }
             gsp_set_legacy_lighting(0);
             if(gsp->clip_near_z==0 && text<=s_rdram_size && 0xf80u<=s_rdram_size-text)
                 for(at=0;at+20u<=0xf80u;at+=4u)
@@ -867,6 +986,17 @@ void f3d_run_dl(GSPState *gsp, RdpFifo *fifo, unsigned int addr,
                        rd32(r,text+at+8u)==0x4ac61990u &&
                        rd32(r,text+at+12u)==0x4a8639c0u) {
                         gsp_set_legacy_lighting(1);
+                        break;
+                    }
+            if(text<=s_rdram_size && 0x1800u<=s_rdram_size-text)
+                for(at=0;at+16u<=0x1800u;at+=4u)
+                    if(rd32(r,text+at)==0x4b9f2940u &&
+                       rd32(r,text+at+4u)==0x4a856186u &&
+                       rd32(r,text+at+8u)==0x4aa5698eu &&
+                       rd32(r,text+at+12u)==0x4ac5718eu) {
+                        /* This direction normalizer truncates its fraction
+                         * dot before doubling and scales VRSQ by 64. */
+                        gsp_set_legacy_lighting(2);
                         break;
                     }
             /* These projectors round screen Y before storing the vertex
@@ -908,6 +1038,9 @@ void f3d_run_dl(GSPState *gsp, RdpFifo *fifo, unsigned int addr,
                                 texture_fractions=1;
                                 break;
                             }
+                        /* This compact store writes signed Z directly,
+                         * including depths below the viewport origin. */
+                        rsp_set_vtx_z_signed(1);
                         rsp_tri_set_d64_sort(texture_fractions?8:7);
                         gsp->clip_reject=2;gsp->clip_fan_first=0;
                         gsp->clip_ratio=(int16_t)(rd32(fifo->dmem,0x74u)&0xffffu);
@@ -956,8 +1089,8 @@ void f3d_run_dl(GSPState *gsp, RdpFifo *fifo, unsigned int addr,
              * guard band. The iteration order decides the clip fan's
              * vertex sequence, hence the triangulation. */
             gsp->clip_near_z = 1;
-            gsp->clip_fan_first = 2;
-            gsp->clip_ratio = 1;
+            if(gsp->clip_fan_first!=4)gsp->clip_fan_first = 2;
+            if(!s_yield_restored)gsp->clip_ratio = 1;
         }
         gsp->fog_off = (s_variant_line && s_variant_d64
                         && !s_variant_bhline) ? 1 : 0;
@@ -984,7 +1117,35 @@ void f3d_run_dl(GSPState *gsp, RdpFifo *fifo, unsigned int addr,
         gsp->line_xl[0] = 0;
         gsp->line_xl[1] = 0;
         s_spr_have = 0;
-    }
+        if (s_yield_vertex_base && fifo->dmem) {
+            unsigned int i;
+            gsp_restore_vertex_records(gsp,fifo->dmem,0x1000u|s_yield_vertex_base,
+                gsp->clip_reject?20u:40u,gsp->clip_reject==2);
+            if(!gsp->clip_reject)
+                for(i=0;i<32u;i++) {
+                    /* GBI1 stores one packed halfword with SH at +36;
+                     * +38 retains unrelated bytes. Screen flags occupy
+                     * 0x7070 and guard flags 0x0707 in that halfword. */
+                    uint32_t flags=(uint32_t)gsp->vtx[i].clip>>16;
+                    gsp->vtx[i].clip=(int32_t)((flags&0x7070u)|((flags&0x0707u)<<20));
+                }
+            s_yield_vertex_base=0;
+        }
+}
+
+void f3d_run_dl(GSPState *gsp, RdpFifo *fifo, unsigned int addr,
+                int textured, int z_buffered)
+{
+    int guard = 0;
+    unsigned int pc = addr;
+    int running = 1;
+    const unsigned char *r = s_rdram;
+
+    if (textured)   s_textured  = textured;
+    if (z_buffered) s_zbuffered = z_buffered;
+    if (r == 0)
+        return;
+    if (s_dl_depth == 0) f3d_prepare_writer(gsp,fifo);
     if (s_dl_depth >= F3D_DL_MAX_DEPTH)
         return;
     s_dl_depth++;
@@ -998,8 +1159,11 @@ void f3d_run_dl(GSPState *gsp, RdpFifo *fifo, unsigned int addr,
 
     while (running && guard++ < 100000)
     {
-        unsigned int w0 = rd32(r, pc);
-        unsigned int w1 = rd32(r, pc + 4);
+        unsigned int w0 = command_word(r, pc);
+        unsigned int w1 = command_word(r, pc + 4);
+        if (s_yield_prefetch_bytes && (pc < s_yield_prefetch_base ||
+            pc-s_yield_prefetch_base >= s_yield_prefetch_bytes))
+            s_yield_prefetch_bytes=0;
         int cmd = (int)((w0 >> 24) & 0xff);
         hle_timing_graphics_family("gfx_f3d");
         hle_timing_command(cmd);
@@ -1320,6 +1484,7 @@ void f3d_run_dl(GSPState *gsp, RdpFifo *fifo, unsigned int addr,
         }
 
         case F3D_DL:
+            s_yield_prefetch_bytes=0;
         {
             int nopush = (int)((w0 >> 16) & 0xff) == F3D_DL_NOPUSH;
             unsigned int da = seg_phys(w1);
@@ -1349,6 +1514,11 @@ void f3d_run_dl(GSPState *gsp, RdpFifo *fifo, unsigned int addr,
         }
 
         case F3D_ENDDL:
+            s_yield_prefetch_bytes=0;
+            if(s_dl_depth==1 && s_yield_depth) {
+                pc=s_yield_returns[--s_yield_depth];
+                continue;
+            }
             running = 0;
             break;
 
@@ -1605,14 +1775,21 @@ void f3d_run_dl(GSPState *gsp, RdpFifo *fifo, unsigned int addr,
              * carry matrix and other state commands the microcode never
              * executes. */
             {
-                int v0 = (int)(((w0 >> 16) & 0xffu) / 2u);
-                int vn = (int)((w1 & 0xffu) / 2u);
-                if (gsp_culldl_test(gsp, v0, vn))
-                    running = 0;
+                int v0 = s_variant_d64 ? (int)((w0 & 0xffffu) / 2u)
+                                      : (int)((w0 & 0x3ffu) / 40u);
+                int vn = s_variant_d64 ? (int)((w1 & 0xffffu) / 2u)
+                                      : (int)(w1 / 40u) - 1;
+                if (gsp_culldl_test(gsp, v0, vn)) {
+                    s_yield_prefetch_bytes=0;
+                    if(s_dl_depth==1 && s_yield_depth)
+                        pc=s_yield_returns[--s_yield_depth];
+                    else running = 0;
+                }
             }
             break;
 
         case 0xAF:
+            s_yield_prefetch_bytes=0;
             /* G_LOAD_UCODE (gsSPLoadUcodeEx): the RSP reloads the microcode
              * named by w1 with the data segment staged through the preceding
              * G_RDPHALF_1, and the new microcode's DMEM initialisation
@@ -1674,6 +1851,26 @@ void f3d_run_dl(GSPState *gsp, RdpFifo *fifo, unsigned int addr,
                      * SETOTHERMODE emits from the fresh base. */
                     if ((oh >> 24) == 0xefu)
                         f3d_set_othermode_init(oh, ol);
+                }
+                {
+                    unsigned int text=seg_phys(w1),t0=rd32(r,text);
+                    int family=f3d_ucode_family(r,s_rdram_size,ud,uds);
+                    int bcline=f3d_is_bcline_ucode(r,s_rdram_size,text);
+                    int bhline=f3d_is_bhline_ucode(r,s_rdram_size,text);
+                    f3d_set_variant(!bcline && (family ||
+                        (in_range(ud,0x120u) && (rd32(r,ud+0x118u)>>24)==0xefu)));
+                    f3d_set_variant_early(f3d_is_early_ucode(r,s_rdram_size,text));
+                    f3d_set_variant_f3dex(t0==0x090005eau || t0==0x090005eeu);
+                    f3d_set_variant_pd(t0==0x090005eeu);
+                    f3d_set_variant_wr64(f3d_is_wr64_ucode(r,s_rdram_size,text));
+                    f3d_set_line_variant(family==2 || bcline || bhline);
+                    f3d_set_variant_bhline(bhline);
+                    f3d_set_variant_ff2d(f3d_is_ff2d_ucode(r,s_rdram_size,text));
+                    f3d_set_near_plane_from_data(r,s_rdram_size,ud);
+                    f3d_set_variant_wo64(t0==0x090005d8u);
+                    s_yield_restored=0;
+                    gsp_detect_ucode_params(gsp,r,s_rdram_size,ud,text);
+                    f3d_prepare_writer(gsp,fifo);
                 }
             }
             break;
@@ -1765,7 +1962,7 @@ void f3d_run_dl(GSPState *gsp, RdpFifo *fifo, unsigned int addr,
              * invisible (its hi-LOD sub-list was never entered). */
             int bv = (int)((w0 & 0xfffu) >> 1);
             unsigned int ba = seg_rsp(s_last_rdphalf1) & 0x00ffffffu;
-            unsigned int pw = (pc >= 16u) ? rd32(r, pc - 16u) : 0u;
+            unsigned int pw = (pc >= 16u) ? command_word(r, pc - 16u) : 0u;
             /* The gbi macros always emit the pair G_RDPHALF_1 + G_BRANCHZ
              * back to back, so require the staged address to come from the
              * immediately preceding command; a fork that repurposes the
@@ -1773,6 +1970,7 @@ void f3d_run_dl(GSPState *gsp, RdpFifo *fifo, unsigned int addr,
             if (((pw >> 24) & 0xffu) == F3D_RDPHALF_1
                 && bv >= 0 && bv < GSP_MAX_VERTICES && in_range(ba, 8u)
                 && gsp->vtx[bv].scr_z < (int32_t)w1)
+                s_yield_prefetch_bytes=0;
                 pc = ba;
             break;
         }
@@ -1802,12 +2000,12 @@ void f3d_run_dl(GSPState *gsp, RdpFifo *fifo, unsigned int addr,
                 raw[wi++] = (int32_t)w1;
                 while (wi < 40)
                 {
-                    unsigned int nx = rd32(r, pc);
+                    unsigned int nx = command_word(r, pc);
                     int nhc = (int)((nx >> 24) & 0xff);
                     if (nhc != F3D_RDPHALF_1 && nhc != F3D_RDPHALF_CONT &&
                         nhc != F3D_RDPHALF_2)
                         break;
-                    raw[wi++] = (int32_t)rd32(r, pc + 4);
+                    raw[wi++] = (int32_t)command_word(r, pc + 4);
                     pc += 8;
                 }
                 while (wi < 40)
@@ -1835,7 +2033,7 @@ void f3d_run_dl(GSPState *gsp, RdpFifo *fifo, unsigned int addr,
             break;
 
         default:
-            
+
             /* TEXTURE_RECTANGLE (0xE4) / _FLIP (0xE5) is a 4-word RDP command,
              * but F3D delivers it split: the G_TEXRECT word pair carries the
              * rectangle + tile, and the following two G_RDPHALF commands carry
@@ -1856,15 +2054,15 @@ void f3d_run_dl(GSPState *gsp, RdpFifo *fifo, unsigned int addr,
                  * the exact opcode the build chose does not matter. */
                 for (k = 0; k < 2; k++)
                 {
-                    unsigned int c0 = rd32(r, pc);
+                    unsigned int c0 = command_word(r, pc);
                     int hc = (int)((c0 >> 24) & 0xff);
                     if (hc != F3D_RDPHALF_CONT && hc != F3D_RDPHALF_2 &&
                         hc != F3D_RDPHALF_1)
                         break;
                     if (k == 0)
-                        h_st = rd32(r, pc + 4);
+                        h_st = command_word(r, pc + 4);
                     else
-                        h_dsdt = rd32(r, pc + 4);
+                        h_dsdt = command_word(r, pc + 4);
                     pc += 8;
                 }
                 tr[0] = (int32_t)w0;

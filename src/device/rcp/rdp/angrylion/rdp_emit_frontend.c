@@ -13,6 +13,7 @@
 #include "rdp_emit_rsp.h"
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <math.h>
 #include "rdp_emit_recip.h"
 
@@ -230,6 +231,48 @@ void gsp_seed_matrices(GSPState *s, const unsigned char *dmem,
     load_n64_matrix(s->projection, dmem, projection);
     s->combined_valid = 0;
     s->lights_valid = 0;
+}
+
+void gsp_restore_vertex_records(GSPState *s,const unsigned char *dm,
+                                unsigned int table,unsigned int stride,
+                                int compact_xy_first)
+{
+    unsigned int i,k;
+    for(i=0;i<32u;i++) {
+        GSPVertex *v=&s->vtx[i];
+        unsigned int at=(table&0x1000u)?(table&0xfffu)+i*stride
+            :read_u16_be(dm,table+2u*i)&0xfffu;
+        unsigned int color,st,xy,z,iw;
+        if(at>0x1000u-stride)continue;
+        memset(v,0,sizeof(*v));
+        if(stride==40u) {
+            int32_t *clip[4]={&v->cx,&v->cy,&v->cz,&v->cw};
+            for(k=0;k<4u;k++)*clip[k]=(int32_t)(
+                ((uint32_t)read_u16_be(dm,at+k*2u)<<16)|read_u16_be(dm,at+8u+k*2u));
+            color=16;st=20;xy=24;z=28;iw=32;
+            v->clip=(int32_t)(((uint32_t)read_u16_be(dm,at+36u)<<16)|read_u16_be(dm,at+38u));
+        }else {
+            color=compact_xy_first?8u:0u;st=compact_xy_first?12u:4u;
+            xy=compact_xy_first?0u:8u;z=compact_xy_first?4u:12u;iw=16u;
+            v->cw=65536;
+            if(read_u16_be(dm,at+xy+(compact_xy_first?0u:2u))==0x7fffu)
+                v->clip=compact_xy_first?0x30304000u:0x70700000u;
+        }
+        v->r=read_u8_n64(dm,at+color)<<16;v->g=read_u8_n64(dm,at+color+1u)<<16;
+        v->b=read_u8_n64(dm,at+color+2u)<<16;v->a=read_u8_n64(dm,at+color+3u)<<16;
+        v->sv=(int16_t)read_s16_be(dm,at+st);v->tv=(int16_t)read_s16_be(dm,at+st+2u);
+        v->s=(int32_t)((uint32_t)(int32_t)v->sv<<17);
+        v->t=(int32_t)((uint32_t)(int32_t)v->tv<<17);
+        v->scr_x=(int32_t)((uint32_t)read_s16_be(dm,at+xy)<<14);
+        v->scr_y=(int32_t)((uint32_t)read_s16_be(dm,at+xy+2u)<<14);
+        v->scr_z=(int32_t)(((uint32_t)read_u16_be(dm,at+z)<<16)|read_u16_be(dm,at+z+2u));
+        v->rsp_invw=(int32_t)(((uint32_t)read_u16_be(dm,at+iw)<<16)|read_u16_be(dm,at+iw+2u));
+        /* The GBI1 writer normalizes textures with clip W scaled by the
+         * current perspNorm. A restored screen record needs that value
+         * just as a freshly transformed vertex does. */
+        v->rs_pw=rsp_vtx_scaled_w(v->cw,s->viewport.persp_norm);
+        v->rsp_ok=1;
+    }
 }
 
 void gsp_init(GSPState *s)
@@ -636,6 +679,7 @@ void gsp_set_lookat(GSPState *s, const unsigned char *rdram,
  * normal, so authored normal magnitudes scale the contribution exactly as
  * on the RSP, while light vector magnitudes are normalized away. The pass
  * runs at most once per matrix/light change (lightsValid). */
+static int s_legacy_lighting;
 static void gsp_light_dir_xfrm(GSPState *s)
 {
     int32_t (*M)[4] = s->modelview[s->modelview_top];
@@ -644,7 +688,8 @@ static void gsp_light_dir_xfrm(GSPState *s)
     {
         const int32_t *raw = (k < 0) ? s->lookat_raw[k + 2] : s->light_raw[k];
         int32_t *out       = (k < 0) ? s->lookat[k + 2]     : s->light_dir[k];
-        rsp_light_dir_xfrm_one((const int32_t (*)[4])M, raw, out);
+        if(s_legacy_lighting==2)rsp_light_dir_xfrm_legacy((const int32_t (*)[4])M,raw,out);
+        else rsp_light_dir_xfrm_one((const int32_t (*)[4])M, raw, out);
         if(s_sdk_memory) {
             unsigned int at=0x200u+(unsigned int)(k+2)*24u,j;
             int32_t all[4];rsp_light_dir_xfrm_cached((const int32_t (*)[4])M,raw,all);
@@ -878,7 +923,6 @@ static void acclaim_light(GSPState *s, int32_t ex, int32_t ey, int32_t ez,
 }
 
 static void (*s_vertex_spill)(int);
-static int s_legacy_lighting;
 void gsp_set_legacy_lighting(int on) { s_legacy_lighting=on; }
 static int (*s_vertex_cache)(int,unsigned int,int32_t[4]);
 void gsp_set_vertex_spill(void (*spill)(int)) { s_vertex_spill=spill; }
@@ -1270,6 +1314,10 @@ static void gsp_vertex_internal(GSPState *s, const unsigned char *rdram, unsigne
          * the RSP reject the near geometry slivers a guard-band clipper
          * would otherwise rasterize. */
         gsp_clip_vertex_flags(s, vt);
+        /* This paired NoN resident inserts the W sign into the second
+         * packed flag halfword only. Its first vertex uses SH, which
+         * discards that upper-half flag; generated clip vertices do too. */
+        if(s->clip_near_z<0 && (i&1) && vt->cw<0)vt->clip|=1u<<6;
         rsp_vertex_pair_half((unsigned int)i);
         gsp_vertex_screen(s, vt);
         if(s->clip_reject==1)rsp_rej_project((unsigned int)i,
@@ -1808,7 +1856,10 @@ static void gsp_clip_vertex_flags(const GSPState *st, GSPVertex *vt)
     if (st->clip_no_far)
         fl &= ~((1u << 14) | (1u << 30));
     if(st->clip_near_z<0)
-        fl &= ~((1u<<6)|(1u<<7));
+        /* This paired NoN projector omits negative Z. The caller adds
+         * the W-plane flag only for the second vertex, matching the
+         * resident's asymmetric SH/SW flag stores. */
+        fl = fl & ~((1u<<6)|(1u<<7));
     vt->clip = (int)fl;
 }
 
@@ -1928,17 +1979,24 @@ static void gsp_clip_subdivide(GSPState *st, GSPVertex *out,
     out->s = (int32_t)((uint32_t)(int32_t)out_attr[4] << 17);
     out->t = (int32_t)((uint32_t)(int32_t)out_attr[5] << 17);
     gsp_clip_vertex_flags(st, out);
+    if(rsp_tri_early_writer())rsp_set_vtx_invw_raw(1);
     gsp_vertex_screen(st, out);
+    if(rsp_tri_early_writer())rsp_set_vtx_invw_raw(0);
     rsp_vertex_spill_clip(out->scr_x,out->scr_y,out->scr_z);
     if (st->viewport.dkr_model && (st->geometry_mode & 0x00010000u)
         && !st->fog_off)
         out->a = rsp_vtx_fog_dkr(out->rs_ndc2z, st->fog_m, st->fog_o) << 16;
 }
 
-static int clip_polygon_guard(GSPState *st, GSPVertex *poly, int n)
+static int clip_polygon_guard(GSPState *st, GSPVertex *poly, int n,
+                              const unsigned int original_slots[3])
 {
     GSPVertex tmp[GSP_CLIP_MAX];
+    unsigned int slots[GSP_CLIP_MAX], next_slots[GSP_CLIP_MAX];
+    unsigned int generated_slot=GSP_MAX_VERTICES;
     int cond;
+    int early=rsp_tri_early_writer();
+    if(early)for(cond=0;cond<n;cond++)slots[cond]=original_slots[cond];
     int ncond = st->rs_clip_model ? 5 : 6;
     for (cond = 0; cond < ncond && n > 0; cond++)
     {
@@ -1960,7 +2018,7 @@ static int clip_polygon_guard(GSPState *st, GSPVertex *poly, int n)
              * table row {0,0,1,1}); the gating outcode is the VCH z-lane
              * negative bit instead of the behind-the-eye w bit. */
             cr[2] = (int16_t)(st->clip_near_z>0);
-            if (st->clip_near_z>0)
+            if (st->clip_near_z!=0)
                 mask = 1u << 6;     /* CLIP_NZ */
         }
         if (cond >= 2)  /* the +-x/+-y guard-band planes scale with the ratio */
@@ -2015,11 +2073,23 @@ static int clip_polygon_guard(GSPState *st, GSPVertex *poly, int n)
                     ? ((unsigned int)poly[inx].rs_outcode & rs_cond_mask[cond])
                     : ((unsigned int)poly[inx].clip & mask);
                 if (!f2 && m < GSP_CLIP_MAX)
+                {
+                    if(early)next_slots[m]=slots[i];
                     tmp[m++] = poly[i];
+                }
                 if ((f2 != fn) && m < GSP_CLIP_MAX)
                 {
                     const GSPVertex *onv  = f2 ? &poly[inx] : &poly[i];
                     const GSPVertex *offv = f2 ? &poly[i]   : &poly[inx];
+                    /* Early Fast3D orders intersection operands by the
+                     * resident record address (IMEM 7dc..7ec), rather
+                     * than by inside/outside classification. Reversing
+                     * them changes reciprocal and interpolation rounding. */
+                    if(early) {
+                        onv=slots[i]>slots[inx]?&poly[i]:&poly[inx];
+                        offv=slots[i]>slots[inx]?&poly[inx]:&poly[i];
+                        next_slots[m]=generated_slot++;
+                    }
                     gsp_clip_subdivide(st, &tmp[m], onv, offv, cr);
                     m++;
                 }
@@ -2053,7 +2123,10 @@ static int clip_polygon_guard(GSPState *st, GSPVertex *poly, int n)
         }
         }
         for (i = 0; i < m; i++)
+        {
             poly[i] = tmp[i];
+            if(early)slots[i]=next_slots[i];
+        }
         n = m;
         if (n < 3)
             return 0;
@@ -2224,7 +2297,7 @@ int gsp_line(GSPState *s, int32_t *cmd, int i0, int i1, int width_q)
             if (cond == 0)
             {
                 cr[2] = (int16_t)(s->clip_near_z>0);
-                if (s->clip_near_z>0)
+                if (s->clip_near_z!=0)
                     mask = 1u << 6;
             }
             if (cond >= 2)
@@ -2426,7 +2499,7 @@ int gsp_triangle_with_texrecip(GSPState *s, int32_t *cmd, int i0, int i1, int i2
     else if (s->rs_clip_model
              ? (((unsigned int)a->rs_outcode | (unsigned int)b->rs_outcode
                  | (unsigned int)c->rs_outcode) & 0x4343u)
-             : ((oa | ob | oc) & (s->clip_near_z>0
+             : ((oa | ob | oc) & (s->clip_near_z!=0
                           ? ((GSP_CLIP_TRIGGER & ~(1u << 7)) | (1u << 6))
                           : GSP_CLIP_TRIGGER)))
     {
@@ -2436,7 +2509,10 @@ int gsp_triangle_with_texrecip(GSPState *s, int32_t *cmd, int i0, int i1, int i2
          * not the planes of its visible portion, so scissoring is not
          * equivalent), and steep overhang past the guard band loses
          * coefficient precision. */
-        np = clip_polygon_guard(s, poly, np);
+        {
+            unsigned int slots[3]={(unsigned int)i0,(unsigned int)i1,(unsigned int)i2};
+            np = clip_polygon_guard(s, poly, np, slots);
+        }
         if (np < 3)
             return 0;
     }

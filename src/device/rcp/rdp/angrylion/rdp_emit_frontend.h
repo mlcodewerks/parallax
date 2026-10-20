@@ -63,6 +63,10 @@ void gsp_set_clip_spill(void (*spill)(const GSPVertex *, const GSPVertex *));
 void gsp_set_vertex_spill(void (*spill)(int));
 void gsp_set_legacy_lighting(int on);
 void gsp_set_vertex_cache(int (*cache)(int,unsigned int,int32_t[4]));
+struct GSPState;
+void gsp_restore_vertex_records(struct GSPState *s, const unsigned char *dmem,
+                                unsigned int table, unsigned int stride,
+                                int compact_xy_first);
 
 /* VCH clip outcode bits, matching the F3DEX2 VTX_CLIP screen layout:
  * N flags at bits 4..7 (x, y, z, w), P flags at bits 12..15. The reject

@@ -43,10 +43,7 @@ static const struct retro_variable options[] = {
     {"wtfn64_glrdp_vi_gamma", "GLRDP VI gamma correction (restart required); enabled|disabled"},
     {"wtfn64_glrdp_vi_gamma_dither", "GLRDP VI gamma dithering (restart required); enabled|disabled"},
 #endif
-    {"wtfn64_rsp_hle", "RSP HLE (restart required); enabled|disabled"},
     {"wtfn64_cpu_core", "CPU core (restart required); " CPU_CORES},
-    {"wtfn64_lle_graphics", "Send display lists to LLE RSP (restart required); disabled|enabled"},
-    {"wtfn64_lle_audio", "Send audio lists to LLE RSP (restart required); disabled|enabled"},
     {"wtfn64_timing", "Timing accuracy (restart required); fast|accurate"},
     {"wtfn64_angrylion_threads", "Angrylion rendering threads (restart required); 6|2|4|8|10|auto"},
     {"wtfn64_performance_cores", "Performance cores only (restart required); enabled|disabled"},
@@ -156,12 +153,6 @@ void renderer_register_options(retro_environment_t environment)
                 d->info = "Accurate uses full CPU cache contents and detailed per-cycle timing. Fast tracks cache tags, instruction interlocks and bus delays while accessing RAM directly. Both time RSP tasks and RDP commands by their work, including pipeline and DMA waits. Restart content to apply.";
             if (!strcmp(d->key, "wtfn64_cpu_core"))
                 d->info = "Select the CPU execution core. All choices use the same instruction behavior and Timing accuracy setting. Restart content to apply.";
-            if (!strcmp(d->key, "wtfn64_rsp_hle"))
-                d->info = "Use HLE for supported RSP microcodes. Unsupported RSP tasks use LLE. Graphics/audio LLE overrides apply to their respective tasks. Restart content to apply.";
-            if (!strcmp(d->key, "wtfn64_lle_graphics"))
-                d->info = "Force display lists through the LLE RSP instead of the HLE microcode emitters. Restart content to apply.";
-            if (!strcmp(d->key, "wtfn64_lle_audio"))
-                d->info = "Force audio lists through the LLE RSP instead of HLE audio processing. Restart content to apply.";
             if (strstr(d->key, "-pak")) {
                 d->category_key = "input";
                 d->info = "Choose the accessory attached to this controller. A Memory Pak allows games to save progress.";
@@ -241,9 +232,9 @@ void renderer_read_options(retro_environment_t env)
     struct renderer_settings *s = &renderer_settings;
     const char *v;
     memset(s, 0, sizeof(*s));
-    s->rsp_hle = toggle(env, "wtfn64_rsp_hle", true);
-    s->lle_graphics = toggle(env, "wtfn64_lle_graphics", false);
-    s->lle_audio = toggle(env, "wtfn64_lle_audio", false);
+    /* Task detection selects HLE or native RSP automatically. Ignore old
+     * frontend overrides so stale core-option files cannot disable it. */
+    s->rsp_hle = true;
     v = value(env, "wtfn64_timing", "fast");
     s->per_cycle_timing = strcmp(v, "accurate") == 0;
     s->component_timing = true;

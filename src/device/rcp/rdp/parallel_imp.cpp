@@ -382,6 +382,7 @@ bool vk_create_device(struct retro_vulkan_context *frontend_context,
                       const VkPhysicalDeviceFeatures *required_features)
 {
 	Vulkan::Context::SystemHandles handles = {};
+	const VkPhysicalDeviceFeatures no_features = {};
 	(void)required_device_layers;
 	(void)num_required_device_layers;
 
@@ -393,7 +394,7 @@ bool vk_create_device(struct retro_vulkan_context *frontend_context,
 	if (!context->init_device_from_instance(instance, gpu, surface,
 	                                        required_device_extensions,
 	                                        num_required_device_extensions,
-	                                        required_features))
+	                                        required_features ? required_features : &no_features))
 	{
 		context.reset();
 		return false;

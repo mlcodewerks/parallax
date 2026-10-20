@@ -246,6 +246,7 @@ static void send_alist_to_audio_plugin(struct hle_t* hle)
 static void send_dlist_to_gfx_plugin(struct hle_t* hle)
 {
     uint32_t text = *dmem_u32(hle, TASK_UCODE) & 0x7fffffu;
+    if(*dmem_u32(hle,TASK_FLAGS)&1u)*hle->sp_status&=~SP_STATUS_SIG1;
     /* ZSortp's resident initialization writes 0x42800 to SP_STATUS:
      * clear SIG1/SIG2, set SIG4. The final native exit sets SIG2 again;
      * the one-shot completion below supplies that final task-done bit. */
@@ -581,6 +582,53 @@ static void unknown_task(struct hle_t* hle)
     }
 }
 
+/* These continuations belong to the task that already owns the SP. Repeating
+ * task detection at every poll scans the same resident code hundreds of
+ * thousands of times per frame sequence. Reuse the validated task identity;
+ * command bounds checks, signal handling and cycle charges still run. */
+enum hle_graphics_resume hle_graphics_resume_pending(struct hle_t* hle)
+{
+    struct cached_ucodes_t *cache = &hle->cached_ucodes;
+    uint32_t text, data, bytes;
+    int i;
+    if (!(l_zboss_running || l_streaming_gfx_running || l_rs_gfx_running ||
+          l_naboo_gfx_running) || !cache->count)
+        return HLE_RESUME_NONE;
+    text = *dmem_u32(hle, TASK_UCODE);
+    data = *dmem_u32(hle, TASK_UCODE_DATA);
+    bytes = *dmem_u32(hle, TASK_UCODE_DATA_SIZE);
+    for (i = cache->count - 1; i >= 0; i--) {
+        const struct ucode_info_t *entry = &cache->infos[i];
+        if (entry->uc_start != text || entry->uc_dstart != data || entry->uc_dsize != bytes)
+            continue;
+        if (entry->uc_pfunc == zboss_gfx_task && l_zboss_running) return HLE_RESUME_ZBOSS;
+        if (entry->uc_pfunc == streaming_gfx_task && l_streaming_gfx_running) return HLE_RESUME_STREAMING;
+        if (entry->uc_pfunc == rs_gfx_task && l_rs_gfx_running) return HLE_RESUME_RS;
+        if (entry->uc_pfunc == naboo_gfx_task && l_naboo_gfx_running) return HLE_RESUME_NABOO;
+        break;
+    }
+    return HLE_RESUME_NONE;
+}
+
+void hle_resume_graphics(struct hle_t* hle, enum hle_graphics_resume resume,
+                         unsigned int checksum)
+{
+    ucode_func_t handler;
+    switch (resume) {
+    case HLE_RESUME_STREAMING: handler = streaming_gfx_task; break;
+    case HLE_RESUME_RS: handler = rs_gfx_task; break;
+    case HLE_RESUME_ZBOSS: handler = zboss_gfx_task; break;
+    case HLE_RESUME_NABOO: handler = naboo_gfx_task; break;
+    default: hle_execute(hle); return;
+    }
+    hle_timing_begin();
+    hle_timing_ucode(checksum);
+    timing_identify(handler);
+    hle->alist_chunk_capacity = 0;
+    audit_capture_task(hle);
+    handler(hle);
+}
+
 static ucode_func_t try_audio_task_detection(struct hle_t* hle)
 {
     /* identify audio ucode by using the content of ucode_data */
@@ -789,7 +837,7 @@ static ucode_func_t task_detection(struct hle_t* hle)
         uc_pfunc = try_normal_task_detection(hle);
         if (uc_pfunc)
             return uc_pfunc;
-        
+
         if (type == 1) {
             if (hle->hle_gfx) {
                 return &send_dlist_to_gfx_plugin;

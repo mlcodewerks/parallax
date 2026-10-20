@@ -340,6 +340,46 @@ static int s_stream_active;
 static int s_stream_stalled;
 static unsigned int s_stream_pc;
 
+unsigned int f3dex2_restore_yield(GSPState *s,const unsigned char *dm)
+{
+    unsigned int i,k,texture=rd_u32_be(dm,0x1e4u),scale=rd_u32_be(dm,0x1e8u);
+    unsigned int stride=(unsigned int)(uint16_t)(
+        *(const uint16_t *)(dm+(0x382u^2u))-*(const uint16_t *)(dm+(0x380u^2u)));
+    for(i=0;i<16;i++)s_seg_table[i]=rd_u32_be(dm,0xf8u+i*4u);
+    f3dex2_set_othermode_init(rd_u32_be(dm,0xc8u),rd_u32_be(dm,0xccu));
+    gsp_set_geometry_mode(s,rd_u32_be(dm,0x1ecu));
+    gsp_set_texture(s,scale>>16,scale&0xffffu,(texture>>8)&7u,(texture>>11)&7u,0,0);
+    s_textured=(texture&2u)!=0;s_zbuffered=(s->geometry_mode&1u)!=0;
+    gsp_seed_matrices(s,dm,0,64);
+    for(i=0;i<4;i++)gsp_force_matrix_chunk(s,dm,0x80u+i*16u,i*16u);
+    s->combined_valid=dm[0x1d9u^3u]!=0;
+    s->mtx_stack_ptr=rd_u32_be(dm,0xf4u);
+    gsp_set_viewport(s,dm,0xe0u);
+    s->viewport.persp_norm=*(const uint16_t *)(dm+(0xdcu^2u));
+    s->fog_m=(int16_t)(rd_u32_be(dm,0xd0u)>>16);s->fog_o=(int16_t)rd_u32_be(dm,0xd0u);
+    gsp_set_num_lights(s,dm[0x1ddu^3u]/24u);
+    for(i=0;i<2;i++) {
+        gsp_set_lookat(s,dm,0x1f0u+i*24u,i);
+        for(k=0;k<3;k++)s->lookat[i][k]=(signed char)dm[(0x200u+i*24u+k)^3u];
+    }
+    for(i=0;i<8;i++) {
+        gsp_set_light(s,dm,0x220u+i*24u,i);
+        for(k=0;k<3;k++)s->light_dir[i][k]=(signed char)dm[(0x230u+i*24u+k)^3u];
+    }
+    s->lights_valid=dm[0x1dcu^3u]!=0;
+    s->scis_w0=rd_u32_be(dm,0xc0u);s->scis_w1=rd_u32_be(dm,0xc4u);s->scis_valid=1;
+    if(stride==20u) {
+        s->clip_reject=1;
+        s_ucode_class|=UCODE_REJRECIP;
+    }
+    gsp_restore_vertex_records(s,dm,0x380u,stride==20u?20u:40u,0);
+    s_dl_sp=dm[0xdeu^3u]/4u;
+    if(s_dl_sp>DL_MAX_DEPTH)s_dl_sp=DL_MAX_DEPTH;
+    for(i=0;i<(unsigned int)s_dl_sp;i++)s_dl_stack[i]=rd_u32_be(dm,0x138u+i*4u)&0x7fffffu;
+    s_stream_resume=1;
+    return rd_u32_be(dm,0xbf8u)&0x7fffffu;
+}
+
 /* end the current display-list level: pop the caller, or stop the walk */
 #define DL_RETURN() \
     do { if (fifo->fetch_dl) fifo->fetch_dl(~0u, 0); \

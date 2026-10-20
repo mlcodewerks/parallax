@@ -4,6 +4,7 @@
 #include "primitive_footprint.hpp"
 #include "primitive_scheduler.hpp"
 #include "texture_atlas.hpp"
+#include "texture_decode_cache.hpp"
 #include "framebuffer_manager.hpp"
 #include "gl_loader.hpp"
 #include "n64_memory.hpp"
@@ -38,7 +39,7 @@ class RDPRenderer {
     struct SubmissionStats {
         std::uint64_t primitives = 0, draws = 0, batches = 0, batched_primitives = 0;
         std::uint64_t atlas_hits = 0, atlas_uploads = 0, atlas_resets = 0, standalone_uploads = 0;
-        std::uint64_t framebuffer_tiles = 0, framebuffer_readbacks = 0;
+        std::uint64_t framebuffer_tiles = 0, framebuffer_readbacks = 0, decode_cache_hits = 0;
         std::uint64_t queues = 0, queue_flushes = 0, state_flushes = 0;
     };
     const SubmissionStats &submission_stats() const { return stats_; }
@@ -73,6 +74,7 @@ class RDPRenderer {
     GLuint primitive_ubo_ = 0, atlas_texture_ = 0;
     std::size_t ubo_offset_ = 0, ubo_slot_bytes_ = 0;
     TextureAtlas atlas_;
+    TextureDecodeCache texture_decode_cache_;
     std::array<TextureAtlas::Region, 8> tile_regions_{};
     bool standalone_tiles_ = false, atlas_full_ = false;
     unsigned current_tile_count_ = 1;

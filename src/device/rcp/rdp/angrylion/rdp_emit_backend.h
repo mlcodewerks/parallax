@@ -49,6 +49,8 @@ typedef struct RdpEmitBackend
     /* Native FIFO boot inspects END, CURRENT and STATUS before choosing
      * its first output cursor. NULL means an idle, reset DPC. */
     void           (*get_dpc_state)(unsigned int state[3]);
+    /* Publish already stored guest RAM/DMEM commands while DP is frozen. */
+    void           (*publish_fifo)(unsigned int base, unsigned int bytes, int xbus);
 
 } RdpEmitBackend;
 

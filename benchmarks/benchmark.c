@@ -37,6 +37,7 @@ static const char *g_directory = ".";
 static uint64_t g_vi_count;
 static void (*g_debug_vi)(uint32_t[14]);
 static FILE *g_vi_trace;
+static FILE *g_video_features, *g_audio_pcm;
 
 static double benchmark_seconds(void)
 {
@@ -119,6 +120,11 @@ static bool environment_callback(unsigned command, void *data)
             return true;
 
 #ifdef _WIN32
+        case RETRO_ENVIRONMENT_GET_PREFERRED_HW_RENDER:
+            *(unsigned *)data = getenv("M64P_BENCH_GL_API") &&
+                !strcmp(getenv("M64P_BENCH_GL_API"), "gles3")
+                ? RETRO_HW_CONTEXT_OPENGLES3 : RETRO_HW_CONTEXT_OPENGL_CORE;
+            return true;
         case RETRO_ENVIRONMENT_SET_HW_RENDER:
             return bench_request_gl((struct retro_hw_render_callback *)data);
 #endif
@@ -136,6 +142,14 @@ static bool environment_callback(unsigned command, void *data)
         case RETRO_ENVIRONMENT_GET_VARIABLE_UPDATE:
             *(bool *)data = false;
             return true;
+
+        case RETRO_ENVIRONMENT_SET_SYSTEM_AV_INFO:
+        {
+            const struct retro_system_av_info *info = data;
+            fprintf(stderr, "AV timing fps=%.9f sample_rate=%.9f\n",
+                    info->timing.fps, info->timing.sample_rate);
+            return true;
+        }
 
         case RETRO_ENVIRONMENT_GET_INPUT_BITMASKS:
             return true;
@@ -156,6 +170,7 @@ static void video_callback(const void *data, unsigned width, unsigned height, si
 {
     size_t count;
     unsigned x, y;
+    bool capture;
     ++g_vi_count;
     if (g_vi_trace && g_debug_vi) {
         uint32_t regs[14];
@@ -164,7 +179,7 @@ static void video_callback(const void *data, unsigned width, unsigned height, si
         for (unsigned i=0; i<14; ++i) fprintf(g_vi_trace, ",%08x", regs[i]);
         fputc('\n', g_vi_trace);
     }
-    if (!g_capture) return;
+    if (!g_capture && !g_video_features) return;
     /* A NULL callback repeats the displayed image; some cores report zero
      * dimensions on that callback. Keep the preceding display dimensions. */
     if (!data && (!width || !height)) {width=g_video_width;height=g_video_height;}
@@ -187,8 +202,9 @@ static void video_callback(const void *data, unsigned width, unsigned height, si
         g_video_width = width; g_video_height = height;
     }
     if (data == RETRO_HW_FRAME_BUFFER_VALID) {g_video_width=width;g_video_height=height;}
-    if (g_vi_count != g_capture_force_at &&
-        (g_vi_count < g_gameplay_start || (g_vi_count-g_gameplay_start) % g_capture_interval)) return;
+    capture = g_capture && (g_vi_count == g_capture_force_at ||
+        (g_vi_count >= g_gameplay_start && (g_vi_count-g_gameplay_start) % g_capture_interval == 0));
+    if (!capture && !g_video_features) return;
 #ifdef _WIN32
     if (bench_gl_active) {
         uint8_t *rgba = (uint8_t *)malloc((size_t)width * height * 4);
@@ -202,6 +218,17 @@ static void video_callback(const void *data, unsigned width, unsigned height, si
         g_video_width=width; g_video_height=height;
     }
 #endif
+    if (g_video_features && g_video_width && g_video_height) {
+        uint8_t feature[96 * 64 * 3];
+        for (y=0; y<64; ++y) for (x=0; x<96; ++x) {
+            unsigned sx=(x*g_video_width+g_video_width/2)/96;
+            unsigned sy=(y*g_video_height+g_video_height/2)/64;
+            memcpy(feature+(y*96+x)*3,g_video_rgb+((size_t)sy*g_video_width+sx)*3,3);
+        }
+        if (fwrite(&g_vi_count,sizeof(g_vi_count),1,g_video_features)!=1 ||
+            fwrite(feature,1,sizeof(feature),g_video_features)!=sizeof(feature)) exit(4);
+    }
+    if (!capture) return;
     if (g_video_width && g_video_height) {
         char path[1024]; FILE *file;
         snprintf(path,sizeof(path),"%s-%06llu.ppm",g_capture,(unsigned long long)g_vi_count);
@@ -217,6 +244,7 @@ static void video_callback(const void *data, unsigned width, unsigned height, si
 
 static size_t audio_batch_callback(const int16_t *data, size_t frames)
 {
+    if (g_audio_pcm && fwrite(data,2*sizeof(*data),frames,g_audio_pcm)!=frames) exit(4);
     g_audio_frames += frames;
     g_audio_hash = fnv1a_update(g_audio_hash, data, frames * 2 * sizeof(*data));
     g_audio_interval_frames += frames;
@@ -227,6 +255,7 @@ static size_t audio_batch_callback(const int16_t *data, size_t frames)
 static void audio_callback(int16_t left, int16_t right)
 {
     const int16_t samples[2] = {left, right};
+    if (g_audio_pcm && fwrite(samples,sizeof(samples),1,g_audio_pcm)!=1) exit(4);
 
     ++g_audio_frames;
     g_audio_hash = fnv1a_update(g_audio_hash, samples, sizeof(samples));
@@ -318,6 +347,16 @@ int main(int argc, char **argv)
     uint64_t control_end=0;
     uint64_t state_vi=getenv("M64P_BENCH_STATE_ROUNDTRIP") ? strtoull(getenv("M64P_BENCH_STATE_ROUNDTRIP"),NULL,0) : 0;
     bool state_done=false;
+    const char *pin = getenv("M64P_BENCH_PIN_BYTE");
+    unsigned long long pin_start = 0;
+    unsigned pin_offset = 0, pin_value = 0;
+    if (pin) {
+        char extra;
+        if (sscanf(pin, "%llu,%x,%u%c", &pin_start, &pin_offset, &pin_value, &extra) != 3 || pin_value > 255) {
+            fprintf(stderr, "invalid RAM pin (start_vi,hex_host_offset,byte)\n");
+            return 2;
+        }
+    }
 
     void (*retro_set_environment)(retro_environment_t) = NULL;
     void (*retro_set_video_refresh)(retro_video_refresh_t) = NULL;
@@ -333,6 +372,10 @@ int main(int argc, char **argv)
     void *(*retro_get_memory_data)(unsigned) = NULL;
     size_t (*retro_get_memory_size)(unsigned) = NULL;
     void (*retro_debug_timing)(uint32_t[12]) = NULL;
+    bool (*retro_debug_peek_word)(uint32_t, uint32_t *) = NULL;
+    FILE *watch = NULL;
+    uint32_t watch_addresses[64];
+    unsigned watch_count = 0;
     size_t (*retro_serialize_size)(void) = NULL;
     bool (*retro_serialize)(void *, size_t) = NULL;
     bool (*retro_unserialize)(const void *, size_t) = NULL;
@@ -344,6 +387,15 @@ int main(int argc, char **argv)
     }
 
     g_capture = getenv("M64P_BENCH_CAPTURE");
+    if (getenv("M64P_BENCH_VIDEO_FEATURES")) {
+        g_video_features=fopen(getenv("M64P_BENCH_VIDEO_FEATURES"),"wb");
+        if (!g_video_features) {perror("video features");return 2;}
+        fputs("BTRGB1\n96 64\n",g_video_features);
+    }
+    if (getenv("M64P_BENCH_AUDIO_PCM")) {
+        g_audio_pcm=fopen(getenv("M64P_BENCH_AUDIO_PCM"),"wb");
+        if (!g_audio_pcm) {perror("audio PCM");return 2;}
+    }
     if (getenv("M64P_BENCH_CAPTURE_INTERVAL")) g_capture_interval = (unsigned)strtoul(getenv("M64P_BENCH_CAPTURE_INTERVAL"),NULL,10);
     if (!g_capture_interval) return 2;
     if(getenv("M64P_BENCH_INPUT")&&control_path) {fprintf(stderr,"input replay and interactive control are mutually exclusive\n");return 2;}
@@ -430,14 +482,19 @@ int main(int argc, char **argv)
     LOAD_SYMBOL(retro_run);
     LOAD_SYMBOL(retro_get_memory_data);
     LOAD_SYMBOL(retro_get_memory_size);
+#ifdef M64P_BENCH_OPTIONAL_DEBUG
+    retro_debug_timing = (void (*)(uint32_t[12]))dlsym(core, "retro_debug_timing");
+#else
     LOAD_SYMBOL(retro_debug_timing);
+#endif
     if (getenv("M64P_BENCH_VI_TRACE")) {
         g_debug_vi = (void (*)(uint32_t[14]))dlsym(core, "retro_debug_vi");
         g_vi_trace = fopen(getenv("M64P_BENCH_VI_TRACE"), "w");
         if (!g_debug_vi || !g_vi_trace) { fprintf(stderr, "VI trace unavailable\n"); return 4; }
         fputs("vi,status,origin,width,intr,current,burst,vsync,hsync,leap,hstart,vstart,vburst,xscale,yscale\n", g_vi_trace);
     }
-    if(state_vi) {
+    const char *state_load = getenv("M64P_BENCH_STATE_LOAD");
+    if(state_vi || state_load) {
         LOAD_SYMBOL(retro_serialize_size);
         LOAD_SYMBOL(retro_serialize);
         LOAD_SYMBOL(retro_unserialize);
@@ -472,6 +529,27 @@ int main(int argc, char **argv)
     bench_gl_reset();
     if (!bench_gl_check()) return 4;
     ram_size = retro_get_memory_size(RETRO_MEMORY_SYSTEM_RAM);
+    if (getenv("M64P_BENCH_WATCH_WORDS")) {
+        const char *at = getenv("M64P_BENCH_WATCH_WORDS");
+        *(void **)(&retro_debug_peek_word) = dlsym(core, "retro_debug_peek_word");
+        if (!retro_debug_peek_word || !getenv("M64P_BENCH_WATCH_TRACE")) return 2;
+        watch = fopen(getenv("M64P_BENCH_WATCH_TRACE"), "w");
+        if (!watch) return 2;
+        fputs("vi", watch);
+        while (*at) {
+            char *end;
+            unsigned long address = strtoul(at, &end, 16);
+            if (end == at || (*end && *end != ',') || watch_count == 64 ||
+                address > UINT32_MAX || !retro_debug_peek_word((uint32_t)address, NULL)) return 2;
+            watch_addresses[watch_count++] = (uint32_t)address;
+            fprintf(watch, ",%08lx", address);
+            at = *end ? end+1 : end;
+        }
+        if (!watch_count) return 2;
+        fputc('\n', watch);
+    }
+    if (pin && pin_offset >= ram_size) { fprintf(stderr, "RAM pin exceeds memory\n"); return 2; }
+    if (pin) fprintf(stderr, "RAM pin start=%llu offset=%x byte=%u\n", pin_start, pin_offset, pin_value);
     fprintf(stderr, "loaded ram=%zu target=%llu interval=%llu\n", ram_size,
             (unsigned long long)target_vi, (unsigned long long)interval);
 
@@ -485,7 +563,7 @@ int main(int argc, char **argv)
     if (frame_times_path) {
         frame_times = fopen(frame_times_path, "w");
         if (!frame_times) { fprintf(stderr, "frame timing open failed\n"); return 4; }
-        fputs("start_vi,end_vi,retro_run_ms\n", frame_times);
+        fputs("start_vi,end_vi,retro_run_ms,gpu_finish_ms\n", frame_times);
     }
     while (g_vi_count < target_vi)
     {
@@ -495,22 +573,71 @@ int main(int argc, char **argv)
         const uint64_t start_vi = g_vi_count;
         const double frame_start = frame_times ? benchmark_seconds() : 0.0;
         retro_run();
+        if (state_load) {
+            if (gpu_sync) bench_gl_finish();
+            size_t bytes = retro_serialize_size();
+            void *state = malloc(bytes);
+            FILE *file = fopen(state_load, "rb");
+            bool ok = state && file && fread(state, 1, bytes, file) == bytes;
+            if (file) fclose(file);
+            if (!ok || !retro_unserialize(state, bytes)) {
+                free(state); fprintf(stderr, "initial savestate load failed\n"); return 4;
+            }
+            free(state);
+            g_vi_count = strtoull(getenv("M64P_BENCH_STATE_LOAD_VI") ? getenv("M64P_BENCH_STATE_LOAD_VI") : "0", NULL, 0);
+            state_load = NULL;
+            continue;
+        }
+        const double gpu_start = frame_times ? benchmark_seconds() : 0.0;
         if (gpu_sync) bench_gl_finish();
+        const double gpu_ms = frame_times && gpu_sync ? (benchmark_seconds()-gpu_start)*1000.0 : 0.0;
         if(state_vi&&!state_done&&g_vi_count>=state_vi) {
             size_t bytes=retro_serialize_size();void *state=malloc(bytes);
-            if(!bytes||!state||!retro_serialize(state,bytes)||!retro_unserialize(state,bytes)) {
+            if(!bytes||!state||!retro_serialize(state,bytes)) {
                 free(state);fprintf(stderr,"savestate roundtrip failed at VI %llu\n",(unsigned long long)g_vi_count);return 4;
+            }
+            const char *dump = getenv("M64P_BENCH_STATE_DUMP");
+            if (dump) {
+                FILE *file = fopen(dump, "wb");
+                bool ok = file && fwrite(state, 1, bytes, file) == bytes;
+                if (file) fclose(file);
+                if (!ok) { free(state); fprintf(stderr, "savestate dump failed\n"); return 4; }
+            }
+            if (!getenv("M64P_BENCH_STATE_SAVE_ONLY") && !retro_unserialize(state, bytes)) {
+                free(state); fprintf(stderr, "savestate restore failed\n"); return 4;
+            }
+            if (dump && !getenv("M64P_BENCH_STATE_SAVE_ONLY")) {
+                char path[4096]; snprintf(path, sizeof(path), "%s.restored", dump);
+                FILE *file = fopen(path, "wb");
+                bool ok = retro_serialize(state, bytes) && file && fwrite(state, 1, bytes, file) == bytes;
+                if (file) fclose(file);
+                if (!ok) { free(state); fprintf(stderr, "restored savestate dump failed\n"); return 4; }
             }
             free(state);state_done=true;
             fprintf(stderr,"savestate roundtrip at VI %llu: %zu bytes\n",(unsigned long long)g_vi_count,bytes);
         }
         if (frame_times)
-            fprintf(frame_times, "%llu,%llu,%.6f\n", (unsigned long long)start_vi,
-                    (unsigned long long)g_vi_count, (benchmark_seconds()-frame_start)*1000.0);
+            fprintf(frame_times, "%llu,%llu,%.6f,%.6f\n", (unsigned long long)start_vi,
+                    (unsigned long long)g_vi_count, (benchmark_seconds()-frame_start)*1000.0, gpu_ms);
         if (!bench_gl_check()) return 4;
 
         if (!ram)
             ram = retro_get_memory_data(RETRO_MEMORY_SYSTEM_RAM);
+
+        if (watch) {
+            fprintf(watch, "%llu", (unsigned long long)g_vi_count);
+            for (unsigned i = 0; i < watch_count; ++i) {
+                uint32_t value;
+                if (!retro_debug_peek_word(watch_addresses[i], &value)) return 4;
+                fprintf(watch, ",%u", value);
+            }
+            fputc('\n', watch);
+        }
+
+        /* Optional fixture setup for unattended long gameplay captures. This
+         * changes only the test game's RAM, never the core or ROM image. */
+        if (pin && ram && g_vi_count >= pin_start)
+            ((uint8_t *)ram)[pin_offset] = (uint8_t)pin_value;
 
         if (g_vi_count && g_vi_count != last_logged_vi &&
             ((g_vi_count < g_gameplay_start ? g_vi_count % interval : (g_vi_count-g_gameplay_start) % interval) == 0 || g_vi_count == target_vi))
@@ -525,7 +652,7 @@ int main(int argc, char **argv)
                 if (!dump || fwrite(ram,1,ram_size,dump)!=ram_size) { fprintf(stderr,"RAM dump failed\n"); return 4; }
                 fclose(dump);
             }
-            retro_debug_timing(timing);
+            if (retro_debug_timing) retro_debug_timing(timing);
             printf("%llu,%016llx,%llu,%016llx,%08x,%u,%d,%u,%08x,%u,%u,%u,%08x,%08x,%u,%u,%016llx,%llu,%016llx\n",
                    (unsigned long long)g_vi_count, (unsigned long long)ram_hash,
                    (unsigned long long)g_audio_frames, (unsigned long long)g_audio_hash,
@@ -543,6 +670,9 @@ int main(int argc, char **argv)
             (unsigned long long)g_audio_frames);
 
     retro_unload_game();
+    if (watch) fclose(watch);
+    if (g_video_features) fclose(g_video_features);
+    if (g_audio_pcm) fclose(g_audio_pcm);
     bench_gl_close();
     free(g_video_rgb);
     if(control)fclose(control);

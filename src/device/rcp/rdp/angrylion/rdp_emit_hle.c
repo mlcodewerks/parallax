@@ -143,6 +143,7 @@ static unsigned int s_ring_tail, s_ring_scissor;
 static unsigned int s_ring_attr_spill;
 static unsigned int s_ring_group_active;
 static unsigned int s_ring_split_prefix;
+static unsigned int s_ring_reserve_before;
 static unsigned int s_ring_vertex_table;
 static unsigned int s_ring_dl_base, s_ring_dl_bytes;
 static unsigned int s_ring_dl_end, s_ring_dl_pc, s_ring_dl_cmd, s_ring_dl_valid;
@@ -278,6 +279,13 @@ static void guest_ring_drain(void)
     if (s_zb_ring_pos <= s_backend->get_rdram_size()
         && bytes <= s_backend->get_rdram_size() - s_zb_ring_pos)
         memcpy(ram + s_zb_ring_pos, dm + s_ring_stage[bank], bytes);
+    /* A frozen DP still accepts the producer's DMA and END writes. Keep
+     * those commands in the native guest FIFO; unfreezing consumes them
+     * directly from RAM, so no transient host buffer must outlive this call. */
+    if(!(state&RING_OUTPUT_ONLY) && s_backend->get_dpc_state && s_backend->publish_fifo) {
+        unsigned int dp[3];s_backend->get_dpc_state(dp);
+        if(dp[2]&2u)s_backend->publish_fifo(s_zb_ring_pos,bytes,0);
+    }
     s_zb_ring_pos += bytes;
     if(!rsp_graphics_sdk_one(5)||!rsp_graphics_sdk_one(7))memcpy(dm+0xf0u,&s_zb_ring_pos,4);
     if (s_ring_stage[0] != s_ring_stage[1]) bank ^= 1u;
@@ -362,11 +370,18 @@ static void guest_ring_write(int32_t *words, unsigned int count)
     }
     /* GBI1 forwards each TEXRECT half through its own eight-byte DMA.
      * The RDP still receives one four-word packet in the host batch. */
-    if ((state & RING_KIND) == RING_GBI1 && !(state & RING_BUFFERED) &&
+    if ((state & RING_KIND) == RING_GBI1 &&
+        (!(state & RING_BUFFERED) || s_ring_reserve_before) &&
         count == 4 && (op == 0x24u || op == 0x25u)) {
         guest_ring_write(words, 2);
         guest_ring_write(words + 2, 2);
         return;
+    }
+    if(s_ring_reserve_before && used+bytes>s_ring_limit) {
+        guest_ring_drain();
+        state=(unsigned int)s_zb_ring_live;
+        used=state&0xfffu;
+        stage=s_ring_stage[(state>>12)&1u];
     }
     if (!(state & RING_KIND) || stage + used > 0x1000u
         || bytes > 0x1000u - stage - used) return;
@@ -378,6 +393,10 @@ static void guest_ring_write(int32_t *words, unsigned int count)
         words[1] = (int32_t)read_dmem_u32(s_backend->get_dmem(), stage + used + 4u);
     memcpy(s_backend->get_dmem() + stage + used, words, bytes);
     if ((state & RING_KIND) == RING_XBUS) {
+        if(s_backend->get_dpc_state && s_backend->publish_fifo) {
+            unsigned int dp[3];s_backend->get_dpc_state(dp);
+            if(dp[2]&2u)s_backend->publish_fifo(s_zb_ring_pos,bytes,1);
+        }
         s_zb_ring_pos += bytes;
         if (s_zb_ring_pos > s_zb_ring_end) s_zb_ring_pos = s_zb_ring_base;
         return;
@@ -422,6 +441,7 @@ static void guest_ring_config(RdpFifo *fifo, unsigned int text, int resume,
     fifo->group = 0;
     s_ring_group_active = 0;
     s_ring_split_prefix = 0;
+    s_ring_reserve_before = 0;
     if (!data_skip && !resume) s_ring_dl_valid = 0;
     fifo->write = 0;
     if (!resume) s_zb_ring_live = 0;
@@ -430,6 +450,16 @@ static void guest_ring_config(RdpFifo *fifo, unsigned int text, int resume,
      * sequences and must not acquire guest-RAM command writes. */
     for (at = 0; at + 24u <= 0x1000u; at += 4u) {
         const unsigned int *w = (const unsigned int *)(ram + text + at);
+        if(w[0]==0x039e1021u && w[1]==0x2441f040u &&
+           (w[2]&0xffff0000u)==0x18200000u && w[3]==0xac060accu) {
+            /* This self-booting writer reserves space before each store,
+             * using gp+s8 against 0xfc0, then drains from DMEM 0xb00. */
+            s_ring_stage[0]=s_ring_stage[1]=0xb00u;
+            s_ring_limit=0x4c0u;
+            s_ring_reserve_before=1;
+            mode=RING_GBI1;flags=RING_BUFFERED;
+            break;
+        }
         /* The original DRAM-output writer accumulates a byte count at
          * OSTask.output_buff_size. It never submits these packets to DPC;
          * the CPU owns that later submission. */
@@ -723,6 +753,8 @@ static void guest_ring_config(RdpFifo *fifo, unsigned int text, int resume,
                 && dp[1] < last && dp[1] != dp[0]) s_zb_ring_pos = dp[0];
         }
         s_zb_ring_live = (int)(mode | flags);
+        if(mode==RING_GBI2 && (read_dmem_u32(dm,0xfc4u)&1u))
+            s_zb_ring_pos=read_dmem_u32(dm,0xf0u)&0x7fffffu;
     }
     if (((unsigned int)s_zb_ring_live & RING_KIND) == mode) {
         s_output_only=((unsigned int)s_zb_ring_live&RING_OUTPUT_ONLY)!=0;
@@ -761,6 +793,7 @@ static void guest_ring_load_ucode(RdpFifo *fifo, unsigned int text,
      * other-modes state; GBI1 reloads its entire data image. */
     guest_ring_config(fifo, text, 0, data & 0x7ffff8u, data_bytes,
                       !full_reload && (kind == RING_GBI2 || kind == RING_XBUS) ? 0x180u : 0u);
+    memcpy(s_backend->get_dmem()+0xfd0u,&text,4);
     if (kind == RING_GBI2 && ((unsigned int)s_zb_ring_live & RING_KIND) == RING_GBI2
         && pos >= s_zb_ring_base && pos <= s_zb_ring_end)
         s_zb_ring_pos = pos;
@@ -769,9 +802,11 @@ static void guest_ring_load_ucode(RdpFifo *fifo, unsigned int text,
 static void guest_ring_begin(RdpFifo *fifo, unsigned int text, int resume)
 {
     unsigned char *dm = s_backend->get_dmem();
+    int yielded=!resume && (read_dmem_u32(dm,0xfc4u)&1u);
     fifo->load_ucode = guest_ring_load_ucode;
-    guest_ring_config(fifo, text, resume, read_dmem_u32(dm, 0xfd8u) & 0x7ffff8u,
-                      read_dmem_u32(dm, 0xfdcu), 0);
+    guest_ring_config(fifo, text, resume,
+                      read_dmem_u32(dm,yielded?0xff8u:0xfd8u)&0x7ffff8u,
+                      read_dmem_u32(dm,yielded?0xffcu:0xfdcu),0);
 }
 
 /* bytes of RDP commands emitted by the current walker task, read by the
@@ -815,7 +850,7 @@ static int gsp_params_at_task_start;
 /* F3DEX (v1) family classifier: 0 = not this family, 1 = F3D vertex family,
  * 2 = L3D line family. Defined below; forward-declared so the per-task setup
  * can route and configure the L3DEX line ucode the same way as the dispatcher. */
-static int f3d_ucode_family(const unsigned char *rdram, unsigned int rdram_size,
+int f3d_ucode_family(const unsigned char *rdram, unsigned int rdram_size,
                             unsigned int ud, unsigned int uds);
 
 /* Re-evaluate every microcode-build-specific parameter from a (data, text)
@@ -835,7 +870,8 @@ void gsp_detect_ucode_params(GSPState *st, const unsigned char *rdram,
             read_dmem_u32(rdram,ut)==0x4a10802au &&
             read_dmem_u32(rdram,ut+20u)==0x4b1f0051u;
         rsp_graphics_sdk_boot(sdk);
-        if(sdk && (!rsp_graphics_sdk_one(5)||!rsp_graphics_sdk_one(7))) {
+        if(sdk && (!rsp_graphics_sdk_one(5)||!rsp_graphics_sdk_one(7)) &&
+           !(read_dmem_u32(s_backend->get_dmem(),0xfc4u)&1u)) {
             unsigned int slots[4]={0x2e0,0x2e8,0x410,0x418},k;
             unsigned char *dm=s_backend->get_dmem();
             for(k=0;k<4;k++) {
@@ -854,7 +890,7 @@ void gsp_detect_ucode_params(GSPState *st, const unsigned char *rdram,
                w[2]==0x4ac61990u && w[3]==0x4a8639c0u) {
                 unsigned int count=read_dmem_u32(rdram,ud+0x12cu);
                 if((count&0x8000001fu)==0x80000000u &&
-                   (count&0x7fffffffu)>=32u && (count&0x7fffffffu)<=256u) {
+                   (count&0xfffu)>=32u && (count&0xfffu)<=256u) {
                     unsigned int k;
                     /* Boot DMA supplies two look-at records, the light
                      * array and its ambient entry even before a list
@@ -863,7 +899,7 @@ void gsp_detect_ucode_params(GSPState *st, const unsigned char *rdram,
                     gsp_set_lookat(st,rdram,ud+0x1d0u,1);
                     for(k=0;k<GSP_MAX_LIGHTS;k++)
                         gsp_set_light(st,rdram,ud+0x1f0u+k*32u,(int)k);
-                    gsp_set_num_lights(st,(int)((count&0x7fffffffu)/32u)-1);
+                    gsp_set_num_lights(st,(int)((count&0xfffu)/32u)-1);
                 }
                 break;
             }
@@ -1253,7 +1289,7 @@ void gsp_detect_ucode_params(GSPState *st, const unsigned char *rdram,
  * line expansion. F3DEX2 (GBI 2) is routed to its own walker before this runs.
  * One short scan replaces (and costs less than) the chain of full-text CRCs it
  * supersedes. */
-static int f3d_ucode_family(const unsigned char *rdram,
+int f3d_ucode_family(const unsigned char *rdram,
                             unsigned int rdram_size,
                             unsigned int ud, unsigned int uds)
 {
@@ -1468,6 +1504,58 @@ static int f3d_gbi1_othermode_data(const unsigned char *rdram,
         && rdram[(ud + 0x1b6) ^ 3] == 0x7fu && rdram[(ud + 0x1b7) ^ 3] == 0x00u)
         return 0;                       /* F3DEX2/S2DEX2 v31 row -> GBI 2 */
     return rdram[(ud + 0x118) ^ 3] == 0xefu;
+}
+
+static int guest_yield_gbi1(const unsigned char *ram,unsigned int size,
+                            unsigned int text,unsigned int data,unsigned int bytes,
+                            unsigned int saved[5])
+{
+    unsigned int at;
+    if(!ram || text>size || 0xf80u>size-text || data>size ||
+       bytes<0x900u || bytes>0xfc0u || bytes>size-data)return 0;
+    for(at=0;at+20u<=0xf80u;at+=4u) {
+        const unsigned int *w=(const unsigned int *)(ram+text+at);
+        if((w[0]&0xffff0000u)==0x8c170000u &&
+           (w[1]&0xffff0000u)==0x8c1c0000u &&
+           (w[2]&0xffff0000u)==0x8c1b0000u &&
+           (w[3]&0xfc000000u)==0x08000000u &&
+           (w[4]&0xffff0000u)==0x8c1a0000u) {
+            unsigned int k;
+            for(k=0;k<4;k++) {
+                unsigned int off=w[k==3?4:k]&0xffffu;
+                if((off&3u)||off+4u>bytes)return 0;
+                saved[k]=read_dmem_u32(ram,data+off);
+            }
+            if(saved[1]>0xfc0u || saved[2]>0xfc0u)return 0;
+            if(saved[1]<saved[2]) {
+                /* Older Fast3D stores a remaining-byte count in gp and
+                 * advances k0 on every command. Later GBI1 instead keeps
+                 * the DMEM buffer end in gp and the next DMA base in k0. */
+                unsigned int k,remaining=0;
+                for(k=0;k+8u<=0x1000u && k+8u<=size-text;k+=4u)
+                    if(read_dmem_u32(ram,text+k)==0x237b0008u &&
+                       read_dmem_u32(ram,text+k+4u)==0x239cfff8u) {remaining=1;break;}
+                if(!remaining || saved[1]>0x140u)return 0;
+                saved[4]=saved[3]&0x7fffffu;
+            }else saved[4]=(saved[3]-(saved[1]-saved[2]))&0x7fffffu;
+            return saved[4] && saved[4]<size-8u;
+        }
+    }
+    return 0;
+}
+
+int rdp_emit_hle_yield_supported(const unsigned char *ram,unsigned int size,
+                                unsigned int text,unsigned int data,unsigned int bytes)
+{
+    unsigned int pc,saved[5];
+    if(guest_yield_gbi1(ram,size,text,data,bytes,saved))return 1;
+    if(!ram || text>size || 64u>size-text || data>size ||
+       bytes<0xc00u || bytes>0xfc0u || bytes>size-data)return 0;
+    pc=read_dmem_u32(ram,data+0xbf8u)&0x7fffffu;
+    return pc && pc<size-8u &&
+        read_dmem_u32(ram,text+4u)==0xc81f201bu &&
+        read_dmem_u32(ram,text+8u)==0xc81e201cu &&
+        read_dmem_u32(ram,text+0x3cu)==0x8c1a0bf8u;
 }
 
 int rdp_emit_hle_supported(const unsigned char *ram, unsigned int size,
@@ -1719,8 +1807,10 @@ void rdp_emit_hle_process_dlist(void)
                                     || gbi1_oth
                                     || f3d_is_early_ucode(rdram,rdram_size,ut)));
                 f3d_set_variant_early(f3d_is_early_ucode(rdram,rdram_size,ut));
-                if (f3d_is_early_ucode(rdram,rdram_size,ut))
+                if (f3d_is_early_ucode(rdram,rdram_size,ut)) {
                     s_gsp.mvp_trans_last = 1;
+                    gsp_set_tri_scales(&s_gsp, 0x4000, 8, 0xfff8, 0x1cc);
+                }
                 f3d_set_line_variant(fam == 2 || bcline || bhline);
                 f3d_set_variant_bhline(bhline);
                 f3d_set_variant_ff2d(f3d_is_ff2d_ucode(rdram, rdram_size, ut));
@@ -1802,6 +1892,47 @@ void rdp_emit_hle_process_dlist(void)
                 if ((oh >> 24) == 0xefu)
                     f3d_set_othermode_init(oh, ol);
             }
+            if(read_dmem_u32(dmem,0xfc4u)&1u) {
+                unsigned int saved[5],at,vertex_base=0x440u;
+                if(guest_yield_gbi1(rdram,rdram_size,ut,
+                    read_dmem_u32(dmem,0xff8u)&0x7fffffu,read_dmem_u32(dmem,0xffcu),saved)) {
+                    for(at=0;at+16u<=0xf80u;at+=4u) {
+                        const unsigned int *w=(const unsigned int *)(rdram+ut+at);
+                        if((w[0]&0xffff0000u)==0x20010000u &&
+                           (w[1]&0xffff0000u)==0x20020000u &&
+                           (w[1]&0xffffu)==(w[0]&0xffffu)+64u) {
+                            vertex_base=(w[0]&0xffffu)+0xc0u;break;
+                        }
+                    }
+                    f3d_restore_yield(&s_gsp,dmem,vertex_base,s_gsp.clip_reject!=0);
+                    f3d_restore_prefetch(dmem,saved[4],saved[2],
+                        saved[1]<saved[2]?saved[1]:saved[1]-saved[2]);
+                    s_zb_ring_pos=read_dmem_u32(dmem,0x128u)&0x7fffffu;
+                    /* FIFO residents announce the previous DMA cursor
+                     * before writing the next batch. A native yield can
+                     * therefore leave completed guest-RAM commands beyond
+                     * DPC_END. Deliver that pending prefix before the host
+                     * walker emits new commands, without writing it again. */
+                    if(s_backend->get_dpc_state && s_backend->submit) {
+                        unsigned int dp[3];
+                        s_backend->get_dpc_state(dp);
+                        if(!(dp[2]&1u) && !(dp[0]&7u) &&
+                           dp[0]>=s_zb_ring_base && dp[0]<s_zb_ring_pos &&
+                           s_zb_ring_pos<=s_zb_ring_end && s_zb_ring_pos<=rdram_size)
+                            s_backend->submit(rdram+dp[0],dp[0],s_zb_ring_pos-dp[0]);
+                    }
+                    {
+                        unsigned int hint=*(const unsigned short *)(dmem+(0x15au^2u));
+                        unsigned int bank=hint==s_ring_stage[1] && hint!=s_ring_stage[0];
+                        unsigned int stage=s_ring_stage[bank];
+                        unsigned int used=saved[0]>=stage?saved[0]-stage:0;
+                        if(used<=0x1000u-stage)
+                            s_zb_ring_live=(s_zb_ring_live&~0x1fffu)|(bank<<12)|used;
+                    }
+                    dl_addr=saved[4];
+                    *(unsigned int *)(dmem+0xfc4u)=0;
+                }
+            }
             f3d_run_dl(&s_gsp, &s_fifo, dl_addr, 0, 0);
         }
         else
@@ -1825,6 +1956,12 @@ void rdp_emit_hle_process_dlist(void)
                 f3dex2_force_class_s2dex1();
                 if ((read_dmem_u32(dmem,0xc8u)>>24)==0xefu)
                     f3dex2_set_othermode_init(read_dmem_u32(dmem,0xc8u),read_dmem_u32(dmem,0xccu));
+            }
+            if((read_dmem_u32(dmem,0xfc4u)&1u) &&
+               rdp_emit_hle_yield_supported(rdram,rdram_size,ut,
+                   read_dmem_u32(dmem,0xff8u)&0x7fffffu,read_dmem_u32(dmem,0xffcu))) {
+                dl_addr=f3dex2_restore_yield(&s_gsp,dmem);
+                *(unsigned int *)(dmem+0xfc4u)=0;
             }
             f3dex2_run_dl(&s_gsp, &s_fifo, dl_addr, 0, 0);
         }

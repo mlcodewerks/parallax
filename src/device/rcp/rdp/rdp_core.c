@@ -60,9 +60,27 @@ const uint32_t *rdp_hle_command_buffer(uint32_t address)
         ? hle_words + ((address - hle_base) >> 2) : NULL;
 }
 #ifdef __LIBRETRO__
+void rdp_publish_hle_fifo(struct rdp_core *dp, uint32_t base, uint32_t bytes, int xbus)
+{
+    if (!bytes) return;
+    write_rsp_dpc_regs(dp, DPC_STATUS_REG * 4,
+        xbus ? DPC_SET_XBUS_DMEM_DMA : DPC_CLR_XBUS_DMEM_DMA, ~0u);
+    if (dp->dpc_regs[DPC_CURRENT_REG] == dp->dpc_regs[DPC_END_REG])
+        write_rsp_dpc_regs(dp, DPC_START_REG * 4, base, ~0u);
+    write_rsp_dpc_regs(dp, DPC_END_REG * 4, base + bytes, ~0u);
+}
 void rdp_submit_hle(struct rdp_core *dp, const uint32_t *words, uint32_t base, uint32_t bytes, uint32_t rsp_cycles)
 {
-    if (!bytes || (dp->dpc_regs[DPC_STATUS_REG] & DPC_STATUS_FREEZE)) return;
+    if (!bytes) return;
+    if (dp->dpc_regs[DPC_STATUS_REG] & DPC_STATUS_FREEZE) {
+        if (!words) {
+            /* Native FIFO DMA publication while rendering is frozen. The
+             * emitter has already written RAM. CURRENT remains at the first
+             * unread command until DPC_CLR_FREEZE runs the normal consumer. */
+            rdp_publish_hle_fifo(dp, base, bytes, 0);
+        }
+        return;
+    }
     hle_words = words; hle_base = base; hle_bytes = bytes;
     /* The CPU has not advanced while the synchronous HLE walker runs. Feed
      * the producer's elapsed work to the same DP timeline used by native
