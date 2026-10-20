@@ -11,6 +11,7 @@ struct PrimitiveFootprint {
     PrimitiveBounds bounds;
     RDPEdgeCoefficients edge{};
     bool native_triangle = false, first_sample_only = false;
+    bool independent_write = false;
 
     std::pair<int, int> row(int y) const {
         const auto full = std::pair{bounds.x, bounds.x + bounds.w};

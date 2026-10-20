@@ -162,7 +162,7 @@ int savestates_load_m64p(struct device* dev, const void *data)
     int i;
     uint32_t FCR31;
     uint32_t legacy_vi_delay = 0;
-    
+
     size_t savestateSize;
     unsigned char *savestateData, *curr;
     char queue[1024];

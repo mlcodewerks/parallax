@@ -381,71 +381,83 @@ void FramebufferManager::download_to_rdram(GLFramebuffer &framebuffer, N64Memory
     std::vector<std::uint8_t> rgba(std::size_t(framebuffer.width) * framebuffer.height * 4);
     glBindFramebuffer(GL_FRAMEBUFFER, framebuffer.fbo);
     glPixelStorei(GL_PACK_ALIGNMENT, 1);
-    glReadPixels(0, 0, framebuffer.width, framebuffer.height, GL_RGBA, GL_UNSIGNED_BYTE,
-                 rgba.data());
-
+    glReadPixels(0, 0, framebuffer.width, framebuffer.height, GL_RGBA, GL_UNSIGNED_BYTE, rgba.data());
     const int native_width = std::max(framebuffer.native_width, 1);
     const int native_height = std::max(framebuffer.native_height, 1);
     const int scale = std::max(framebuffer.internal_scale, 1);
 
-    for (int y = 0; y < native_height; ++y) {
-        for (int x = 0; x < native_width; ++x) {
-            const int render_x = std::min(x * scale + scale / 2, framebuffer.width - 1);
-            const int render_y = std::min(y * scale + scale / 2, framebuffer.height - 1);
-            const int texture_y = framebuffer.height - 1 - render_y;
-            const auto input = (std::size_t(texture_y) * framebuffer.width + render_x) * 4;
-            const std::size_t destination_index = std::size_t(y) * native_width + x;
-            const unsigned bits = 4u << unsigned(framebuffer.size);
-            const std::size_t byte_offset = destination_index * bits / 8;
-            const unsigned bytes = std::max(bits / 8, 1u);
-            // CPU stores and DMA can reuse an old image before its next RDP list.
-            // Preserve those writes even when the core did not track that old image.
-            bool cpu_changed = framebuffer.rdram_snapshot.size() < byte_offset + bytes;
-            for (unsigned b = 0; !cpu_changed && b < bytes; ++b)
-                cpu_changed = (byte_offset + b < framebuffer.cpu_written.size() &&
-                               framebuffer.cpu_written[byte_offset + b]) ||
-                              memory.read8(framebuffer.address + std::uint32_t(byte_offset + b)) !=
-                                  framebuffer.rdram_snapshot[byte_offset + b];
-            if (cpu_changed) {
-                framebuffer.cpu_dirty = true;
-                continue;
-            }
+    const bool unchanged = framebuffer.size == RDPImageSize::Bits16 && scale == 1 &&
+        !(framebuffer.address & 1u) && framebuffer.width == native_width &&
+        framebuffer.height == native_height &&
+        framebuffer.rdram_snapshot.size() == std::size_t(native_width) * native_height * 2 &&
+        std::none_of(framebuffer.cpu_written.begin(), framebuffer.cpu_written.end(),
+                     [](std::uint8_t written) { return written != 0; }) &&
+        memory.matches_be(framebuffer.address, framebuffer.rdram_snapshot.data(),
+                          framebuffer.rdram_snapshot.size());
+    if (unchanged) {
+        for (int y = 0; y < native_height; ++y)
+            memory.write_rgba16(framebuffer.address + std::uint32_t(y * native_width * 2),
+                rgba.data() + std::size_t(native_height - 1 - y) * native_width * 4, native_width);
+    } else {
+        for (int y = 0; y < native_height; ++y) {
+            for (int x = 0; x < native_width; ++x) {
+                const int render_x = std::min(x * scale + scale / 2, framebuffer.width - 1);
+                const int render_y = std::min(y * scale + scale / 2, framebuffer.height - 1);
+                const int texture_y = framebuffer.height - 1 - render_y;
+                const auto input = (std::size_t(texture_y) * framebuffer.width + render_x) * 4;
+                const std::size_t destination_index = std::size_t(y) * native_width + x;
+                const unsigned bits = 4u << unsigned(framebuffer.size);
+                const std::size_t byte_offset = destination_index * bits / 8;
+                const unsigned bytes = std::max(bits / 8, 1u);
+                // CPU stores and DMA can reuse an old image before its next RDP list.
+                // Preserve those writes even when the core did not track that old image.
+                bool cpu_changed = framebuffer.rdram_snapshot.size() < byte_offset + bytes;
+                for (unsigned b = 0; !cpu_changed && b < bytes; ++b)
+                    cpu_changed = (byte_offset + b < framebuffer.cpu_written.size() &&
+                                   framebuffer.cpu_written[byte_offset + b]) ||
+                                  memory.read8(framebuffer.address + std::uint32_t(byte_offset + b)) !=
+                                      framebuffer.rdram_snapshot[byte_offset + b];
+                if (cpu_changed) {
+                    framebuffer.cpu_dirty = true;
+                    continue;
+                }
 
-            if (framebuffer.size == RDPImageSize::Bits4) {
-                const unsigned intensity =
-                    (unsigned(rgba[input + 0]) + rgba[input + 1] + rgba[input + 2]) / 3;
-                const std::uint8_t nibble = std::uint8_t((intensity * 15u + 127u) / 255u);
-                const std::uint32_t byte_address =
-                    framebuffer.address + std::uint32_t(destination_index / 2);
-                std::uint8_t packed = memory.read8(byte_address);
-                if (destination_index & 1u)
-                    packed = std::uint8_t((packed & 0xf0u) | nibble);
-                else
-                    packed = std::uint8_t((packed & 0x0fu) | (nibble << 4));
-                memory.write8(byte_address, packed);
-            } else if (framebuffer.size == RDPImageSize::Bits16) {
-                const std::uint16_t value = std::uint16_t((rgba[input + 0] >> 3) << 11) |
-                                            std::uint16_t((rgba[input + 1] >> 3) << 6) |
-                                            std::uint16_t((rgba[input + 2] >> 3) << 1) |
-                                            (rgba[input + 3] > 128);
-                memory.write16(framebuffer.address + std::uint32_t(destination_index * 2), value);
-                const unsigned samples = (unsigned(rgba[input + 3]) * 8 + 127) / 255;
-                memory.write_hidden16(framebuffer.address + std::uint32_t(destination_index * 2),
-                                      std::uint8_t(samples ? samples - 1 : 0));
-            } else if (framebuffer.size == RDPImageSize::Bits8) {
-                const std::uint8_t value =
-                    rgba[input + ((framebuffer.address + destination_index) & 1u)];
-                memory.write8(framebuffer.address + std::uint32_t(destination_index), value);
-            } else {
-                const std::uint32_t value = (std::uint32_t(rgba[input + 0]) << 24) |
-                                            (std::uint32_t(rgba[input + 1]) << 16) |
-                                            (std::uint32_t(rgba[input + 2]) << 8) | rgba[input + 3];
-                const auto address = framebuffer.address + std::uint32_t(destination_index * 4);
-                const auto prior = memory.read32(address);
-                memory.write32(address, value);
-                if (value != prior) {
-                    memory.write_hidden16(address, (value & 0x10000) ? 3 : 0);
-                    memory.write_hidden16(address + 2, (value & 1) ? 3 : 0);
+                if (framebuffer.size == RDPImageSize::Bits4) {
+                    const unsigned intensity =
+                        (unsigned(rgba[input + 0]) + rgba[input + 1] + rgba[input + 2]) / 3;
+                    const std::uint8_t nibble = std::uint8_t((intensity * 15u + 127u) / 255u);
+                    const std::uint32_t byte_address =
+                        framebuffer.address + std::uint32_t(destination_index / 2);
+                    std::uint8_t packed = memory.read8(byte_address);
+                    if (destination_index & 1u)
+                        packed = std::uint8_t((packed & 0xf0u) | nibble);
+                    else
+                        packed = std::uint8_t((packed & 0x0fu) | (nibble << 4));
+                    memory.write8(byte_address, packed);
+                } else if (framebuffer.size == RDPImageSize::Bits16) {
+                    const std::uint16_t value = std::uint16_t((rgba[input + 0] >> 3) << 11) |
+                                                std::uint16_t((rgba[input + 1] >> 3) << 6) |
+                                                std::uint16_t((rgba[input + 2] >> 3) << 1) |
+                                                (rgba[input + 3] > 128);
+                    memory.write16(framebuffer.address + std::uint32_t(destination_index * 2), value);
+                    const unsigned samples = (unsigned(rgba[input + 3]) * 8 + 127) / 255;
+                    memory.write_hidden16(framebuffer.address + std::uint32_t(destination_index * 2),
+                                          std::uint8_t(samples ? samples - 1 : 0));
+                } else if (framebuffer.size == RDPImageSize::Bits8) {
+                    const std::uint8_t value =
+                        rgba[input + ((framebuffer.address + destination_index) & 1u)];
+                    memory.write8(framebuffer.address + std::uint32_t(destination_index), value);
+                } else {
+                    const std::uint32_t value = (std::uint32_t(rgba[input + 0]) << 24) |
+                                                (std::uint32_t(rgba[input + 1]) << 16) |
+                                                (std::uint32_t(rgba[input + 2]) << 8) | rgba[input + 3];
+                    const auto address = framebuffer.address + std::uint32_t(destination_index * 4);
+                    const auto prior = memory.read32(address);
+                    memory.write32(address, value);
+                    if (value != prior) {
+                        memory.write_hidden16(address, (value & 0x10000) ? 3 : 0);
+                        memory.write_hidden16(address + 2, (value & 1) ? 3 : 0);
+                    }
                 }
             }
         }

@@ -55,25 +55,27 @@ void write_is_viewer(void* opaque, uint32_t address, uint32_t value, uint32_t ma
     {
         if (word > 0)
         {
-            /* make sure we don't overflow the buffer */
-            if (is_viewer->buffer_pos + word > IS_BUFFER_SIZE)
-            {
-                /* reset buffer */
-                memset(is_viewer->output_buffer, 0, IS_BUFFER_SIZE);
-                is_viewer->buffer_pos = 0;
-                DebugMessage(M64MSG_WARNING, "IS64: prevented buffer overflow, cleared buffer");
+            if (word > IS_BUFFER_SIZE - 0x20) {
+                DebugMessage(M64MSG_WARNING, "IS64: invalid transfer length %u", word);
                 return;
             }
-
-            memcpy(&is_viewer->output_buffer[is_viewer->buffer_pos], &is_viewer->data[0x20], word);
-            is_viewer->buffer_pos += word;
-            char* newline = memchr(is_viewer->output_buffer, '\n', is_viewer->buffer_pos);
-            if (newline)
-            {
-                *newline = '\0';
-                DebugMessage(M64MSG_INFO, "IS64: %s", is_viewer->output_buffer);
-                memset(is_viewer->output_buffer, 0, is_viewer->buffer_pos);
-                is_viewer->buffer_pos = 0;
+            /* DebugMessage has a 512-byte buffer. Emit bounded continuation
+             * records instead of losing long lines (e.g. timing sample arrays).
+             * Process every newline, retaining the partial line after it. */
+            for (uint32_t i = 0; i < word; ++i) {
+                char ch = is_viewer->data[0x20 + i];
+                if (ch == '\n') {
+                    DebugMessage(M64MSG_INFO, "IS64: %.*s", (int)is_viewer->buffer_pos,
+                                 is_viewer->output_buffer);
+                    is_viewer->buffer_pos = 0;
+                } else {
+                    is_viewer->output_buffer[is_viewer->buffer_pos++] = ch;
+                    if (is_viewer->buffer_pos == 480) {
+                        DebugMessage(M64MSG_INFO, "IS64+: %.*s", (int)is_viewer->buffer_pos,
+                                     is_viewer->output_buffer);
+                        is_viewer->buffer_pos = 0;
+                    }
+                }
             }
         }
     }

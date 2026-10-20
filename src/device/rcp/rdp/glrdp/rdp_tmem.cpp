@@ -167,6 +167,21 @@ void load_word(RDPState &s, const RDPTile &t, RDPMemoryView r, std::uint64_t sou
                                 ? texel >> 1
                                 : (t.size == RDPImageSize::Bits4 ? texel >> 2 : texel);
     const unsigned start = (((t.tmem + ((t.line * row) & 511)) * 4) + shorts) & 0x7fd;
+    // Ordinary aligned loads occupy one complete TMEM word. Keep the
+    // uncommon split/YUV/misaligned bank mappings on the scalar path.
+    if (!(start & 3u) && t.format != RDPImageFormat::YUV &&
+        !(t.format == RDPImageFormat::RGBA && t.size == RDPImageSize::Bits32)) {
+        std::uint8_t word[8];
+        r.read_word(source, word);
+        auto *destination = s.tmem.data() + start * 2;
+        if (row & 1u) {
+            std::memcpy(destination, word + 4, 4);
+            std::memcpy(destination + 4, word, 4);
+        } else {
+            std::memcpy(destination, word, 8);
+        }
+        return;
+    }
     unsigned bank[4];
     for (unsigned lane = 0; lane < 4; ++lane) {
         const unsigned index = ((start + lane) & 0x7ff) ^ ((row & 1) ? 2 : 0);

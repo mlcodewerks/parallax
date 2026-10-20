@@ -2,6 +2,7 @@
 #include "rdp_types.hpp"
 #include "n64_memory.hpp"
 #include <cstdint>
+#include <cstring>
 #include <span>
 #include <vector>
 class RDPMemoryView {
@@ -20,6 +21,19 @@ class RDPMemoryView {
         if (address >= size())
             return 0;
         return memory_ ? memory_->read8(std::uint32_t(address)) : bytes_[address];
+    }
+
+    void read_word(std::uint64_t address, std::uint8_t (&word)[8]) const {
+        address &= 0x00ffffffu;
+        if (size() >= 8 && address <= size() - 8 && address <= 0x00fffff8u) {
+            if (memory_)
+                memory_->copy_be(std::uint32_t(address), word, 8);
+            else
+                std::memcpy(word, bytes_.data() + address, 8);
+        } else {
+            for (unsigned i = 0; i < 8; ++i)
+                word[i] = (*this)[address + i];
+        }
     }
 
   private:

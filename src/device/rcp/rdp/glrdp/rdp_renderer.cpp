@@ -1935,7 +1935,7 @@ void RDPRenderer::initialize_samplers(GLuint program) {
 }
 void RDPRenderer::shutdown() {
     flush();
-    if (stats_.primitives)
+        if (stats_.primitives)
         std::fprintf(stderr, "GLRDP batch limits = capacity=%u queues=%llu queue_full=%llu state=%llu\n",
             primitive_uniforms_.capacity, (unsigned long long)stats_.queues,
             (unsigned long long)stats_.queue_flushes, (unsigned long long)stats_.state_flushes);
@@ -2777,7 +2777,8 @@ void RDPRenderer::draw_vertices(const std::vector<GLVertex> &v, bool textured, c
         const PrimitiveBounds bounds{bounds_x_, bounds_y_, bounds_w_, bounds_h_};
         const PrimitiveFootprint footprint{bounds, triangle_edge_,
             !rectangle && target.internal_scale == 1 && config_.coverage == GLRDP_COVERAGE_OFF,
-            cycle_type < 2 && !(s.other_modes & 8u)};
+            cycle_type < 2 && !(s.other_modes & 8u),
+            !depth_surface && !rdp_reads_color_memory(s)};
         if (batch_target_ && (batch_target_ != &target || batch_depth_ != depth_surface)) {
             ++stats_.state_flushes; flush();
         } else if (batch_bounds_.size() >= PrimitiveScheduler::max_queued) {
