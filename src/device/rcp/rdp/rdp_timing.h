@@ -160,7 +160,8 @@ static uint64_t rdp_timing_span(const struct rdp_timing* t, int y, int left, int
     uint64_t bus = color * (color_write + color_read);
     uint64_t depth = (uint64_t)t->z_address * 8 +
         ((uint64_t)y * t->fb_width + (unsigned)left) * 16;
-    bus += rdp_timing_bus_words(depth, pixels * 16) * (depth_read + depth_write);
+    uint64_t depth_words = rdp_timing_bus_words(depth, pixels * 16);
+    bus += depth_words * (depth_read + depth_write);
     bus += segments * 5 * (color_write + color_read + depth_read + depth_write);
     /* Reads precede writes in a span segment. Changing bus direction costs
      * time even when color/depth occupy separate banks. If the last read is
@@ -179,20 +180,39 @@ static uint64_t rdp_timing_span(const struct rdp_timing* t, int y, int left, int
          * boundary formula omitted these read-to-read row changes. */
         if (!color_write && !depth_write && color_read && depth_read && segments > 1)
             bus += (segments - 1) * 3;
+        /* A compare-only Z read followed by a color store also returns to
+         * the Z row for the next buffer. There is no color prefetch or Z
+         * store to have already accounted for that inter-buffer boundary. */
+        if (color_write && depth_read && !color_read && !depth_write && segments > 1)
+            bus += (segments - 1) * 3;
     }
     bus += segments * 3 * turnarounds;
     uint64_t raster = pixels * (t->cycle_type + 1);
-    /* Aggregate read-response budgets, estimated from moving NTSC scene
-     * comparisons: 32/48 RCP clocks per read stream in one/two-cycle mode.
-     * Short spans cannot hide the entire buffered memory/pipeline response
-     * behind pixel work. Long spans hide it, retaining the console-checked
-     * rectangle throughputs above. These are estimates, not measured DRAM
-     * latencies; no ROM identity, frame position or host speed selects them. */
-    uint64_t response = (color_read + depth_read) * (32u + 16u * t->cycle_type);
-    uint64_t uncovered = response > raster ? response - raster : 0;
+    /* Effective buffered-read floor calibrated against Thar0's 320x240
+     * RGBA16 rejection cases with VI off. At eight pixels per buffer the
+     * measured one-cycle floors are about 11 clocks for one read stream,
+     * and 17 for two streams in separate banks. Reuse the transfer-word
+     * cost, with four response clocks after the first request; consecutive
+     * requests overlap one issue clock. Two-cycle Z consumption exposes
+     * about two more clocks per buffer after pixel/read work overlaps.
+     * These are rounded aggregate costs, not measured per-request latencies.
+     * Smaller spans and other formats remain extrapolations of this model. */
+    unsigned reads = color_read + depth_read;
+    uint64_t response = 0;
+    if (reads) {
+        response = color * color_read + depth_words * depth_read +
+            segments * (4u * reads + 5u);
+        if (response < raster) response = raster;
+        if (t->cycle_type && depth_read) response += segments * 2;
+    }
+    /* The bus estimate already contains read transfers and row switches.
+     * Expose only the floor beyond both occupied paths, avoiding a second
+     * charge for response time already covered by memory work. */
+    uint64_t occupied = bus > raster ? bus : raster;
+    uint64_t uncovered = response > occupied ? response - occupied : 0;
     RDP_TIMING_OBSERVE_RESPONSE(t, uncovered);
     unsigned startup = t->reject ? 4u + 2u * t->cycle_type : 15u;
-    return startup + (bus > raster ? bus : raster) + uncovered;
+    return startup + occupied + uncovered;
 }
 
 /* Fill spans repeat their bus alignment within 16 rows even for 4-bit
