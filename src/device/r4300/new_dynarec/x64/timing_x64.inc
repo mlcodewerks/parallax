@@ -1,7 +1,7 @@
 /* Native scheduler guards and exact half-rate COUNT accounting. Guarded
  * regions cannot trap or observe COUNT; faults/events use precise stubs.
  * GPL-2.0-or-later. */
-static void emit_region_guard(const struct ari64_x64_config* config, unsigned start,
+static void emit_region_guard(const struct ari64_config* config, unsigned start,
     unsigned count, unsigned base, unsigned memory_count, struct memory_exit* failure)
 {
     emit_movimm64((intptr_t)&breakloop, R11);
@@ -62,7 +62,7 @@ static void emit_region_guard(const struct ari64_x64_config* config, unsigned st
         patch_jump(done, out);
     }
 }
-static void emit_region_commit_native(const struct ari64_x64_config* config,
+static void emit_region_commit_native(const struct ari64_config* config,
     unsigned start, unsigned count, int branch)
 {
     emit_mem(0x8b, 0, RAX, R12, -1, 0, offsetof(struct r4300_core, cp0.count_phase));

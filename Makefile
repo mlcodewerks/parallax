@@ -66,6 +66,26 @@ endif
 
 # Cross compile ?
 
+# Pi 4/5 target 64-bit Raspberry Pi OS, including when cross compiling.
+ifneq (,$(filter rpi4 rpi5 rpi4-aarch64 rpi5-aarch64,$(platform)))
+ARCH ?= aarch64
+ifneq ($(ARCH),aarch64)
+$(error Pi 4/5 targets require ARCH=aarch64 and a 64-bit userland)
+endif
+endif
+
+ifneq ($(CROSS_COMPILE),)
+ifeq ($(origin CC),default)
+CC := $(CROSS_COMPILE)gcc
+endif
+ifeq ($(origin CXX),default)
+CXX := $(CROSS_COMPILE)g++
+endif
+ifeq ($(origin AR),default)
+AR := $(CROSS_COMPILE)ar
+endif
+endif
+
 ifeq (,$(ARCH))
    ARCH = $(shell uname -m)
 endif
@@ -591,7 +611,7 @@ OBJECTS     += $(SOURCES_CXX:.cpp=.o) $(SOURCES_C:.c=.o) $(SOURCES_ASM:.S=.o) $(
 # Backend defines affect dispatch and private cache layouts. Rebuild between the
 # Ari64 emitter and interpreter-only configuration, or optimization settings.
 CPU_JIT_CONFIG := $(CORE_DIR)/.cpu-jit-config
-CPU_JIT_CONFIG_VALUE := glrdp=$(HAVE_GLRDP):headless=$(HEADLESS_BENCHMARK):headless-cpu=$(HEADLESS_BENCH_CPU):$(WITH_DYNAREC):$(if $(ARI64_DIR),ari64-emitter,interpreter):debug=$(DEBUG):profile=$(ARI64_PROFILE):interp=$(INTERP_OPTIMIZE):branchless=$(INTERP_BRANCHLESS):hle-simd=$(HLE_SIMD)
+CPU_JIT_CONFIG_VALUE := arch=$(ARCH):platform=$(platform):cc=$(CC):glrdp=$(HAVE_GLRDP):headless=$(HEADLESS_BENCHMARK):headless-cpu=$(HEADLESS_BENCH_CPU):$(WITH_DYNAREC):$(if $(ARI64_DIR),ari64-emitter,interpreter):debug=$(DEBUG):profile=$(ARI64_PROFILE):interp=$(INTERP_OPTIMIZE):branchless=$(INTERP_BRANCHLESS):hle-simd=$(HLE_SIMD)
 ifneq ($(strip $(file <$(CPU_JIT_CONFIG))),$(CPU_JIT_CONFIG_VALUE))
 $(file >$(CPU_JIT_CONFIG),$(CPU_JIT_CONFIG_VALUE))
 endif
@@ -620,6 +640,11 @@ endif
 
 -include $(OBJECTS:.o=.d)
 all: $(TARGET)
+
+# Convenience targets use the same platform settings as explicit builds.
+.PHONY: rpi4 rpi5
+rpi4 rpi5:
+	$(MAKE) platform=$@ all
 $(CORE_DIR)/src/device/r4300/pure_interp.o: $(addprefix $(CORE_DIR)/src/device/r4300/,fpu_arithmetic.h fpu_compare.h fpu_native.h interp_fpu_move.h)
 $(CORE_DIR)/src/device/r4300/cached_interp.o $(CORE_DIR)/src/device/r4300/pure_interp.o: $(addprefix $(CORE_DIR)/src/device/r4300/,interp_fpu_move.h interp_thread_poll.h)
 $(CORE_DIR)/src/device/r4300/fpu_native.o: $(addprefix $(CORE_DIR)/src/device/r4300/,fpu_native.h fpu_neon.h cp1.h)
@@ -638,8 +663,9 @@ endif
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -MMD -MP -c $< -o $@
 
 ifneq ($(ARI64_DIR),)
-$(ARI64_DIR)/ari64_x64.o: CFLAGS += -O3
+$(ARI64_SOURCE:.c=.o): CFLAGS += -O3
 $(ARI64_DIR)/ari64_x64.o: $(wildcard $(ARI64_DIR)/x64/*.inc) $(ARI64_DIR)/x64/assem_x64.h
+$(ARI64_DIR)/ari64_arm64.o: $(wildcard $(ARI64_DIR)/arm64/*.inc) $(ARI64_DIR)/arm64/assem_arm64.h $(ARI64_DIR)/ari64.h
 ifeq ($(ARI64_PROFILE),1)
 $(CORE_DIR)/src/device/r4300/cached_interp.o: CFLAGS += -DARI64_PROFILE
 endif

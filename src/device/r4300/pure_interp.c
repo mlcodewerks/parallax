@@ -21,6 +21,9 @@
 
 #include "pure_interp.h"
 #include "cached_interp.h"
+#ifdef HAVE_ARI64
+#include "new_dynarec/ari64.h"
+#endif
 #include "idec.h"
 #include "timing.h"
 
@@ -2718,8 +2721,8 @@ void run_r4300(struct r4300_core* r4300)
         r4300->interp_PC.addr = r4300->cp0.last_addr = r4300->start_address;
         if (r4300->emumode != EMUMODE_PURE_INTERPRETER && !cached_interp_init(r4300))
             r4300->emumode = EMUMODE_PURE_INTERPRETER;
-#ifdef HAVE_ARI64_X64
-        if (r4300->emumode == EMUMODE_DYNAREC) core_log(CORE_LOG_INFO, "CPU dynarec: ari64-x64");
+#ifdef HAVE_ARI64
+        if (r4300->emumode == EMUMODE_DYNAREC) core_log(CORE_LOG_INFO, "CPU dynarec: " ARI64_BACKEND_NAME);
         else
 #else
         if (r4300->emumode == EMUMODE_DYNAREC) r4300->emumode = EMUMODE_PURE_INTERPRETER;
@@ -2728,7 +2731,7 @@ void run_r4300(struct r4300_core* r4300)
         r4300->startup = 0;
     }
 
-#ifdef HAVE_ARI64_X64
+#ifdef HAVE_ARI64
     if (r4300->emumode == EMUMODE_DYNAREC)
     {
         r4300->execute_one = cached_dynarec_execute_one;

@@ -51,7 +51,7 @@ static void emit_set_condition(int reg, unsigned condition)
  * Commit ordinary results here; exceptional outputs, enabled exceptions and
  * event boundaries retain the shared finish without repeating arithmetic. */
 static unsigned char* emit_fpu_fast_finish(uint32_t instruction, unsigned index,
-    const struct ari64_x64_config* config, unsigned char** exits, unsigned* exit_count)
+    const struct ari64_config* config, unsigned char** exits, unsigned* exit_count)
 {
     unsigned fn = instruction & 63, fmt = (instruction >> 21) & 31;
     int integer = (fn >= 8 && fn <= 15) || fn == 36 || fn == 37;
@@ -99,7 +99,7 @@ static unsigned char* emit_fpu_fast_finish(uint32_t instruction, unsigned index,
     for (unsigned n = 0; n < slow_count; ++n) patch_jump(slow[n],out);
     return done;
 }
-static void emit_fpu_native(uint32_t instruction, unsigned index, const struct ari64_x64_config* config,
+static void emit_fpu_native(uint32_t instruction, unsigned index, const struct ari64_config* config,
     unsigned char** exits, unsigned* exit_count)
 {
     unsigned fmt = (instruction >> 21) & 31, fn = instruction & 63;

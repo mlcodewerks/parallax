@@ -13,7 +13,7 @@ struct renderer_settings renderer_settings;
 #else
 #define RENDERERS RENDERERS_BASE
 #endif
-#ifdef HAVE_ARI64_X64
+#ifdef HAVE_ARI64
 #define CPU_CORES "cached|pure|dynarec"
 #else
 #define CPU_CORES "cached|pure"
@@ -242,7 +242,7 @@ void renderer_read_options(retro_environment_t env)
     s->fast_cpu_timing = true;
     v = value(env, "wtfn64_cpu_core", "cached");
     s->cpu_core = !strcmp(v, "pure") ? CPU_CORE_PURE : CPU_CORE_CACHED;
-#ifdef HAVE_ARI64_X64
+#ifdef HAVE_ARI64
     if (!strcmp(v, "dynarec")) s->cpu_core = CPU_CORE_DYNAREC;
 #endif
 #ifdef HAVE_PARALLEL_RDP

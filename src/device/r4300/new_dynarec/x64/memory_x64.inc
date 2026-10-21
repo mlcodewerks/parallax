@@ -95,7 +95,7 @@ static void emit_itlb_native(uint32_t pc)
 /* Fetch state changes happen only after the current instruction's guards.
  * A region stays on one code page, so its first fetch establishes the exact
  * two-entry instruction micro-TLB hit/replacement state for later fetches. */
-static void emit_fetch_native(const struct ari64_x64_config* config, unsigned index, unsigned start, unsigned base, int check_line)
+static void emit_fetch_native(const struct ari64_config* config, unsigned index, unsigned start, unsigned base, int check_line)
 {
     unsigned cycles = base + r4300_issue_reservation(config->compat_issue_clock);
     emit_addimm(R13, cycles, R13);
@@ -214,7 +214,7 @@ static void emit_mapped_cacheability(void)
     emit_mem(0x8b, 0, RDX, RSP, -1, 0, 0);
 }
 static void emit_memory_native(uint32_t instruction, unsigned index,
-    const struct ari64_x64_config* config, struct memory_exit* exit, int check_line,
+    const struct ari64_config* config, struct memory_exit* exit, int check_line,
     uint32_t previous, int known)
 {
     enum r4300_opcode op = r4300_get_idec(instruction)->opcode;

@@ -4,11 +4,19 @@ RSPDIR_PARALLEL    =  $(CORE_DIR)/src/device/rcp/rsp/p_rsp
 
 DYNAREC_USED := 0
 
-# Ari64 is supported only on x64. Never select another CPU JIT backend.
+# Select the Ari64 host emitter; both use the same precise CPU frontend.
 ifeq ($(WITH_DYNAREC),x86_64)
     DYNAREC_USED := 1
-    COREFLAGS += -DHAVE_ARI64_X64
+    COREFLAGS += -DHAVE_ARI64
     ARI64_DIR = $(CORE_DIR)/src/device/r4300/new_dynarec
+    ARI64_SOURCE = $(ARI64_DIR)/ari64_x64.c
+else ifeq ($(WITH_DYNAREC),aarch64)
+ifneq (,$(filter -DOS_LINUX,$(COREFLAGS)))
+    DYNAREC_USED := 1
+    COREFLAGS += -DHAVE_ARI64
+    ARI64_DIR = $(CORE_DIR)/src/device/r4300/new_dynarec
+    ARI64_SOURCE = $(ARI64_DIR)/ari64_arm64.c
+endif
 endif
 
 INCFLAGS += \
@@ -196,6 +204,6 @@ endif
 
 ifeq ($(DYNAREC_USED),1)
 ifneq ($(ARI64_DIR),)
-SOURCES_C += $(ARI64_DIR)/ari64_x64.c
+SOURCES_C += $(ARI64_SOURCE)
 endif
 endif

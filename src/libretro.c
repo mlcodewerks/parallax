@@ -624,7 +624,7 @@ void update_variables(bool startup)
         r4300_emumode = EMUMODE_INTERPRETER;
 #else
         r4300_emumode = renderer_settings.cpu_core == CPU_CORE_PURE ? EMUMODE_PURE_INTERPRETER : EMUMODE_INTERPRETER;
-#ifdef HAVE_ARI64_X64
+#ifdef HAVE_ARI64
         if (renderer_settings.cpu_core == CPU_CORE_DYNAREC) r4300_emumode = EMUMODE_DYNAREC;
 #endif
 #endif

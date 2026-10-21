@@ -22,7 +22,7 @@
  * Only the x64 machine-code emitter is retained. CPU state, instruction
  * boundaries and exception-sensitive operations use this core's shared model.
  */
-#include "ari64_x64.h"
+#include "ari64.h"
 #include "device/r4300/r4300_core.h"
 #include "device/r4300/idec.h"
 #include "device/r4300/timing.h"

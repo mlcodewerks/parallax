@@ -5,6 +5,9 @@ stops with an error on unsupported tasks. Independent RSP overrides are
 ignored in production and diagnostic libretro builds. See
 [F-Zero X cadence and mode validation](FZERO_TIMING.md).
 
+[Mario Kart 64 track depth](MK64_DEPTH.md) documents the older F3DEX perspective
+command fix and native-RSP comparisons for angrylion HLE graphics.
+
 [Star Wars Episode I: Racer NTSC video comparison](RACER_TIMING.md) checks race-clock
 progress and rendered-buffer cadence in both game resolution settings and timing modes.
 The [paraLLEl-RDP update](PARALLEL_RDP_UPDATE.md) records shader generation,

@@ -8,8 +8,8 @@
 #include "interp_fpu_move.h"
 #include "interp_poll.h"
 #include "interp_thread_poll.h"
-#ifdef HAVE_ARI64_X64
-#include "new_dynarec/ari64_x64.h"
+#ifdef HAVE_ARI64
+#include "new_dynarec/ari64.h"
 #include "core/log.h"
 #include "core/types.h"
 #endif
@@ -156,12 +156,12 @@ struct cached_block
      * for arithmetic, guarded RAM and direct COP1 dispatch. */
     struct cached_instruction instructions[CI_BLOCK_INSTRUCTIONS];
     r4300_interp_handler handlers[CI_BLOCK_INSTRUCTIONS];
-#ifdef HAVE_ARI64_X64
-    ari64_x64_entry native_entry, native_one_entry, native_chain_entry;
+#ifdef HAVE_ARI64
+    ari64_entry native_entry, native_one_entry, native_chain_entry;
     uint64_t native_generation, native_one_generation;
     uint8_t heat, native_candidate;
     uint8_t native_link_replace;
-    struct ari64_x64_link_cache native_links[2];
+    struct ari64_link_cache native_links[2];
 #endif
     struct interp_ram_poll poll;
     uint32_t source_words[CI_BLOCK_INSTRUCTIONS + 2];
@@ -179,8 +179,8 @@ struct cached_set
 
 struct cached_interp_state
 {
-#ifdef HAVE_ARI64_X64
-    struct ari64_x64* jit;
+#ifdef HAVE_ARI64
+    struct ari64* jit;
     uint64_t jit_entries, jit_commits;
     uint64_t jit_fast_commits, jit_links;
     uint64_t jit_direct_links;
@@ -804,11 +804,11 @@ static CI_COLD_NOINLINE struct cached_block* ci_build_block(struct r4300_core* r
 
 
     set->next_replace ^= 1;
-#ifdef HAVE_ARI64_X64
+#ifdef HAVE_ARI64
     if (state->jit && block->valid && block->virtual_pc != pc) ++state->jit_replacements;
 #endif
     block->valid = 0;
-#ifdef HAVE_ARI64_X64
+#ifdef HAVE_ARI64
     block->native_entry = block->native_one_entry = NULL;
     block->heat = 0;
     block->native_candidate = 0;
@@ -954,14 +954,14 @@ static int ci_verify_dirty_block(struct r4300_core* r, struct cached_block* bloc
         block->page_generation == r->cached_interp->page_generation[physical_page]) return 1;
     const uint32_t* source = fast_mem_access(r, pc);
     if (!source || memcmp(source, block->source_words, block->source_count * sizeof(uint32_t))) {
-#ifdef HAVE_ARI64_X64
+#ifdef HAVE_ARI64
         ++r->cached_interp->jit_verifications[1];
 #endif
         return 0;
     }
     if (block->epoch != r->cached_interp->epoch || block->page_generation != r->cached_interp->page_generation[physical_page]) {
         ++r->cached_interp->restored_blocks;
-#ifdef HAVE_ARI64_X64
+#ifdef HAVE_ARI64
         ++r->cached_interp->jit_verifications[0];
 #endif
     }
@@ -1104,7 +1104,7 @@ int cached_interp_init(struct r4300_core* r4300)
     if (r4300->cached_interp == NULL)
         return 0;
     unsigned set_count = CI_SET_COUNT;
-#ifdef HAVE_ARI64_X64
+#ifdef HAVE_ARI64
 #ifndef CI_JIT_SET_COUNT
 #define CI_JIT_SET_COUNT CI_CACHED_SET_COUNT
 #endif
@@ -1118,9 +1118,9 @@ int cached_interp_init(struct r4300_core* r4300)
 
     r4300->cached_interp->epoch = 1;
     r4300->cached_code_pages = r4300->cached_interp->page_cached;
-#ifdef HAVE_ARI64_X64
+#ifdef HAVE_ARI64
     if (r4300->emumode == EMUMODE_DYNAREC) {
-        r4300->cached_interp->jit = ari64_x64_create();
+        r4300->cached_interp->jit = ari64_create();
         if (!r4300->cached_interp->jit) {
             cached_interp_destroy(r4300);
             return 0;
@@ -1132,8 +1132,8 @@ int cached_interp_init(struct r4300_core* r4300)
 
 void cached_interp_destroy(struct r4300_core* r4300)
 {
-#ifdef HAVE_ARI64_X64
-    if (r4300->cached_interp) ari64_x64_destroy(r4300->cached_interp->jit);
+#ifdef HAVE_ARI64
+    if (r4300->cached_interp) ari64_destroy(r4300->cached_interp->jit);
 #endif
     if (r4300->cached_interp) free(r4300->cached_interp->sets);
     if (r4300->cached_interp) free(r4300->cached_interp->recent_blocks);
@@ -1572,7 +1572,7 @@ void cached_interp_run(struct r4300_core* r4300)
     }
 }
 
-#ifdef HAVE_ARI64_X64
+#ifdef HAVE_ARI64
 /* Precise stubs retain the shared instruction ordering and delay-slot rules.
  * Native guards/timing commit in machine code. A memory stub writes back its
  * prefix before calling here, and reloads its allocation before resuming. */
@@ -1639,7 +1639,7 @@ static int ci_jit_step(struct r4300_core* r, void* opaque, unsigned i, unsigned 
            ci_mapping_matches(r, block);
 }
 
-static ari64_x64_entry ci_jit_link(struct r4300_core* r)
+static ari64_entry ci_jit_link(struct r4300_core* r)
 {
     if (breakloop || r->delay_slot || r->stop || (r->interp_PC.addr & 3)) return NULL;
     struct cached_interp_state* state = r->cached_interp;
@@ -1651,13 +1651,13 @@ static ari64_x64_entry ci_jit_link(struct r4300_core* r)
         next->epoch != state->epoch ||
         next->page_generation != state->page_generation[next->physical_page] ||
         !ci_mapping_matches(r, next) ||
-        !ari64_x64_entry_valid(state->jit, next->native_entry, next->native_generation)) return NULL;
+        !ari64_entry_valid(state->jit, next->native_entry, next->native_generation)) return NULL;
     struct cached_block* previous = state->previous_block;
     /* Fixed KSEG edges need no mapping load. Mapped edges guard the live LUT
      * entry in assembly; cache attributes remain live in the target body. */
     if (previous) {
         unsigned slot = previous->native_links[0].pc == pc ? 0 : previous->native_links[1].pc == pc ? 1 : previous->native_link_replace++ & 1;
-        struct ari64_x64_link_cache* cache = &previous->native_links[slot];
+        struct ari64_link_cache* cache = &previous->native_links[slot];
         cache->pc = pc; cache->epoch = state->epoch;
         cache->page_generation = state->page_generation[next->physical_page];
         cache->expected_entry = next->native_entry; cache->body = next->native_chain_entry;
@@ -1665,7 +1665,7 @@ static ari64_x64_entry ci_jit_link(struct r4300_core* r)
         cache->current_page_generation = &state->page_generation[next->physical_page];
         cache->current_mapping = (pc & UINT32_C(0xc0000000)) == UINT32_C(0x80000000) ? NULL : &r->cp0.tlb.LUT_r[pc >> CI_PAGE_SHIFT];
         cache->mapping = cache->current_mapping ? *cache->current_mapping : 0;
-        cache->current_segment_generation = ari64_x64_entry_generation_ptr(state->jit,next->native_entry);
+        cache->current_segment_generation = ari64_entry_generation_ptr(state->jit,next->native_entry);
         cache->segment_generation = next->native_generation;
         cache->target_block = next;
         cache->profile_entries = NULL;
@@ -1726,12 +1726,12 @@ static void ci_execute_jit(struct r4300_core* r, int one)
     if (!one && !block->native_candidate) {
         uint32_t ops[CI_BLOCK_INSTRUCTIONS];
         for (unsigned i = 0; i < block->count; ++i) ops[i] = block->instructions[i].op;
-        block->native_candidate = ari64_x64_has_native(ops,block->count,block->delay_op,block->has_delay,block->idle_end) ? 1 : 2;
+        block->native_candidate = ari64_has_native(ops,block->count,block->delay_op,block->has_delay,block->idle_end) ? 1 : 2;
     }
 
-    ari64_x64_entry* entry = one ? &block->native_one_entry : &block->native_entry;
+    ari64_entry* entry = one ? &block->native_one_entry : &block->native_entry;
     uint64_t* generation = one ? &block->native_one_generation : &block->native_generation;
-    if (!ari64_x64_entry_valid(state->jit, *entry, *generation)) {
+    if (!ari64_entry_valid(state->jit, *entry, *generation)) {
         /* Ari64-style hot block compilation: execute cold decoded blocks
          * before spending code space and protection syscalls on them. */
         /* Short precise-only wrappers pay off by retaining native tail chains
@@ -1745,7 +1745,7 @@ static void ci_execute_jit(struct r4300_core* r, int one)
         uint32_t ops[CI_BLOCK_INSTRUCTIONS];
         unsigned count = one ? 1 : block->count;
         for (unsigned i = 0; i < count; ++i) ops[i] = block->instructions[i].op;
-        struct ari64_x64_config config = {block->virtual_pc, block->physical_page, r->cache_timing, one ? NULL : ci_jit_link,
+        struct ari64_config config = {block->virtual_pc, block->physical_page, r->cache_timing, one ? NULL : ci_jit_link,
             block->delay_op, !one && block->has_delay, block->idle_end, &state->jit_commits, &state->jit_fast_commits,
             ci_jit_fpu_prepare, ci_jit_fpu_finish, one ? NULL : &block->native_chain_entry};
         config.compat_issue_clock = r->compat_issue_clock;
@@ -1755,10 +1755,10 @@ static void ci_execute_jit(struct r4300_core* r, int one)
 #ifdef ARI64_PROFILE
         config.profile = 1;
 #endif
-        *entry = ari64_x64_compile_optimized(state->jit, block, ops, count, ci_jit_step, &config);
-        *generation = ari64_x64_generation(state->jit);
+        *entry = ari64_compile_optimized(state->jit, block, ops, count, ci_jit_step, &config);
+        *generation = ari64_generation(state->jit);
         if (!*entry) {
-            core_log(CORE_LOG_ERROR, "Ari64 x64 executable code allocation/protection failed; stopping CPU");
+            core_log(CORE_LOG_ERROR, "Ari64 executable code allocation/protection failed; stopping CPU");
             r->stop = 1;
             breakloop = true;
             return;
@@ -1776,13 +1776,13 @@ void cached_dynarec_run(struct r4300_core* r) { while (!breakloop) ci_execute_ji
 void cached_dynarec_stats(struct r4300_core* r, uint64_t stats[4])
 {
     struct cached_interp_state* s = r->cached_interp;
-    ari64_x64_stats(s ? s->jit : NULL, &stats[0], &stats[1]);
+    ari64_stats(s ? s->jit : NULL, &stats[0], &stats[1]);
     stats[2] = s ? s->jit_entries : 0;
     stats[3] = s ? s->jit_commits : 0;
-    if (s) core_log(CORE_LOG_INFO, "Ari64 x64 cache: new=%llu recycled=%llu verified=%llu changed=%llu replaced=%llu",
+    if (s) core_log(CORE_LOG_INFO, "Ari64 cache: new=%llu recycled=%llu verified=%llu changed=%llu replaced=%llu",
         (unsigned long long)s->jit_compile_misses[0], (unsigned long long)s->jit_compile_misses[1],
         (unsigned long long)s->jit_verifications[0], (unsigned long long)s->jit_verifications[1], (unsigned long long)s->jit_replacements);
-    if (s) core_log(CORE_LOG_INFO,"Ari64 x64 links: direct=%llu",(unsigned long long)s->jit_direct_links);
+    if (s) core_log(CORE_LOG_INFO,"Ari64 links: direct=%llu",(unsigned long long)s->jit_direct_links);
 #ifdef ARI64_PROFILE
     if (s) {
         for (unsigned i = 0; i < 64; ++i)
@@ -1810,7 +1810,7 @@ void cached_dynarec_stats(struct r4300_core* r, uint64_t stats[4])
 }
 void cached_dynarec_code_stats(struct r4300_core* r, uint64_t stats[3])
 {
-    ari64_x64_code_stats(r->cached_interp ? r->cached_interp->jit : NULL, stats);
+    ari64_code_stats(r->cached_interp ? r->cached_interp->jit : NULL, stats);
 }
 void cached_dynarec_optimization_stats(struct r4300_core* r, uint64_t stats[2])
 {

@@ -9,7 +9,7 @@ enum { CODE_BYTES = ARI64_X64_ARENA_BYTES, MAX_INSTRUCTIONS = 32 };
 #endif
 enum { CODE_SEGMENTS = ARI64_X64_SEGMENTS,
     SEGMENT_BYTES = CODE_BYTES / CODE_SEGMENTS };
-struct ari64_x64 {
+struct ari64 {
     unsigned char* code;
     size_t used, page_size;
     uint64_t generation, blocks, native;
@@ -27,9 +27,9 @@ static int code_protect(void* ptr, size_t size, int executable)
 #endif
 }
 
-struct ari64_x64* ari64_x64_create(void)
+struct ari64* ari64_create(void)
 {
-    struct ari64_x64* s = calloc(1, sizeof(*s));
+    struct ari64* s = calloc(1, sizeof(*s));
     if (!s) return NULL;
 #ifdef _WIN32
     SYSTEM_INFO info;
@@ -37,7 +37,7 @@ struct ari64_x64* ari64_x64_create(void)
     s->page_size = info.dwPageSize;
     /* Upstream linkage uses rel32 calls. Keep the arena within range of this
      * module, so precise helpers can use the same five-byte call encoding. */
-    uintptr_t anchor = (uintptr_t)&ari64_x64_create;
+    uintptr_t anchor = (uintptr_t)&ari64_create;
     uintptr_t cursor = anchor > UINT32_C(0x60000000) ? anchor - UINT32_C(0x60000000) : (uintptr_t)info.lpMinimumApplicationAddress;
     uintptr_t limit = anchor + UINT32_C(0x60000000);
     MEMORY_BASIC_INFORMATION region;
@@ -63,7 +63,7 @@ struct ari64_x64* ari64_x64_create(void)
     return s;
 }
 
-void ari64_x64_destroy(struct ari64_x64* s)
+void ari64_destroy(struct ari64* s)
 {
     if (!s) return;
 #ifdef _WIN32
@@ -74,23 +74,23 @@ void ari64_x64_destroy(struct ari64_x64* s)
     free(s);
 }
 
-uint64_t ari64_x64_generation(const struct ari64_x64* s) { return s->generation; }
-int ari64_x64_entry_valid(const struct ari64_x64* s, ari64_x64_entry entry, uint64_t generation)
+uint64_t ari64_generation(const struct ari64* s) { return s->generation; }
+int ari64_entry_valid(const struct ari64* s, ari64_entry entry, uint64_t generation)
 {
     uintptr_t offset = (uintptr_t)entry - (uintptr_t)s->code;
     return entry && offset < CODE_BYTES && s->segment_generation[offset / SEGMENT_BYTES] == generation;
 }
-const uint64_t* ari64_x64_entry_generation_ptr(const struct ari64_x64* s, ari64_x64_entry entry)
+const uint64_t* ari64_entry_generation_ptr(const struct ari64* s, ari64_entry entry)
 {
     uintptr_t offset = (uintptr_t)entry - (uintptr_t)s->code;
     return entry && offset < CODE_BYTES ? &s->segment_generation[offset / SEGMENT_BYTES] : NULL;
 }
-void ari64_x64_stats(const struct ari64_x64* s, uint64_t* blocks, uint64_t* native)
+void ari64_stats(const struct ari64* s, uint64_t* blocks, uint64_t* native)
 {
     *blocks = s ? s->blocks : 0;
     *native = s ? s->native : 0;
 }
-void ari64_x64_code_stats(const struct ari64_x64* s, uint64_t stats[3])
+void ari64_code_stats(const struct ari64* s, uint64_t stats[3])
 {
     stats[0] = s ? s->emitted_bytes : 0;
     stats[1] = s ? s->relative_calls : 0;
@@ -279,7 +279,7 @@ static void emit_helper_call(const void* function)
         ++compile_absolute_calls;
     }
 }
-static void emit_step_call(void* block, unsigned index, unsigned phase, ari64_x64_step step)
+static void emit_step_call(void* block, unsigned index, unsigned phase, ari64_step step)
 {
     emit_mov64(R12, ARG1_REG);
     emit_movimm64((intptr_t)block, ARG2_REG);
@@ -306,7 +306,7 @@ static void patch_jump(unsigned char* displacement, unsigned char* target)
 #include "fpu_x64.inc"
 #include "alu_x64.inc"
 #include "link_x64.inc"
-int ari64_x64_has_native(const uint32_t* ops, unsigned count, uint32_t delay_op, unsigned has_delay, unsigned idle)
+int ari64_has_native(const uint32_t* ops, unsigned count, uint32_t delay_op, unsigned has_delay, unsigned idle)
 {
     for (unsigned i = 0; i < count; ++i) {
         enum r4300_opcode op = r4300_get_idec(ops[i])->opcode;
@@ -316,7 +316,7 @@ int ari64_x64_has_native(const uint32_t* ops, unsigned count, uint32_t delay_op,
         native_branch_opcode(r4300_get_idec(ops[count - 1])->opcode) &&
         native_opcode(r4300_get_idec(delay_op)->opcode);
 }
-static unsigned char* emit_step(void* block, unsigned index, unsigned phase, ari64_x64_step step)
+static unsigned char* emit_step(void* block, unsigned index, unsigned phase, ari64_step step)
 {
     emit_step_call(block, index, phase, step);
     output_byte(0x85); output_modrm(3, RAX, RAX);
@@ -328,7 +328,7 @@ static unsigned char* emit_step(void* block, unsigned index, unsigned phase, ari
  * Commit locally while no event is due; the original helper still handles
  * exact event boundaries and all preparation faults. */
 static void emit_transfer_commit(void* block, unsigned index,
-    const struct ari64_x64_config* config, ari64_x64_step step,
+    const struct ari64_config* config, ari64_step step,
     unsigned char** exits, unsigned* exit_count)
 {
     emit_mem(0x83, 1, 7, R12, -1, 0, offsetof(struct r4300_core, cp0.cycle_count)); output_byte(0);
@@ -348,10 +348,10 @@ static void emit_transfer_commit(void* block, unsigned index,
     patch_jump(done, out);
 }
 
-static ari64_x64_entry compile_block(struct ari64_x64* s, void* block,
-    const uint32_t* ops, unsigned count, ari64_x64_step step, int optimized, const struct ari64_x64_config* config)
+static ari64_entry compile_block(struct ari64* s, void* block,
+    const uint32_t* ops, unsigned count, ari64_step step, int optimized, const struct ari64_config* config)
 {
-    ari64_x64_link link = config ? config->link : NULL;
+    ari64_link link = config ? config->link : NULL;
     if (!count || count > MAX_INSTRUCTIONS) return NULL;
     uint32_t extended_ops[MAX_INSTRUCTIONS];
     unsigned branch_index = MAX_INSTRUCTIONS;
@@ -565,17 +565,17 @@ static ari64_x64_entry compile_block(struct ari64_x64* s, void* block,
     s->emitted_bytes += out - start;
     s->relative_calls += compile_relative_calls;
     s->absolute_calls += compile_absolute_calls;
-    if (config && config->chain_entry) *config->chain_entry = (ari64_x64_entry)(void*)chain_entry;
-    return (ari64_x64_entry)(void*)start;
+    if (config && config->chain_entry) *config->chain_entry = (ari64_entry)(void*)chain_entry;
+    return (ari64_entry)(void*)start;
 }
 
-ari64_x64_entry ari64_x64_compile(struct ari64_x64* s, void* block,
-    const uint32_t* ops, unsigned count, ari64_x64_step step)
+ari64_entry ari64_compile(struct ari64* s, void* block,
+    const uint32_t* ops, unsigned count, ari64_step step)
 {
     return compile_block(s, block, ops, count, step, 0, NULL);
 }
-ari64_x64_entry ari64_x64_compile_optimized(struct ari64_x64* s, void* block,
-    const uint32_t* ops, unsigned count, ari64_x64_step step, const struct ari64_x64_config* config)
+ari64_entry ari64_compile_optimized(struct ari64* s, void* block,
+    const uint32_t* ops, unsigned count, ari64_step step, const struct ari64_config* config)
 {
     return compile_block(s, block, ops, count, step, 1, config);
 }

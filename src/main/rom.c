@@ -238,12 +238,12 @@ core_result close_rom(void)
         core_log(CORE_LOG_INFO, "Cached CPU blocks: decoded=%" PRIu64 " restored=%" PRIu64,
             cache[0], cache[1]);
     }
-#ifdef HAVE_ARI64_X64
+#ifdef HAVE_ARI64
     if (g_dev.r4300.emumode == EMUMODE_DYNAREC) {
         uint64_t stats[4], optimized[2], code[3];
         cached_dynarec_stats(&g_dev.r4300, stats);
         cached_dynarec_optimization_stats(&g_dev.r4300, optimized);
-        core_log(CORE_LOG_INFO, "Ari64 x64: blocks=%" PRIu64 " native=%" PRIu64
+        core_log(CORE_LOG_INFO, "Ari64: blocks=%" PRIu64 " native=%" PRIu64
             " entries=%" PRIu64 " commits=%" PRIu64,
             stats[0], stats[1], stats[2], stats[3]);
         core_log(CORE_LOG_INFO, "Ari64 optimization: fast=%" PRIu64 " links=%" PRIu64 " direct=%" PRIu64,
