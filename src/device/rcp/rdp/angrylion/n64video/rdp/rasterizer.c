@@ -122,6 +122,12 @@ static void fetch_qword_copy(uint32_t wid, uint32_t* hidword, uint32_t* lowdword
 
 static STRICTINLINE void rgba_correct(uint32_t wid, int offx, int offy, int r, int g, int b, int a, uint32_t cvg)
 {
+#if defined(AL_SIMD_SSE42)
+    __m128i dx=_mm_setr_epi32(state[wid].spans_cdr,state[wid].spans_cdg,state[wid].spans_cdb,state[wid].spans_cda);
+    __m128i dy=_mm_setr_epi32(state[wid].spans_drdy,state[wid].spans_dgdy,state[wid].spans_dbdy,state[wid].spans_dady);
+    _mm_storeu_si128((__m128i*)&state[wid].shade_color,al_shade4(_mm_setr_epi32(r,g,b,a),dx,dy,offx,offy,cvg));
+#else
+
     int summand_r, summand_b, summand_g, summand_a;
 
 
@@ -151,6 +157,7 @@ static STRICTINLINE void rgba_correct(uint32_t wid, int offx, int offy, int r, i
     state[wid].shade_color.g = special_9bit_clamptable[g & 0x1ff];
     state[wid].shade_color.b = special_9bit_clamptable[b & 0x1ff];
     state[wid].shade_color.a = special_9bit_clamptable[a & 0x1ff];
+#endif
 }
 
 static STRICTINLINE void z_correct(uint32_t wid, int offx, int offy, int* z, uint32_t cvg)
@@ -1763,6 +1770,27 @@ static void render_fill_row_16(uint32_t wid, uint32_t fb_lo, int count)
         }
     }
 }
+#if defined(AL_SIMD_SSE2)
+static void render_fill_row_32(uint32_t wid,uint32_t fb_lo,int count)
+{
+    if(count<=0) return;
+    uint32_t first=fb_lo&px_mask32,last=(fb_lo+(uint32_t)(count-1))&px_mask32;
+    uint32_t fill=state[wid].fill_color;
+    uint8_t hi=fill&0x10000?3:0,lo=fill&1?3:0;
+    if(last<first || last>pxlim32) {
+        for(int i=0;i<count;++i) rdram_write_pair32(fb_lo+i,fill,hi,lo);
+        return;
+    }
+    __m128i pixels=_mm_set1_epi32(fill);
+    uint64_t hidden=((uint64_t)hi|((uint64_t)lo<<8))*UINT64_C(0x0001000100010001);
+    while(count>=4) {
+        _mm_storeu_si128((__m128i*)(px32+first),pixels);
+        memcpy(px_hidden+(first<<1),&hidden,sizeof(hidden));
+        first+=4;count-=4;
+    }
+    while(count--) { px32[first]=fill;px_hidden[first<<1]=hi;px_hidden[(first<<1)+1]=lo;++first; }
+}
+#endif
 #endif
 
 static void render_spans_fill(uint32_t wid, int start, int end, int flip)
@@ -1838,6 +1866,14 @@ static void render_spans_fill(uint32_t wid, int start, int end, int flip)
                                       : (fb_base + (uint32_t)(xendsc - length));
                 render_fill_row_16(wid, fb_lo, length + 1);
             }
+#if defined(AL_SIMD_SSE2)
+            else if(state[wid].fb_size==PIXEL_SIZE_32BIT && length>=0)
+            {
+                uint32_t base=(state[wid].fb_address>>2)+(uint32_t)(state[wid].fb_width*i);
+                uint32_t first=flip?base+(uint32_t)xendsc:base+(uint32_t)(xendsc-length);
+                render_fill_row_32(wid,first,length+1);
+            }
+#endif
             else
 #endif
             for (j = 0; j <= length; j++)
@@ -2054,9 +2090,13 @@ static void render_spans_copy(uint32_t wid, int start, int end, int tilenum, int
  * are signedness-independent, so the unsigned _mm_mul_epu32 pair is exact. */
 static INLINE __m128i ew_mul32(__m128i a, __m128i b)
 {
+#if defined(AL_SIMD_SSE42)
+    return _mm_mullo_epi32(a,b);
+#else
     __m128i e = _mm_mul_epu32(a, b);
     __m128i o = _mm_mul_epu32(_mm_srli_si128(a, 4), _mm_srli_si128(b, 4));
     return _mm_unpacklo_epi32(_mm_shuffle_epi32(e, 0x08), _mm_shuffle_epi32(o, 0x08));
+#endif
 }
 #endif
 

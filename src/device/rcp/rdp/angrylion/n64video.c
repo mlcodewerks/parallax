@@ -112,6 +112,7 @@ static STRICTINLINE uint32_t irand(uint32_t* state)
  * finished frame's capture */
 extern long al_cap_vi;
 void al_capture_vi(void);
+#include "n64video/simd.h"
 #include "n64video/rdp.c"
 #include "n64video/vi.c"
 

@@ -107,9 +107,14 @@ static STRICTINLINE void blender_equation_cycle0(uint32_t wid, int* r, int* g, i
     mulb = blend2a + 1;
 
 
+#if defined(AL_SIMD_SSE42)
+    __m128i sums=al_blend4(_mm_setr_epi32(*state[wid].blender1a_r[0],*state[wid].blender1a_g[0],*state[wid].blender1a_b[0],0),_mm_setr_epi32(*state[wid].blender2a_r[0],*state[wid].blender2a_g[0],*state[wid].blender2a_b[0],0),blend1a,mulb);
+    blr=_mm_cvtsi128_si32(sums); blg=_mm_extract_epi32(sums,1); blb=_mm_extract_epi32(sums,2);
+#else
     blr = (*state[wid].blender1a_r[0]) * blend1a + (*state[wid].blender2a_r[0]) * mulb;
     blg = (*state[wid].blender1a_g[0]) * blend1a + (*state[wid].blender2a_g[0]) * mulb;
     blb = (*state[wid].blender1a_b[0]) * blend1a + (*state[wid].blender2a_b[0]) * mulb;
+#endif
 
 
 
@@ -146,9 +151,15 @@ static STRICTINLINE void blender_equation_cycle0_2(uint32_t wid, int* r, int* g,
     }
 
     blend2a += 1;
+#if defined(AL_SIMD_SSE42)
+    __m128i sums=al_blend4(_mm_setr_epi32(*state[wid].blender1a_r[0],*state[wid].blender1a_g[0],*state[wid].blender1a_b[0],0),_mm_setr_epi32(*state[wid].blender2a_r[0],*state[wid].blender2a_g[0],*state[wid].blender2a_b[0],0),blend1a,blend2a);
+    sums=_mm_and_si128(_mm_srai_epi32(sums,5),_mm_set1_epi32(255));
+    *r=_mm_cvtsi128_si32(sums); *g=_mm_extract_epi32(sums,1); *b=_mm_extract_epi32(sums,2);
+#else
     *r = (((*state[wid].blender1a_r[0]) * blend1a + (*state[wid].blender2a_r[0]) * blend2a) >> 5) & 0xff;
     *g = (((*state[wid].blender1a_g[0]) * blend1a + (*state[wid].blender2a_g[0]) * blend2a) >> 5) & 0xff;
     *b = (((*state[wid].blender1a_b[0]) * blend1a + (*state[wid].blender2a_b[0]) * blend2a) >> 5) & 0xff;
+#endif
 }
 
 static STRICTINLINE void blender_equation_cycle1(uint32_t wid, int* r, int* g, int* b)
@@ -166,9 +177,14 @@ static STRICTINLINE void blender_equation_cycle1(uint32_t wid, int* r, int* g, i
     }
 
     mulb = blend2a + 1;
+#if defined(AL_SIMD_SSE42)
+    __m128i sums=al_blend4(_mm_setr_epi32(*state[wid].blender1a_r[1],*state[wid].blender1a_g[1],*state[wid].blender1a_b[1],0),_mm_setr_epi32(*state[wid].blender2a_r[1],*state[wid].blender2a_g[1],*state[wid].blender2a_b[1],0),blend1a,mulb);
+    blr=_mm_cvtsi128_si32(sums); blg=_mm_extract_epi32(sums,1); blb=_mm_extract_epi32(sums,2);
+#else
     blr = (*state[wid].blender1a_r[1]) * blend1a + (*state[wid].blender2a_r[1]) * mulb;
     blg = (*state[wid].blender1a_g[1]) * blend1a + (*state[wid].blender2a_g[1]) * mulb;
     blb = (*state[wid].blender1a_b[1]) * blend1a + (*state[wid].blender2a_b[1]) * mulb;
+#endif
 
     if (!state[wid].other_modes.force_blend)
     {

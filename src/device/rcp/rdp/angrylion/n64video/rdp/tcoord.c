@@ -261,6 +261,11 @@ static STRICTINLINE void tclod_4x17_to_15(int32_t scurr, int32_t snext, int32_t 
 
 static STRICTINLINE void tclod_tcclamp(int32_t* sss, int32_t* sst)
 {
+#if defined(AL_SIMD_SSE42)
+    __m128i v=al_tcclamp4(_mm_setr_epi32(*sss,*sst,0,0));
+    *sss=_mm_cvtsi128_si32(v); *sst=_mm_extract_epi32(v,1);
+#else
+
     int32_t tempanded, temps = *sss, tempt = *sst;
 
 
@@ -309,6 +314,7 @@ static STRICTINLINE void tclod_tcclamp(int32_t* sss, int32_t* sst)
     else
         *sst = 0x7fff;
 
+#endif
 }
 
 

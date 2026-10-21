@@ -17,6 +17,11 @@ static const uint8_t magic_matrix[16] =
 
 static STRICTINLINE void rgb_dither(int rgb_dither_sel, int* r, int* g, int* b, int dith)
 {
+#if defined(AL_SIMD_SSE42)
+    __m128i rgb=al_dither4(_mm_setr_epi32(*r,*g,*b,0),rgb_dither_sel,dith);
+    *r=_mm_cvtsi128_si32(rgb); *g=_mm_extract_epi32(rgb,1); *b=_mm_extract_epi32(rgb,2);
+#else
+
 
     int32_t newr = *r, newg = *g, newb = *b;
     int32_t rcomp, gcomp, bcomp;
@@ -60,6 +65,7 @@ static STRICTINLINE void rgb_dither(int rgb_dither_sel, int* r, int* g, int* b, 
     replacesign = (bcomp - (*b & 7)) >> 31;
     ditherdiff = newb - *b;
     *b = *b + (ditherdiff & replacesign);
+#endif
 }
 
 static STRICTINLINE void get_dither_noise(uint32_t wid, int x, int y, int* cdith, int* adith)

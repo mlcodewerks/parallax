@@ -65,10 +65,8 @@ static STRICTINLINE void compute_cvg_flip(uint32_t wid, int32_t scanline)
                     majorcurint = majorcur >> 3;
 
 
-                    for (k = purgestart; k <= majorcurint; k++)
-                        state[wid].cvgbuf[k] &= ~fmaskshifted;
-                    for (k = minorcurint; k <= purgeend; k++)
-                        state[wid].cvgbuf[k] &= ~fmaskshifted;
+                    al_coverage_mask(state[wid].cvgbuf,purgestart,majorcurint,~fmaskshifted);
+                    al_coverage_mask(state[wid].cvgbuf,minorcurint,purgeend,~fmaskshifted);
 
 
 
@@ -92,8 +90,7 @@ static STRICTINLINE void compute_cvg_flip(uint32_t wid, int32_t scanline)
                 else
                 {
                     int k;
-                    for (k = purgestart; k <= purgeend; k++)
-                        state[wid].cvgbuf[k] &= ~fmaskshifted;
+                    al_coverage_mask(state[wid].cvgbuf,purgestart,purgeend,~fmaskshifted);
                 }
 
         }
@@ -130,10 +127,8 @@ static STRICTINLINE void compute_cvg_noflip(uint32_t wid, int32_t scanline)
                 minorcurint = minorcur >> 3;
                 majorcurint = majorcur >> 3;
 
-                for (k = purgestart; k <= minorcurint; k++)
-                    state[wid].cvgbuf[k] &= ~fmaskshifted;
-                for (k = majorcurint; k <= purgeend; k++)
-                    state[wid].cvgbuf[k] &= ~fmaskshifted;
+                al_coverage_mask(state[wid].cvgbuf,purgestart,minorcurint,~fmaskshifted);
+                al_coverage_mask(state[wid].cvgbuf,majorcurint,purgeend,~fmaskshifted);
 
                 if (majorcurint > minorcurint)
                 {
@@ -149,8 +144,7 @@ static STRICTINLINE void compute_cvg_noflip(uint32_t wid, int32_t scanline)
             else
             {
                 int k;
-                for (k = purgestart; k <= purgeend; k++)
-                    state[wid].cvgbuf[k] &= ~fmaskshifted;
+                al_coverage_mask(state[wid].cvgbuf,purgestart,purgeend,~fmaskshifted);
             }
         }
     }

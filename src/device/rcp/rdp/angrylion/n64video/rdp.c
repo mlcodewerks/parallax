@@ -568,6 +568,7 @@ static void al_key_report(void)
     fprintf(stderr, "  (top5 cumulative %.1f%%)\n", 100.0 * cum / tot);
 }
 
+#include "rdp/pipeline_simd.h"
 #include "rdp/rdram.c"
 #include "rdp/dither.c"
 #include "rdp/blender.c"

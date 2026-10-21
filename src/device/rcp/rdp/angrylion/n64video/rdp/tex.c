@@ -350,6 +350,12 @@ static STRICTINLINE void texture_pipeline_cycle(uint32_t wid, struct color* TEX,
 
             if (!convert)
             {
+#if defined(AL_SIMD_SSE42)
+                __m128i value=al_lerp4(_mm_loadu_si128((const __m128i*)&t0),_mm_loadu_si128((const __m128i*)&t1),
+                    _mm_loadu_si128((const __m128i*)&t2),_mm_loadu_si128((const __m128i*)&t3),
+                    sfracrg,sfrac,tfrac,upperrg,upper,centerrg,center);
+                _mm_storeu_si128((__m128i*)TEX,value);
+#else
                 invtf = 0x20 - tfrac;
 
                 if (!centerrg)
@@ -404,6 +410,7 @@ static STRICTINLINE void texture_pipeline_cycle(uint32_t wid, struct color* TEX,
                     TEX->b = t3.b + ((((t1.b + t2.b) << 6) - (t3.b << 7) + ((invt3b + t0.b) << 6) + 0xc0) >> 8);
                     TEX->a = t3.a + ((((t1.a + t2.a) << 6) - (t3.a << 7) + ((invt3a + t0.a) << 6) + 0xc0) >> 8);
                 }
+#endif
             }
             else
             {

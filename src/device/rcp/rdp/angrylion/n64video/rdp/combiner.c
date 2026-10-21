@@ -137,8 +137,26 @@ static STRICTINLINE int32_t alpha_combiner_equation(int32_t a, int32_t b, int32_
     return (a & 0x1ff);
 }
 
+#if defined(AL_SIMD_SSE42)
+/* Gather muxes before storing combined RGBA: alpha may be an RGB source. */
+static STRICTINLINE void combiner_cycle_vector(uint32_t wid,unsigned cycle)
+{
+    int rgb=state[wid].combiner_rgbmul_r[cycle]!=&zero_color;
+    int alpha=state[wid].combiner_alphamul[cycle]!=&zero_color;
+    __m128i a=_mm_setr_epi32(rgb?*state[wid].combiner_rgbsub_a_r[cycle]:0,rgb?*state[wid].combiner_rgbsub_a_g[cycle]:0,rgb?*state[wid].combiner_rgbsub_a_b[cycle]:0,alpha?*state[wid].combiner_alphasub_a[cycle]:0);
+    __m128i b=_mm_setr_epi32(rgb?*state[wid].combiner_rgbsub_b_r[cycle]:0,rgb?*state[wid].combiner_rgbsub_b_g[cycle]:0,rgb?*state[wid].combiner_rgbsub_b_b[cycle]:0,alpha?*state[wid].combiner_alphasub_b[cycle]:0);
+    __m128i c=_mm_setr_epi32(rgb?*state[wid].combiner_rgbmul_r[cycle]:0,rgb?*state[wid].combiner_rgbmul_g[cycle]:0,rgb?*state[wid].combiner_rgbmul_b[cycle]:0,alpha?*state[wid].combiner_alphamul[cycle]:0);
+    __m128i d=_mm_setr_epi32(1?*state[wid].combiner_rgbadd_r[cycle]:0,1?*state[wid].combiner_rgbadd_g[cycle]:0,1?*state[wid].combiner_rgbadd_b[cycle]:0,1?*state[wid].combiner_alphaadd[cycle]:0);
+    _mm_storeu_si128((__m128i*)&state[wid].combined_color,al_combine4(a,b,c,d));
+}
+#endif
+
 static STRICTINLINE int32_t chroma_key_min(uint32_t wid, struct color* col)
 {
+#if defined(AL_SIMD_SSE42)
+    return al_key3(_mm_loadu_si128((const __m128i*)col),_mm_loadu_si128((const __m128i*)&state[wid].key_width));
+#else
+
     int32_t redkey, greenkey, bluekey, keyalpha;
 
 
@@ -166,6 +184,7 @@ static STRICTINLINE int32_t chroma_key_min(uint32_t wid, struct color* col)
     keyalpha = (bluekey < keyalpha) ? bluekey : keyalpha;
     keyalpha = clamp(keyalpha, 0, 0xff);
     return keyalpha;
+#endif
 }
 
 static STRICTINLINE void combiner_1cycle(uint32_t wid, int adseed, uint32_t* curpixel_cvg)
@@ -186,6 +205,9 @@ static STRICTINLINE void combiner_1cycle(uint32_t wid, int adseed, uint32_t* cur
 
 
 
+#if defined(AL_SIMD_SSE42)
+    combiner_cycle_vector(wid,1);
+#else
     if (state[wid].combiner_rgbmul_r[1] != &zero_color)
     {
 
@@ -219,6 +241,7 @@ static STRICTINLINE void combiner_1cycle(uint32_t wid, int adseed, uint32_t* cur
         state[wid].combined_color.a = alpha_combiner_equation(*state[wid].combiner_alphasub_a[1],*state[wid].combiner_alphasub_b[1],*state[wid].combiner_alphamul[1],*state[wid].combiner_alphaadd[1]);
     else
         state[wid].combined_color.a = special_9bit_exttable[*state[wid].combiner_alphaadd[1]] & 0x1ff;
+#endif
 
     state[wid].pixel_color.a = special_9bit_clamptable[state[wid].combined_color.a];
     if (state[wid].pixel_color.a == 0xff)
@@ -285,6 +308,9 @@ static STRICTINLINE void combiner_1cycle(uint32_t wid, int adseed, uint32_t* cur
 
 static STRICTINLINE void combiner_2cycle_cycle0(uint32_t wid, int adseed, uint32_t cvg, uint32_t* acalpha)
 {
+#if defined(AL_SIMD_SSE42)
+    combiner_cycle_vector(wid,0);
+#else
     if (state[wid].combiner_rgbmul_r[0] != &zero_color)
     {
         state[wid].combined_color.r = color_combiner_equation(*state[wid].combiner_rgbsub_a_r[0],*state[wid].combiner_rgbsub_b_r[0],*state[wid].combiner_rgbmul_r[0],*state[wid].combiner_rgbadd_r[0]);
@@ -302,6 +328,7 @@ static STRICTINLINE void combiner_2cycle_cycle0(uint32_t wid, int adseed, uint32
         state[wid].combined_color.a = alpha_combiner_equation(*state[wid].combiner_alphasub_a[0],*state[wid].combiner_alphasub_b[0],*state[wid].combiner_alphamul[0],*state[wid].combiner_alphaadd[0]);
     else
         state[wid].combined_color.a = special_9bit_exttable[*state[wid].combiner_alphaadd[0]] & 0x1ff;
+#endif
 
 
 
@@ -367,6 +394,9 @@ static STRICTINLINE void combiner_2cycle_cycle1(uint32_t wid, int adseed, uint32
         chromabypass.b = *state[wid].combiner_rgbsub_a_b[1];
     }
 
+#if defined(AL_SIMD_SSE42)
+    combiner_cycle_vector(wid,1);
+#else
     if (state[wid].combiner_rgbmul_r[1] != &zero_color)
     {
         state[wid].combined_color.r = color_combiner_equation(*state[wid].combiner_rgbsub_a_r[1],*state[wid].combiner_rgbsub_b_r[1],*state[wid].combiner_rgbmul_r[1],*state[wid].combiner_rgbadd_r[1]);
@@ -384,6 +414,7 @@ static STRICTINLINE void combiner_2cycle_cycle1(uint32_t wid, int adseed, uint32
         state[wid].combined_color.a = alpha_combiner_equation(*state[wid].combiner_alphasub_a[1],*state[wid].combiner_alphasub_b[1],*state[wid].combiner_alphamul[1],*state[wid].combiner_alphaadd[1]);
     else
         state[wid].combined_color.a = special_9bit_exttable[*state[wid].combiner_alphaadd[1]] & 0x1ff;
+#endif
 
     if (!state[wid].other_modes.key_en)
     {

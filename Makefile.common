@@ -103,7 +103,7 @@ $(ANGRYLION_DIR)/parallel_al.o: $(CORE_DIR)/src/device/rcp/rdp/performance_cores
 $(CORE_DIR)/src/libretro.o: $(CORE_DIR)/src/renderer_options.h
 $(CORE_DIR)/src/renderer_options.o: $(CORE_DIR)/src/renderer_options.h
 $(CORE_DIR)/src/device/rcp/rdp/performance_cores.o: $(CORE_DIR)/src/device/rcp/rdp/performance_cores.h
-$(ANGRYLION_DIR)/n64video.o: $(wildcard $(ANGRYLION_DIR)/*.h $(ANGRYLION_DIR)/n64video/*.c $(ANGRYLION_DIR)/n64video/rdp/* $(ANGRYLION_DIR)/n64video/vi/*)
+$(ANGRYLION_DIR)/n64video.o: $(wildcard $(ANGRYLION_DIR)/*.h $(ANGRYLION_DIR)/n64video/*.c $(ANGRYLION_DIR)/n64video/*.h $(ANGRYLION_DIR)/n64video/rdp/* $(ANGRYLION_DIR)/n64video/vi/*)
 
 ifeq ($(HAVE_PARALLEL_RDP),1)
 PARALLEL_RDP_IMPLEMENTATION = $(CORE_DIR)/src/device/rcp/rdp/p_rdp
