@@ -27,6 +27,7 @@
 #include <stdlib.h>
 
 #include "arithmetics.h"
+#include "hle_simd.h"
 #include "hle_external.h"
 #include "hle_internal.h"
 #include <string.h>
@@ -93,16 +94,31 @@ static void RescaleUVSubBlock(int16_t *dst, const int16_t *src)
 {
     unsigned int i;
 
-    for (i = 0; i < SUBBLOCK_SIZE; ++i)
+    for (i = 0; i < SUBBLOCK_SIZE; ++i) {
+#if HLE_SIMD_ENABLED
+        __m128i a=_mm_loadu_si128((const __m128i *)(src+i));
+        a=_mm_max_epi16(_mm_set1_epi16(-0x800),_mm_min_epi16(a,_mm_set1_epi16(0x7f0)));
+        a=_mm_add_epi16(_mm_mulhi_epi16(a,_mm_set1_epi16(0xe00)),_mm_set1_epi16(0x80));
+        _mm_storeu_si128((__m128i *)(dst+i),a);i+=7;continue;
+#endif
         dst[i] = (((int)clamp_s12(src[i]) * 0xe00) >> 16) + 0x80;
+    }
 }
 
 static void RescaleYSubBlock(int16_t *dst, const int16_t *src)
 {
     unsigned int i;
 
-    for (i = 0; i < SUBBLOCK_SIZE; ++i)
+    for (i = 0; i < SUBBLOCK_SIZE; ++i) {
+#if HLE_SIMD_ENABLED
+        __m128i a=_mm_loadu_si128((const __m128i *)(src+i));
+        a=_mm_max_epi16(_mm_set1_epi16(-0x800),_mm_min_epi16(a,_mm_set1_epi16(0x7f0)));
+        a=_mm_add_epi16(a,_mm_set1_epi16(0x800));
+        a=_mm_add_epi16(_mm_mulhi_epu16(a,_mm_set1_epi16(0xdb0)),_mm_set1_epi16(0x10));
+        _mm_storeu_si128((__m128i *)(dst+i),a);i+=7;continue;
+#endif
         dst[i] = (((uint32_t)(clamp_s12(src[i]) + 0x800) * 0xdb0) >> 16) + 0x10;
+    }
 }
 
 static void EmitTilesMode0(struct hle_t* hle, const tile_line_emitter_t emit_line, const int16_t *macroblock, uint32_t address)
@@ -158,25 +174,17 @@ static void RspIdctButterfly(const int16_t in[8][8], int16_t parts[8][8])
     int c;
 
 #define RSP_VMULF(dst, va, ca) \
-    do { for (c = 0; c < 8; ++c) { \
-        acc[c] = 2 * (int64_t)(va)[c] * (ca) + 0x8000; \
-        (dst)[c] = clamp_s16((int32_t)(acc[c] >> 16)); } } while (0)
+    do { int16_t coeff=(ca); hle_acc8(dst,acc,va,&coeff,0,HLE_VMULF); } while(0)
 #define RSP_VMACF(dst, vb, cb) \
-    do { for (c = 0; c < 8; ++c) { \
-        acc[c] += 2 * (int64_t)(vb)[c] * (cb); \
-        (dst)[c] = clamp_s16((int32_t)(acc[c] >> 16)); } } while (0)
+    do { int16_t coeff=(cb); hle_acc8(dst,acc,vb,&coeff,0,HLE_VMACF); } while(0)
 
     RSP_VMULF(t10, in[3], RSP_IDCT_C2[2]); RSP_VMACF(t10, in[5], RSP_IDCT_C2[4]);
     RSP_VMULF(t11, in[7], RSP_IDCT_C2[0]); RSP_VMACF(t11, in[1], RSP_IDCT_C2[5]);
     RSP_VMULF(t8,  in[1], RSP_IDCT_C2[0]); RSP_VMACF(t8,  in[7], RSP_IDCT_C2[1]);
     RSP_VMULF(t9,  in[5], RSP_IDCT_C2[2]); RSP_VMACF(t9,  in[3], RSP_IDCT_C2[3]);
     RSP_VMULF(t6,  in[0], RSP_IDCT_C3[0]); RSP_VMACF(t6,  in[4], RSP_IDCT_C3[1]);
-    for (c = 0; c < 8; ++c) {
-        t5s[c] = clamp_s16(t11[c] - t10[c]);
-        t4s[c] = clamp_s16(t8[c] - t9[c]);
-        parts[3][c] = clamp_s16(t8[c] + t9[c]);   /* v12 */
-        parts[1][c] = clamp_s16(t11[c] + t10[c]); /* v15 */
-    }
+    hle_addsub8(t5s,t11,t10,1);hle_addsub8(t4s,t8,t9,1);
+    hle_addsub8(parts[3],t8,t9,0);hle_addsub8(parts[1],t11,t10,0);
     RSP_VMULF(t8, t5s, RSP_IDCT_C3[0]); RSP_VMACF(t8, t4s, RSP_IDCT_C3[1]);
     for (c = 0; c < 8; ++c) parts[7][c] = t8[c];  /* v13 */
     RSP_VMULF(t8, t5s, RSP_IDCT_C3[0]); RSP_VMACF(t8, t4s, RSP_IDCT_C3[0]);
@@ -184,12 +192,8 @@ static void RspIdctButterfly(const int16_t in[8][8], int16_t parts[8][8])
     RSP_VMULF(t4, in[0], RSP_IDCT_C3[0]); RSP_VMACF(t4, in[4], RSP_IDCT_C3[0]);
     RSP_VMULF(t5, in[6], RSP_IDCT_C3[2]); RSP_VMACF(t5, in[2], RSP_IDCT_C3[4]);
     RSP_VMULF(t7, in[2], RSP_IDCT_C3[2]); RSP_VMACF(t7, in[6], RSP_IDCT_C3[3]);
-    for (c = 0; c < 8; ++c) {
-        parts[0][c] = clamp_s16(t4[c] + t5[c]);   /* v8  */
-        parts[2][c] = clamp_s16(t4[c] - t5[c]);   /* v11 */
-        parts[4][c] = clamp_s16(t6[c] + t7[c]);   /* v9  */
-        parts[6][c] = clamp_s16(t6[c] - t7[c]);   /* v10 */
-    }
+    hle_addsub8(parts[0],t4,t5,0);hle_addsub8(parts[2],t4,t5,1);
+    hle_addsub8(parts[4],t6,t7,0);hle_addsub8(parts[6],t6,t7,1);
 #undef RSP_VMACF
 #undef RSP_VMULF
 }
@@ -203,28 +207,18 @@ static void RspIdctSubBlock(int16_t *block, int16_t hi_mult, int16_t lo_mult)
         for (c = 0; c < 8; ++c)
             in[r][c] = block[r * 8 + c];
     RspIdctButterfly((const int16_t (*)[8])in, parts);
-    for (c = 0; c < 8; ++c) {
-        p1[0][c] = clamp_s16(parts[0][c] + parts[1][c]);
-        p1[1][c] = clamp_s16(parts[4][c] + parts[5][c]);
-        p1[2][c] = clamp_s16(parts[6][c] + parts[7][c]);
-        p1[3][c] = clamp_s16(parts[2][c] + parts[3][c]);
-        p1[4][c] = clamp_s16(parts[2][c] - parts[3][c]);
-        p1[5][c] = clamp_s16(parts[6][c] - parts[7][c]);
-        p1[6][c] = clamp_s16(parts[4][c] - parts[5][c]);
-        p1[7][c] = clamp_s16(parts[0][c] - parts[1][c]);
-    }
-    for (r = 0; r < 8; ++r)
-        for (c = 0; c < 8; ++c)
-            in[r][c] = p1[c][r];
+    hle_addsub8(p1[0],parts[0],parts[1],0);hle_addsub8(p1[7],parts[0],parts[1],1);
+    hle_addsub8(p1[1],parts[4],parts[5],0);hle_addsub8(p1[6],parts[4],parts[5],1);
+    hle_addsub8(p1[2],parts[6],parts[7],0);hle_addsub8(p1[5],parts[6],parts[7],1);
+    hle_addsub8(p1[3],parts[2],parts[3],0);hle_addsub8(p1[4],parts[2],parts[3],1);
+    hle_transpose8(&in[0][0],&p1[0][0]);
     RspIdctButterfly((const int16_t (*)[8])in, parts);
-    for (c = 0; c < 8; ++c) {
-        int64_t a2;
+    {
+        int64_t a2[8];
 #define RSP_PAIR(hi_r, lo_r, ia, ib) \
-        a2 = 2 * (int64_t)parts[ia][c] * hi_mult + 0x8000 \
-           + 2 * (int64_t)parts[ib][c] * hi_mult; \
-        block[(hi_r) * 8 + c] = clamp_s16((int32_t)(a2 >> 16)); \
-        a2 += 2 * (int64_t)parts[ib][c] * lo_mult; \
-        block[(lo_r) * 8 + c] = clamp_s16((int32_t)(a2 >> 16));
+        hle_acc8(block+(hi_r)*8,a2,parts[ia],&hi_mult,0,HLE_VMULF); \
+        hle_acc8(block+(hi_r)*8,a2,parts[ib],&hi_mult,0,HLE_VMACF); \
+        hle_acc8(block+(lo_r)*8,a2,parts[ib],&lo_mult,0,HLE_VMACF);
         RSP_PAIR(0, 7, 0, 1)
         RSP_PAIR(3, 4, 2, 3)
         RSP_PAIR(1, 6, 4, 5)
@@ -237,10 +231,8 @@ static void MultSubBlocks(int16_t *dst, const int16_t *src1, const int16_t *src2
 {
     unsigned int i;
 
-    for (i = 0; i < SUBBLOCK_SIZE; ++i) {
-        int32_t v = src1[i] * src2[i];
-        dst[i] = clamp_s16(v) << shift;
-    }
+    for (i = 0; i < SUBBLOCK_SIZE; i+=8)
+        hle_scale8(dst+i,src1+i,src2+i,0,shift);
 }
 
 static void ReorderSubBlock(int16_t *dst, const int16_t *src, const unsigned int *table)
@@ -262,7 +254,7 @@ static void ZigZagSubBlock(int16_t *dst, const int16_t *src)
 
 static void TransposeSubBlock(int16_t *dst, const int16_t *src)
 {
-    ReorderSubBlock(dst, src, TRANSPOSE_TABLE);
+    hle_transpose8(dst,src);
 }
 
 static void decode_macroblock_std(const subblock_transform_t transform_luma,
@@ -433,22 +425,13 @@ static void EmitRGBATileLine(struct hle_t* hle, const int16_t *y, const int16_t 
     const int16_t *const v  = u + SUBBLOCK_SIZE;
     const int16_t *const y2 = y + SUBBLOCK_SIZE;
 
-    rgba[0]  = GetRGBA(y[0],  u[0], v[0]);
-    rgba[1]  = GetRGBA(y[1],  u[0], v[0]);
-    rgba[2]  = GetRGBA(y[2],  u[1], v[1]);
-    rgba[3]  = GetRGBA(y[3],  u[1], v[1]);
-    rgba[4]  = GetRGBA(y[4],  u[2], v[2]);
-    rgba[5]  = GetRGBA(y[5],  u[2], v[2]);
-    rgba[6]  = GetRGBA(y[6],  u[3], v[3]);
-    rgba[7]  = GetRGBA(y[7],  u[3], v[3]);
-    rgba[8]  = GetRGBA(y2[0], u[4], v[4]);
-    rgba[9]  = GetRGBA(y2[1], u[4], v[4]);
-    rgba[10] = GetRGBA(y2[2], u[5], v[5]);
-    rgba[11] = GetRGBA(y2[3], u[5], v[5]);
-    rgba[12] = GetRGBA(y2[4], u[6], v[6]);
-    rgba[13] = GetRGBA(y2[5], u[6], v[6]);
-    rgba[14] = GetRGBA(y2[6], u[7], v[7]);
-    rgba[15] = GetRGBA(y2[7], u[7], v[7]);
+    {
+        int16_t cb[8],cr[8];unsigned i;
+        for(i=0;i<8;i++){cb[i]=u[i/2];cr[i]=v[i/2];}
+        hle_jpeg_rgba8(rgba,y,cb,cr);
+        for(i=0;i<8;i++){cb[i]=u[4+i/2];cr[i]=v[4+i/2];}
+        hle_jpeg_rgba8(rgba+8,y2,cb,cr);
+    }
 
     dram_store_u16(hle, rgba, address, 16);
 }
@@ -502,18 +485,21 @@ static void RShiftSubBlock(int16_t *dst, const int16_t *src, unsigned int shift)
 {
     unsigned int i;
 
-    for (i = 0; i < SUBBLOCK_SIZE; ++i)
+    for (i = 0; i < SUBBLOCK_SIZE; ++i) {
+#if HLE_SIMD_ENABLED
+        _mm_storeu_si128((__m128i *)(dst+i),_mm_sra_epi16(_mm_loadu_si128((const __m128i *)(src+i)),_mm_cvtsi32_si128(shift)));
+        i+=7;continue;
+#endif
         dst[i] = src[i] >> shift;
+    }
 }
 
 static void ScaleSubBlock(int16_t *dst, const int16_t *src, int16_t scale)
 {
     unsigned int i;
 
-    for (i = 0; i < SUBBLOCK_SIZE; ++i) {
-        int32_t v = src[i] * scale;
-        dst[i] = clamp_s16(v);
-    }
+    for (i = 0; i < SUBBLOCK_SIZE; i+=8)
+        hle_scale8(dst+i,src+i,&scale,1,0);
 }
 
 

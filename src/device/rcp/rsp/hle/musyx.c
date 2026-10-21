@@ -28,6 +28,7 @@
 #include <stdlib.h>
 
 #include "arithmetics.h"
+#include "hle_simd.h"
 #include "audio.h"
 #include "common.h"
 #include "hle_external.h"
@@ -202,6 +203,11 @@ static int musyx_env_e50_nocarry = 0;
 
 static int32_t dot4(const int16_t *x, const int16_t *y)
 {
+#if HLE_SIMD_ENABLED
+    __m128i t=hle_vmulf16(_mm_loadl_epi64((const __m128i *)x),_mm_loadl_epi64((const __m128i *)y));
+    t=_mm_hadds_epi16(t,t);t=_mm_hadds_epi16(t,t);
+    return (int16_t)_mm_extract_epi16(t,0);
+#else
     size_t i;
     int32_t t[4];
     int32_t s01;
@@ -225,6 +231,7 @@ static int32_t dot4(const int16_t *x, const int16_t *y)
     s23 = clamp_s16(t[2] + t[3]);
 
     return clamp_s16(s01 + s23);
+#endif
 }
 
 /**************************************************************************
@@ -1364,8 +1371,18 @@ static void mix_subframes(int16_t *y, const int16_t *x, int16_t hgain)
 {
     unsigned int i;
 
-    for (i = 0; i < SUBFRAME_SIZE; ++i)
+    for (i = 0; i < SUBFRAME_SIZE; ++i) {
+#if HLE_SIMD_ENABLED
+        if (i + 8 <= SUBFRAME_SIZE &&
+            ((uintptr_t)(y+i) <= (uintptr_t)(x+i) ||
+             (uintptr_t)(y+i) >= (uintptr_t)(x+i) + 16)) {
+            hle_mix8(y+i, y+i, x+i, hgain, 0);
+            i += 7;
+            continue;
+        }
+#endif
         mix_samples(&y[i], x[i], hgain);
+    }
 }
 
 static void mix_fir4(int16_t *y, const int16_t *x, int16_t hgain, const int16_t *hcoeffs)
@@ -1381,6 +1398,18 @@ static void mix_fir4(int16_t *y, const int16_t *x, int16_t hgain, const int16_t 
     h[1] = clamp_s16((hgain * hcoeffs[1] + 0x4000) >> 15);
     h[2] = clamp_s16((hgain * hcoeffs[2] + 0x4000) >> 15);
     h[3] = clamp_s16((hgain * hcoeffs[3] + 0x4000) >> 15);
+
+#if HLE_SIMD_ENABLED
+    if ((uintptr_t)y+2*SUBFRAME_SIZE<=(uintptr_t)x ||
+        (uintptr_t)x+2*(SUBFRAME_SIZE+3)<=(uintptr_t)y) {
+        int16_t coefficients[4]={(int16_t)h[0],(int16_t)h[1],(int16_t)h[2],(int16_t)h[3]};
+        for(i=0;i<SUBFRAME_SIZE;i+=8) {
+            if(hq)hle_fir8(y+i,x+i,coefficients,4,0,y+i);
+            else hle_musyx_fir8(y+i,x+i,coefficients,y+i);
+        }
+        return;
+    }
+#endif
 
     for (i = 0; i < SUBFRAME_SIZE; ++i) {
         /* Same VMULF-per-tap + saturating VADD reduction tree as the

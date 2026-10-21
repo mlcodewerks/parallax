@@ -1,3 +1,4 @@
+#include "rdp_emit_simd.h"
 /* rdp_emit_zboss.c -- ZSortBOSS microcode walker for the angrylion HLE path.
  *
  * BOSS Game Studios' z-sort microcode (World Driver Championship, Stunt
@@ -689,33 +690,19 @@ static void zb_mtxcat(unsigned int w0, unsigned int w1)
     unsigned int sb = (w1 >> 16) & 0xfffu;
     unsigned int tb = w0 & 0xfffu;
     unsigned int db = w1 & 0xfffu;
-    int oi[4][4], of4[4][4];
     int i, j, k;
-    for (i = 0; i < 4; i++)
+    for (i = 0; i < 4; i+=2)
     {
-        for (j = 0; j < 4; j++)
-        {
-            int64_t acc = 0;
-            for (k = 0; k < 4; k++)
-            {
-                acc += zb_p_udl(zb_mf(sb, k, j), zb_mf(tb, i, k));
-                acc += zb_p_udm(zb_mi(sb, k, j), zb_mf(tb, i, k));
-                acc += zb_p_udn(zb_mf(sb, k, j), zb_mi(tb, i, k));
-                if (k == 3)
-                    of4[i][j] = zb_acc_low(acc);
-                acc += zb_p_udh(zb_mi(sb, k, j), zb_mi(tb, i, k));
-            }
-            oi[i][j] = zb_acc_mid(acc);
-        }
-        if ((i & 1) != 0)
-        {
-            int row;
-            /* 0x2a4/0x2a8 export two rows before the next block
-             * reloads S. This ordering matters when destination=S. */
-            for (row = i - 1; row <= i; row++)
-                for (j = 0; j < 4; j++)
-                    zb_mw(db, row, j, oi[row][j], of4[row][j]);
-        }
+        int32_t a[8],b[16],result[8];int row;
+        /* Snapshot one row pair, then commit before fetching the next.
+         * Destination can alias either matrix in the wrapping DMEM. */
+        for(row=0;row<2;row++)for(k=0;k<4;k++)
+            a[4*row+k]=(int32_t)(((uint32_t)(uint16_t)zb_mi(tb,i+row,k)<<16)|(uint16_t)zb_mf(tb,i+row,k));
+        for(k=0;k<4;k++)for(j=0;j<4;j++)
+            b[4*k+j]=(int32_t)(((uint32_t)(uint16_t)zb_mi(sb,k,j)<<16)|(uint16_t)zb_mf(sb,k,j));
+        hle_matrix_rows(result,a,b,2,1,1);
+        for(row=0;row<2;row++)for(j=0;j<4;j++)
+            zb_mw(db,i+row,j,(uint32_t)result[4*row+j]>>16,result[4*row+j]&65535);
     }
 }
 

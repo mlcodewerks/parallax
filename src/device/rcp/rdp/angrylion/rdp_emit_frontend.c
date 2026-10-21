@@ -10,6 +10,7 @@
  */
 
 #include "rdp_emit_frontend.h"
+#include "rdp_emit_simd.h"
 #include "rdp_emit_rsp.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -168,36 +169,8 @@ static int32_t gsp_mvp_readback(int64_t total, int64_t last_int_term)
 static void mtx_mul(int32_t d[4][4], int32_t a[4][4], int32_t b[4][4])
 {
     int32_t r[4][4];
-    int i, j, k;
     hle_timing_add(HLE_WORK_MATRIX_MUL, 1);
-    for (i = 0; i < 4; i++)
-    {
-        for (j = 0; j < 4; j++)
-        {
-            int64_t acc = 0;
-            for (k = 0; k < 4; k++)
-            {
-                int32_t ai = a[i][k] >> 16;
-                int32_t af = a[i][k] & 0xffff;
-                int32_t bi = b[k][j] >> 16;
-                int32_t bf = b[k][j] & 0xffff;
-                acc += (int64_t)((uint32_t)((uint32_t)af * (uint32_t)bf) >> 16);
-                acc += (int64_t)ai * bf;
-                acc += (int64_t)af * bi;
-                acc += ((int64_t)ai * bi) << 16;
-            }
-            /* vmadn/vmadh extraction: low half with the unsigned-low clamp,
-             * high half signed-clamped. In-range sums pass through. */
-            {
-                int64_t hi = acc >> 16;
-                int32_t out_i, out_f;
-                if (hi < -32768)      { out_i = -32768; out_f = 0x0000; }
-                else if (hi > 32767)  { out_i =  32767; out_f = 0xffff; }
-                else                  { out_i = (int32_t)hi; out_f = (int32_t)(acc & 0xffff); }
-                r[i][j] = (int32_t)(((uint32_t)out_i << 16) | (uint32_t)out_f);
-            }
-        }
-    }
+    hle_matrix4(&r[0][0], &a[0][0], &b[0][0]);
     mtx_copy(d, r);
 }
 
@@ -502,7 +475,7 @@ void gsp_matrix_dkr(GSPState *s, const unsigned char *rdram, unsigned int addr,
     load_n64_matrix(m, rdram, addr);
     if (multiply)
     {
-        int pair, i, j, k;
+        int pair, i, j;
         int32_t result[2][4];
         int32_t (*src)[4]=s->modelview[source & 7];
         hle_timing_add(HLE_WORK_MATRIX_MUL, 1);
@@ -510,19 +483,7 @@ void gsp_matrix_dkr(GSPState *s, const unsigned char *rdram, unsigned int addr,
          * source and destination coincide, the second pair reads the
          * already-written first pair. The accumulator wraps at 48 bits. */
         for (pair=0;pair<4;pair+=2) {
-            for (i=0;i<2;i++) for (j=0;j<4;j++) {
-                int64_t acc=0;
-                for (k=0;k<4;k++) {
-                    int32_t a=m[pair+i][k], b=src[k][j];
-                    acc+=((int64_t)(a&0xffff)*(b&0xffff))>>16;
-                    acc+=(int64_t)(a>>16)*(b&0xffff);
-                    acc+=(int64_t)(a&0xffff)*(b>>16);
-                    acc+=(int64_t)(a>>16)*(b>>16)*65536;
-                }
-                acc &= (((int64_t)1<<48)-1);
-                if (acc & ((int64_t)1<<47)) acc-=((int64_t)1<<48);
-                result[i][j]=gsp_mvp_readback(acc,0);
-            }
+            hle_matrix_rows(&result[0][0],&m[pair][0],&src[0][0],2,0,1);
             for(i=0;i<2;i++) for(j=0;j<4;j++)
                 s->modelview[index][pair+i][j]=result[i][j];
         }
@@ -989,14 +950,11 @@ static void gsp_vertex_internal(GSPState *s, const unsigned char *rdram, unsigne
         oy = read_s16_be(rdram, base + 2); /* y */
         oz = read_s16_be(rdram, base + 4); /* z */
 
-        cx = (int64_t)ox * s->combined[0][0] + (int64_t)oy * s->combined[1][0]
-           + (int64_t)oz * s->combined[2][0] + (int64_t)s->combined[3][0];
-        cy = (int64_t)ox * s->combined[0][1] + (int64_t)oy * s->combined[1][1]
-           + (int64_t)oz * s->combined[2][1] + (int64_t)s->combined[3][1];
-        cz = (int64_t)ox * s->combined[0][2] + (int64_t)oy * s->combined[1][2]
-           + (int64_t)oz * s->combined[2][2] + (int64_t)s->combined[3][2];
-        cw = (int64_t)ox * s->combined[0][3] + (int64_t)oy * s->combined[1][3]
-           + (int64_t)oz * s->combined[2][3] + (int64_t)s->combined[3][3];
+        {
+            int64_t clip[4];
+            hle_transform4(clip,&s->combined[0][0],ox,oy,oz);
+            cx=clip[0];cy=clip[1];cz=clip[2];cw=clip[3];
+        }
 
         /* The fraction half of the stored clip value is the final vmadn's
          * register, whose clamp tests the accumulator BEFORE the last
@@ -1009,6 +967,14 @@ static void gsp_vertex_internal(GSPState *s, const unsigned char *rdram, unsigne
          * matrices (rotations with |elements| > 1) overflow routinely,
          * and modelling the wrong order left every character several
          * pixels and shade steps away from the LLE reference. */
+#if HLE_SIMD_ENABLED
+        {
+            int64_t transformed[4]={cx,cy,cz,cw};int32_t last[4];int axis;
+            for(axis=0;axis<4;axis++)last[axis]=s->mvp_trans_last?
+                (s->combined[3][axis]>>16):oz*(s->combined[2][axis]>>16);
+            rdp_simd_readback4(&vt->cx,transformed,last);
+        }
+#else
         if (s->mvp_trans_last)
         {
             vt->cx = gsp_mvp_readback(cx, (int64_t)(s->combined[3][0] >> 16));
@@ -1028,6 +994,7 @@ static void gsp_vertex_internal(GSPState *s, const unsigned char *rdram, unsigne
                          (int64_t)oz * (s->combined[2][3] >> 16));
         }
 
+#endif
         st_s = read_s16_be(rdram, base + 8);  /* s */
         st_t = read_s16_be(rdram, base + 10); /* t */
         /* Carry the raw S10.5 texel coordinate (modulated by the G_TEXTURE
@@ -1836,15 +1803,23 @@ static void gsp_clip_vertex_flags(const GSPState *st, GSPVertex *vt)
     ci[1] = (vt->cy >> 16) & 0xffff; cf[1] = vt->cy & 0xffff;
     ci[2] = (vt->cz >> 16) & 0xffff; cf[2] = vt->cz & 0xffff;
     ci[3] = (vt->cw >> 16) & 0xffff; cf[3] = vt->cw & 0xffff;
+#if HLE_SIMD_ENABLED
+    fl=rdp_simd_clip4(ci,cf,ci[3],cf[3]);
+#else
     for (ax = 0; ax < 4; ax++)
     {
         gsp_vch_vcl_lane(ci[ax], cf[ax], ci[3], cf[3], &le, &ge);
         if (le) fl |= 1u << (4 + ax);
         if (ge) fl |= 1u << (12 + ax);
     }
+#endif
     w2 = st->viewport.dkr_model
         ? rsp_dkr_clip_scale_w(vt->cw,st->dkr_clip_rows[5][3])
         : rsp_clip_scale_w(vt->cw,st->clip_ratio);
+#if HLE_SIMD_ENABLED
+    cf[3]=cf[2];
+    fl|=rdp_simd_clip4(ci,cf,(w2>>16)&65535,w2&65535)<<16;
+#else
     for (ax = 0; ax < 4; ax++)
     {
         int32_t vsf = (ax == 3) ? cf[2] : cf[ax];
@@ -1853,6 +1828,7 @@ static void gsp_clip_vertex_flags(const GSPState *st, GSPVertex *vt)
         if (le) fl |= 1u << (20 + ax);
         if (ge) fl |= 1u << (28 + ax);
     }
+#endif
     if (st->clip_no_far)
         fl &= ~((1u << 14) | (1u << 30));
     if(st->clip_near_z<0)
@@ -1902,10 +1878,8 @@ static void gsp_clip_subdivide(GSPState *st, GSPVertex *out,
         out4[0] = offv->cx; out4[1] = offv->cy;
         out4[2] = offv->cz; out4[3] = offv->cw;
         rsp_clip_weights_rs(in4, out4, cr, &wc, &wt);
-        out->cx = rsp_clip_blend32_rs(onv->cx, offv->cx, wc, wt);
-        out->cy = rsp_clip_blend32_rs(onv->cy, offv->cy, wc, wt);
-        out->cz = rsp_clip_blend32_rs(onv->cz, offv->cz, wc, wt);
-        out->cw = rsp_clip_blend32_rs(onv->cw, offv->cw, wc, wt);
+        rdp_simd_blend4(out_pos,in4,out4,wc,wt);
+        out->cx=out_pos[0];out->cy=out_pos[1];out->cz=out_pos[2];out->cw=out_pos[3];
         cb_on[0] = (int32_t)(((onv->r >> 16) & 0xff) << 7);
         cb_on[1] = (int32_t)(((onv->g >> 16) & 0xff) << 7);
         cb_on[2] = (int32_t)(((onv->b >> 16) & 0xff) << 7);

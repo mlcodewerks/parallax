@@ -1,3 +1,4 @@
+#include "hle_simd.h"
 /* NEAD commands recovered from the complete cartridge microcode images. */
 #include "alist.h"
 #include "hle_internal.h"
@@ -48,12 +49,10 @@ void alist_nead_multiply(struct hle_t* hle, uint32_t w1, uint32_t w2)
     for (i = 0; i < 32; ++i) coefficients[i] = get_half(hle, table + 2*i);
     do {
         for (i = 0; i < 32; ++i) samples[i] = get_half(hle, at + 2*i);
-        for (i = 0; i < 32; ++i) {
-            int32_t product = (int32_t)samples[i] * coefficients[i];
-            if (product > 32767) product = 32767;
-            if (product < -32768) product = -32768;
-            put_half(hle, at + 2*i, (uint16_t)product);
-        }
+        for (i = 0; i < 32; i+=8)
+            hle_scale8(samples+i,samples+i,coefficients+i,0,0);
+        for (i = 0; i < 32; ++i)
+            put_half(hle,at+2*i,(uint16_t)samples[i]);
         hle_timing_add(HLE_WORK_MIX, 4);
         at += 64;count -= 64;
     } while (count > 0);

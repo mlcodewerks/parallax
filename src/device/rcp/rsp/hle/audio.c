@@ -24,6 +24,7 @@
 #include <stdint.h>
 
 #include "arithmetics.h"
+#include "hle_simd.h"
 
 const int16_t RESAMPLE_LUT[64 * 4] = {
     (int16_t)0x0c39, (int16_t)0x66ad, (int16_t)0x0d46, (int16_t)0xffdf,
@@ -97,16 +98,7 @@ const int16_t RESAMPLE_LUT[64 * 4] = {
  * which is already past what 32 bits hold. */
 int64_t rdot(size_t n, const int16_t *x, const int16_t *y)
 {
-    int64_t accu = 0;
-
-    y += n;
-
-    while (n != 0) {
-        accu += (int64_t)*(x++) * *(--y);
-        --n;
-    }
-
-    return accu;
+    return hle_dot_s16(x, y, n, 1);
 }
 
 void adpcm_compute_residuals(int16_t* dst, const int16_t* src,
@@ -121,6 +113,16 @@ void adpcm_compute_residuals(int16_t* dst, const int16_t* src,
     size_t i;
 
     assert(count <= 8);
+
+#if HLE_SIMD_ENABLED
+    /* The scalar interface permits overlapping residual/output storage.
+     * Keep that sequential case; normal decoder blocks are independent. */
+    if (count == 8 && ((uintptr_t)dst + 16 <= (uintptr_t)src ||
+                       (uintptr_t)src + 16 <= (uintptr_t)dst)) {
+        hle_adpcm8(dst, src, cb_entry, last_samples);
+        return;
+    }
+#endif
 
     for(i = 0; i < count; ++i) {
         /* The microcode sums the shifted residual, both recursive taps and

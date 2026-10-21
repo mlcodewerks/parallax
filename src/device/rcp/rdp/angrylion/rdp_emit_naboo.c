@@ -36,6 +36,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "rdp_emit_rsp.h"
+#include "rdp_emit_simd.h"
 #include "rdp_emit_f3dex2.h"
 #include "rdp_emit_naboo.h"
 
@@ -389,6 +390,7 @@ static void nb_packet_drain(void)
 }
 
 #include "rdp_emit_rsp.h"
+#include "rdp_emit_simd.h"
 
 /* RSP 48-bit accumulator helpers (vmudn/vmadh chain, zboss style) */
 static int64_t nb_p(int a, int b) { return (int64_t)a * (int64_t)b; }
@@ -426,6 +428,9 @@ static int nb_acc_mid(int64_t acc)
 static unsigned int nb_vch_vcl(const int16_t si[8], const int16_t sf[8],
                                const int16_t ti[8], const int16_t tf[8])
 {
+#if HLE_SIMD_ENABLED
+    return rdp_simd_vchvcl8(si,sf,ti,tf);
+#else
     int16_t sn[8], vce[8], ne[8], le1[8], ge1[8];
     unsigned int vcc = 0u;
     int i;
@@ -470,6 +475,7 @@ static unsigned int nb_vch_vcl(const int16_t si[8], const int16_t sf[8],
         if (ge) vcc |= 1u << (8 + i);
     }
     return vcc;
+#endif
 }
 
 /* Project one vertex record and compute its clip codes (text
@@ -609,6 +615,7 @@ static void nb_xfrm_range(unsigned int count, unsigned int src,
 {
     int tr[4];
     int mi[4][4], mf[4][4];
+    int32_t matrix32[16];
     int i, j;
     unsigned int v;
     unsigned int prefetch=src+(translate?((count+1u)&~1u)*8u:8u);
@@ -640,6 +647,7 @@ static void nb_xfrm_range(unsigned int count, unsigned int src,
             mi[i][j] = nb_dmem_s16(matrix + (unsigned int)(i * 8 + j * 2));
             /* fraction rows are unsigned (vmudn operand) */
             mf[i][j] = (int)(nb_dmem_s16(matrix + 32u + (unsigned int)(i * 8 + j * 2)) & 0xffff);
+            matrix32[4*i+j]=(int32_t)(((uint32_t)(uint16_t)mi[i][j]<<16)|(uint16_t)mf[i][j]);
         }
 
     nb_size_fraction_set((unsigned short)mf[0][0]|((unsigned int)(unsigned short)mf[0][1]<<16));
@@ -659,14 +667,12 @@ static void nb_xfrm_range(unsigned int count, unsigned int src,
         /* vaddc pre-translate: unsigned per-lane add, no clamp */
         for (j = 0; j < 3; j++)
             p[j] = (int)(short)((unsigned short)((unsigned)in[j] + (unsigned)tr[j]));
-        for (j = 0; j < 4; j++) {
-            acc  = nb_p(mf[0][j], p[0]) + nb_p(mi[0][j], p[0]) * 65536;
-            acc += nb_p(mf[1][j], p[1]) + nb_p(mi[1][j], p[1]) * 65536;
-            acc += nb_p(mf[2][j], p[2]) + nb_p(mi[2][j], p[2]) * 65536;
-            acc += mf[3][j];
-            cf[j] = (unsigned int)nb_acc_low(acc);
-            acc += (int64_t)mi[3][j] * 65536;
-            ci[j] = nb_acc_mid(acc);
+        {
+            int64_t transformed[4];int32_t last[4],result[4];
+            hle_transform4(transformed,matrix32,p[0],p[1],p[2]);
+            for(j=0;j<4;j++)last[j]=mi[3][j];
+            rdp_simd_readback4(result,transformed,last);
+            for(j=0;j<4;j++){ci[j]=result[j]>>16;cf[j]=(uint16_t)result[j];}
         }
         /* store clip-space position (record +0x00 int, +0x08 frac) */
         for (j = 0; j < 4; j++) {
@@ -986,6 +992,11 @@ static int nb_clamp_s16(int64_t v)
 static void nb_vmudl(NbAcc *ac, const short *vs, const short *vt, int e,
                      int acc_in, short *dst)
 {
+#if HLE_SIMD_ENABLED
+    short selected[8],discard[8];
+    hle_rsp_select8(selected,vt,e);
+    hle_acc8(dst?dst:discard,ac->a,vs,selected,-1,acc_in?HLE_VMADL:HLE_VMUDL);
+#else
     int l;
     short saved_s[8], saved_t[8];
     memcpy(saved_s, vs, sizeof(saved_s));
@@ -998,12 +1009,18 @@ static void nb_vmudl(NbAcc *ac, const short *vs, const short *vt, int e,
         ac->a[l] = nb_acc48(ac->a[l]);
         if (dst) dst[l] = (short)nb_acc_low(ac->a[l]);
     }
+#endif
 }
 
 /* vmudm/vmadm: signed x unsigned */
 static void nb_vmudm(NbAcc *ac, const short *vs, const short *vt, int e,
                      int acc_in, short *dst)
 {
+#if HLE_SIMD_ENABLED
+    short selected[8],discard[8];
+    hle_rsp_select8(selected,vt,e);
+    hle_acc8(dst?dst:discard,ac->a,vs,selected,-1,acc_in?HLE_VMADM:HLE_VMUDM);
+#else
     int l;
     short saved_s[8], saved_t[8];
     memcpy(saved_s, vs, sizeof(saved_s));
@@ -1016,12 +1033,18 @@ static void nb_vmudm(NbAcc *ac, const short *vs, const short *vt, int e,
         ac->a[l] = nb_acc48(ac->a[l]);
         if (dst) dst[l] = (short)nb_acc_mid(ac->a[l]);
     }
+#endif
 }
 
 /* vmudn/vmadn: unsigned x signed, destination is the low slice */
 static void nb_vmudn(NbAcc *ac, const short *vs, const short *vt, int e,
                      int acc_in, short *dst)
 {
+#if HLE_SIMD_ENABLED
+    short selected[8],discard[8];
+    hle_rsp_select8(selected,vt,e);
+    hle_acc8(dst?dst:discard,ac->a,vs,selected,-1,acc_in?HLE_VMADN:HLE_VMUDN);
+#else
     int l;
     short saved_s[8], saved_t[8];
     memcpy(saved_s, vs, sizeof(saved_s));
@@ -1034,12 +1057,18 @@ static void nb_vmudn(NbAcc *ac, const short *vs, const short *vt, int e,
         ac->a[l] = nb_acc48(ac->a[l]);
         if (dst) dst[l] = (short)nb_acc_low(ac->a[l]);
     }
+#endif
 }
 
 /* vmudh/vmadh: signed x signed one slice up */
 static void nb_vmudh(NbAcc *ac, const short *vs, const short *vt, int e,
                      int acc_in, short *dst)
 {
+#if HLE_SIMD_ENABLED
+    short selected[8],discard[8];
+    hle_rsp_select8(selected,vt,e);
+    hle_acc8(dst?dst:discard,ac->a,vs,selected,-1,acc_in?HLE_VMADH:HLE_VMUDH);
+#else
     int l;
     short saved_s[8], saved_t[8];
     memcpy(saved_s, vs, sizeof(saved_s));
@@ -1051,12 +1080,18 @@ static void nb_vmudh(NbAcc *ac, const short *vs, const short *vt, int e,
         ac->a[l] = nb_acc48(ac->a[l]);
         if (dst) dst[l] = (short)nb_acc_mid(ac->a[l]);
     }
+#endif
 }
 
 /* vmulf/vmacf: signed fractional, x2 with a rounding bias */
 static void nb_vmulf8(NbAcc *ac, const short *vs, const short *vt, int e,
                      int acc_in, short *dst)
 {
+#if HLE_SIMD_ENABLED
+    short selected[8],discard[8];
+    hle_rsp_select8(selected,vt,e);
+    hle_acc8(dst?dst:discard,ac->a,vs,selected,-1,acc_in?HLE_VMACF:HLE_VMULF);
+#else
     int l;
     short saved_s[8], saved_t[8];
     memcpy(saved_s, vs, sizeof(saved_s));
@@ -1070,6 +1105,7 @@ static void nb_vmulf8(NbAcc *ac, const short *vs, const short *vt, int e,
         ac->a[l] = nb_acc48(ac->a[l]);
         if (dst) dst[l] = (short)nb_acc_mid(ac->a[l]);
     }
+#endif
 }
 
 /* packed vector loads/stores: lpv scales each byte up by 8, luv by 7,

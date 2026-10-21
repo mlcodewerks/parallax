@@ -29,6 +29,7 @@
 #include "alist.h"
 #include "resample_hq.h"
 #include "arithmetics.h"
+#include "hle_simd.h"
 #include "audio.h"
 #include "hle_external.h"
 #include "hle_internal.h"
@@ -463,6 +464,12 @@ static int16_t ev_clamp_al(int64_t a) /* SIGNED_CLAMP_AL: saturate ACC_L */
 
 static void ev_vmudl(ev_vr vd, const ev_vr vs, const ev_vr vt, int e)
 {
+#if HLE_SIMD_ENABLED
+    if (e < 0 || vd != vt) {
+        hle_acc8(vd, ev_acc, vs, vt, e, HLE_VMUDL);
+        return;
+    }
+#endif
     unsigned i;
     for (i = 0; i < 8; ++i) {
         ev_acc[i] = (uint32_t)((uint16_t)vs[i] * (uint16_t)EV_VT(vt, e, i)) >> 16;
@@ -472,6 +479,12 @@ static void ev_vmudl(ev_vr vd, const ev_vr vs, const ev_vr vt, int e)
 
 static void ev_vmudm(ev_vr vd, const ev_vr vs, const ev_vr vt, int e)
 {
+#if HLE_SIMD_ENABLED
+    if (e < 0 || vd != vt) {
+        hle_acc8(vd, ev_acc, vs, vt, e, HLE_VMUDM);
+        return;
+    }
+#endif
     unsigned i;
     for (i = 0; i < 8; ++i) {
         ev_acc[i] = (int64_t)vs[i] * (uint16_t)EV_VT(vt, e, i);
@@ -481,6 +494,12 @@ static void ev_vmudm(ev_vr vd, const ev_vr vs, const ev_vr vt, int e)
 
 static void ev_vmadm(ev_vr vd, const ev_vr vs, const ev_vr vt, int e)
 {
+#if HLE_SIMD_ENABLED
+    if (e < 0 || vd != vt) {
+        hle_acc8(vd, ev_acc, vs, vt, e, HLE_VMADM);
+        return;
+    }
+#endif
     unsigned i;
     for (i = 0; i < 8; ++i) {
         ev_acc[i] = ev_s48(ev_acc[i] + (int64_t)vs[i] * (uint16_t)EV_VT(vt, e, i));
@@ -490,6 +509,12 @@ static void ev_vmadm(ev_vr vd, const ev_vr vs, const ev_vr vt, int e)
 
 static void ev_vmadn(ev_vr vd, const ev_vr vs, const ev_vr vt, int e)
 {
+#if HLE_SIMD_ENABLED
+    if (e < 0 || vd != vt) {
+        hle_acc8(vd, ev_acc, vs, vt, e, HLE_VMADN);
+        return;
+    }
+#endif
     unsigned i;
     for (i = 0; i < 8; ++i) {
         ev_acc[i] = ev_s48(ev_acc[i] + (int64_t)(uint16_t)vs[i] * EV_VT(vt, e, i));
@@ -499,6 +524,12 @@ static void ev_vmadn(ev_vr vd, const ev_vr vs, const ev_vr vt, int e)
 
 static void ev_vmadh(ev_vr vd, const ev_vr vs, const ev_vr vt, int e)
 {
+#if HLE_SIMD_ENABLED
+    if (e < 0 || vd != vt) {
+        hle_acc8(vd, ev_acc, vs, vt, e, HLE_VMADH);
+        return;
+    }
+#endif
     unsigned i;
     for (i = 0; i < 8; ++i) {
         ev_acc[i] = ev_s48(ev_acc[i] + (((int64_t)vs[i] * EV_VT(vt, e, i)) << 16));
@@ -508,6 +539,12 @@ static void ev_vmadh(ev_vr vd, const ev_vr vs, const ev_vr vt, int e)
 
 static void ev_vmulf(ev_vr vd, const ev_vr vs, const ev_vr vt, int e)
 {
+#if HLE_SIMD_ENABLED
+    if (e < 0 || vd != vt) {
+        hle_acc8(vd, ev_acc, vs, vt, e, HLE_VMULF);
+        return;
+    }
+#endif
     unsigned i;
     for (i = 0; i < 8; ++i) {
         ev_acc[i] = ev_s48(2 * (int64_t)vs[i] * EV_VT(vt, e, i) + 0x8000);
@@ -517,6 +554,12 @@ static void ev_vmulf(ev_vr vd, const ev_vr vs, const ev_vr vt, int e)
 
 static void ev_vmacf(ev_vr vd, const ev_vr vs, const ev_vr vt, int e)
 {
+#if HLE_SIMD_ENABLED
+    if (e < 0 || vd != vt) {
+        hle_acc8(vd, ev_acc, vs, vt, e, HLE_VMACF);
+        return;
+    }
+#endif
     unsigned i;
     for (i = 0; i < 8; ++i) {
         ev_acc[i] = ev_s48(ev_acc[i] + 2 * (int64_t)vs[i] * EV_VT(vt, e, i));
@@ -1548,6 +1591,17 @@ void alist_mix(struct hle_t* hle, uint16_t dmemo, uint16_t dmemi, uint16_t count
     count >>= 1;
 
     while(count != 0) {
+#if HLE_SIMD_ENABLED
+        unsigned po = o & 0xffe, pi = i & 0xffe;
+        if (count >= 8 && po <= 0xff0 && pi <= 0xff0 &&
+            (po <= pi || po >= pi + 16)) {
+            hle_mix8((int16_t *)(hle->alist_buffer + po),
+                     (const int16_t *)(hle->alist_buffer + po),
+                     (const int16_t *)(hle->alist_buffer + pi), gain, 1);
+            o += 16; i += 16; count -= 8;
+            continue;
+        }
+#endif
         sample_mix((int16_t*)(hle->alist_buffer + (o & 0xffe)),
                    *(const int16_t*)(hle->alist_buffer + (i & 0xffe)),
                    gain);
@@ -1583,12 +1637,8 @@ void alist_mix_audio(struct hle_t* hle, uint16_t dmemo, uint16_t dmemi, uint16_t
         s1[i] = *alist_s16(hle, dmemi + 16 + 2*i);
     }
     do {
-        for (i = 0; i < 8; ++i) {
-            r0[i] = d0[i];
-            r1[i] = d1[i];
-            sample_mix(&r0[i], s0[i], gain);
-            sample_mix(&r1[i], s1[i], gain);
-        }
+        hle_mix8(r0, d0, s0, gain, 1);
+        hle_mix8(r1, d1, s1, gain, 1);
         remaining -= 32;
         dmemi += 32;
         for (i = 0; i < 8; ++i)
@@ -1627,10 +1677,10 @@ void alist_mix_audio_bc(struct hle_t* hle, uint16_t dmemo, uint16_t dmemi, uint1
         }
     for (block = 0; block < blocks; ++block) {
         unsigned slot = block & 3;
+        int16_t result[8];
+        hle_mix8(result, dst[slot], src[slot], gain, 1);
         for (i = 0; i < 8; ++i) {
-            int16_t value = dst[slot][i];
-            sample_mix(&value, src[slot][i], gain);
-            *alist_s16(hle, dmemo + 16*block + 2*i) = value;
+            *alist_s16(hle, dmemo + 16*block + 2*i) = result[i];
         }
         for (i = 0; i < 8; ++i) {
             src[slot][i] = *alist_s16(hle, dmemi + 16*(block + 4) + 2*i);
@@ -1655,6 +1705,15 @@ void alist_multQ44(struct hle_t* hle, uint16_t dmem, uint16_t count, uint8_t gai
     count >>= 1;
 
     while(count != 0) {
+#if HLE_SIMD_ENABLED
+        if(count>=8) {
+            __m128i a=_mm_loadu_si128((const __m128i *)dst),g=_mm_set1_epi16(gain);
+            __m128i lo=_mm_srai_epi32(hle_mul_s16_lo(a,g),4);
+            __m128i hi=_mm_srai_epi32(hle_mul_s16_lo(_mm_srli_si128(a,8),g),4);
+            _mm_storeu_si128((__m128i *)dst,_mm_packs_epi32(lo,hi));
+            dst+=8;count-=8;continue;
+        }
+#endif
         *dst = clamp_s16((int_fast32_t)*dst * gain >> 4);
 
         ++dst;
@@ -1684,6 +1743,14 @@ void alist_add(struct hle_t* hle, uint16_t dmemo, uint16_t dmemi, uint16_t count
     count >>= 1;
 
     while(count != 0) {
+#if HLE_SIMD_ENABLED
+        if (count >= 8 && ((uintptr_t)dst <= (uintptr_t)src ||
+                          (uintptr_t)dst >= (uintptr_t)src + 16)) {
+            hle_addsub8(dst, dst, src, 0);
+            dst += 8; src += 8; count -= 8;
+            continue;
+        }
+#endif
         *dst = clamp_s16(*dst + *src);
 
         ++dst;
@@ -1749,8 +1816,12 @@ static int resample_hq_sample(struct hle_t* hle, unsigned ipos,
      * material with energy near Nyquist rings audibly.  64 taps of
      * 16-bit input against Q15 coefficients reach 2^36, so the
      * accumulator has to be 64-bit. */
-    for (t = 0; t < taps; ++t)
-        acc += (int64_t)*sample(hle, ipos + t - (taps / 2 - 2)) * k[t];
+    {
+        int16_t window[64];
+        for (t = 0; t < taps; ++t)
+            window[t] = *sample(hle, ipos + t - (taps / 2 - 2));
+        acc = hle_dot_s16(window, k, taps, 0);
+    }
 
     /* round half-up: keeps the error zero-mean instead of biasing every
      * sample toward zero */
@@ -2417,15 +2488,8 @@ void alist_mix_nead(struct hle_t* hle, uint16_t dmemo, uint16_t dmemi, uint16_t 
     }
 
     do {
-        for (i = 0; i < 8; ++i) {
-            int64_t acc;
-            acc = 0x8000 + 2 * (int64_t)((int32_t)d0[i] * 0x7fff)
-                         + 2 * (int64_t)((int32_t)s0[i] * (int32_t)gain);
-            r0[i] = clamp_s16((int_fast32_t)(acc >> 16));
-            acc = 0x8000 + 2 * (int64_t)((int32_t)d1[i] * 0x7fff)
-                         + 2 * (int64_t)((int32_t)s1[i] * (int32_t)gain);
-            r1[i] = clamp_s16((int_fast32_t)(acc >> 16));
-        }
+        hle_mix8(r0,d0,s0,gain,1);
+        hle_mix8(r1,d1,s1,gain,1);
 
         remaining -= 0x20;
         dmemi += 0x20;
@@ -2513,16 +2577,7 @@ void alist_filter(
             win[7 + i] = cur[i];
         }
 
-        for (i = 0; i < 8; ++i) {
-            int64_t acc = 0x8000;
-            unsigned int k;
-            for (k = 0; k < 8; ++k)
-                acc += 2 * (int64_t)((int32_t)t[k] * (int32_t)win[i + 7 - k]);
-            acc >>= 16;
-            if (acc >  32767) acc =  32767;
-            if (acc < -32768) acc = -32768;
-            out[i] = (int16_t)acc;
-        }
+        hle_fir8(out,win,t,8,1,NULL);
 
         for (i = 0; i < 8; ++i)
             *alist_s16(hle, dmem + (uint16_t)(i << 1)) = out[i];

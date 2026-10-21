@@ -17,6 +17,7 @@
 
 #include <string.h>
 #include "rdp_emit_rsp.h"
+#include "rdp_emit_simd.h"
 
 /* 11-bit divide result look-up table (VRCP family), from cxd4. */
 static const uint16_t div_rom[1024] = {
@@ -672,6 +673,14 @@ static void light_dir_xfrm(const int32_t mv[4][4],
     Rsp32 r;
     int L;
 
+#if HLE_SIMD_ENABLED
+    if(!legacy) {
+        int64_t rotated[4];int32_t direction[3];int axis;
+        for(axis=0;axis<3;axis++)direction[axis]=(int16_t)((dir[axis]&255)<<8);
+        rdp_simd_rotate4(rotated,mv,direction);
+        for(L=0;L<4;L++) {t_mid[L]=(rotated[L]>>16)&65535;t_hi[L]=(rotated[L]>>32)&65535;}
+    } else
+#endif
     for (L = 0; L < 4; L++)
     {
         RspAcc acc = 0;
@@ -872,24 +881,13 @@ void rsp_light_vtx(const int32_t n[3], const int32_t amb[3],
     {
         int32_t d1 = rsp_light_dot(n, dirs[i]);
         int32_t d2 = rsp_light_dot(n, dirs[i - 1]);
-        for (c = 0; c < 3; c++)
-        {
-            RspAcc acc = 2 * (RspAcc)S16(lt[c]) * 0x7fff + 0x8000;
-            acc += 2 * (RspAcc)((rgb[i][c] & 0xff) << 7) * d1;
-            acc += 2 * (RspAcc)((rgb[i - 1][c] & 0xff) << 7) * d2;
-            lt[c] = acc_read_signed(acc);
-        }
+        rdp_simd_light_fold3(lt,rgb[i],rgb[i-1],d1,d2);
         i -= 2;
     }
     if (i == 0)
     {
         int32_t d1 = rsp_light_dot(n, dirs[0]);
-        for (c = 0; c < 3; c++)
-        {
-            RspAcc acc = 2 * (RspAcc)S16(lt[c]) * 0x7fff + 0x8000;
-            acc += 2 * (RspAcc)((rgb[0][c] & 0xff) << 7) * d1;
-            lt[c] = acc_read_signed(acc);
-        }
+        rdp_simd_light_fold3(lt,rgb[0],NULL,d1,0);
     }
     for (c = 0; c < 3; c++)
         out[c] = (lt[c] >> 7) & 0xff;
@@ -939,13 +937,7 @@ int32_t rsp_light_dirdot(const int32_t n[3], const int32_t d[3])
  * <<7-domain color and vmacf adds one light's contribution. */
 void rsp_light_fold1(int32_t lt[3], const int32_t rgb[3], int32_t d)
 {
-    int c;
-    for (c = 0; c < 3; c++)
-    {
-        RspAcc acc = 2 * (RspAcc)S16(lt[c]) * 0x7fff + 0x8000;
-        acc += 2 * (RspAcc)((rgb[c] & 0xff) << 7) * (RspAcc)S16(d);
-        lt[c] = acc_read_signed(acc);
-    }
+    rdp_simd_light_fold3(lt,rgb,NULL,S16(d),0);
 }
 
 /* The microcode's light_point chain, bit-exact. Per vertex and light:
@@ -1548,26 +1540,8 @@ void rsp_clip_lerp(const int32_t on_pos[4], const int32_t off_pos[4],
     acc = p_udn(fade, -1);
     onfade = acc_clamp_low(acc);            /* 0x10000 - fade, low half */
     /* Position lerp: off * fade + on * onfade through the i:f MAC chain */
-    for (L = 0; L < 4; L++)
-    {
-        int32_t onf = on_pos[L] & 0xffff, oni = (on_pos[L] >> 16) & 0xffff;
-        int32_t off = off_pos[L] & 0xffff, ofi = (off_pos[L] >> 16) & 0xffff;
-        int32_t pi, pf;
-        acc  = p_udl(off, fade) + p_udm(ofi, fade);
-        acc += p_udl(onf, onfade);
-        acc += p_udm(oni, onfade);
-        pi = acc_clamp_mid(acc);
-        pf = acc_clamp_low(acc);
-        out_pos[L] = (int32_t)(((uint32_t)U16(pi) << 16) | (uint32_t)U16(pf));
-    }
-    /* Attribute lerp: one vmudm/vmadm round (signed attrs, unsigned
-     * factors), acc mid clamps out. */
-    for (L = 0; L < 8; L++)
-    {
-        acc  = p_udm(S16(off_attr[L]) & 0xffff, fade);
-        acc += p_udm(S16(on_attr[L]) & 0xffff, onfade);
-        out_attr[L] = (int16_t)acc_clamp_mid(acc);
-    }
+    rdp_simd_blend4(out_pos,off_pos,on_pos,fade,onfade);
+    rdp_simd_blend8(out_attr,off_attr,on_attr,fade,onfade);
 }
 
 /* ---- vertex screen transform ------------------------------------------ */
@@ -2122,6 +2096,48 @@ static Rsp32 sub32(Rsp32 a, Rsp32 b)
     o.i = clamp_s16(S16(a.i) - S16(b.i) - borrow) & 0xffff;
     return o;
 }
+#if HLE_SIMD_ENABLED
+static void rsp_store_pairs4(Rsp32 *out,__m128i integer,__m128i fraction)
+{
+    _mm_storeu_si128((__m128i *)out,_mm_unpacklo_epi32(integer,fraction));
+    _mm_storeu_si128((__m128i *)(out+2),_mm_unpackhi_epi32(integer,fraction));
+}
+/* The eight colour/texture/depth lanes share edge deltas. Preserve the
+ * fractional borrow and signed integer clamp before multiplying them. */
+static void rsp_gradients8(const int32_t ai[3][8],const int32_t af[3][8],
+    Rsp32 *dh,Rsp32 *dm,Rsp32 *dx,Rsp32 *dy,int mh,int hl,int lh,int hm)
+{
+    int at,v,p;__m128i mask=_mm_set1_epi32(65535);
+    for(at=0;at<8;at+=4) {
+        __m128i delta[2];
+        __m128i origin_i=_mm_loadu_si128((const __m128i *)(ai[0]+at));
+        __m128i origin_f=_mm_and_si128(_mm_loadu_si128((const __m128i *)(af[0]+at)),mask);
+        origin_i=_mm_srai_epi32(_mm_slli_epi32(origin_i,16),16);
+        for(v=0;v<2;v++) {
+            int row=v?1:2;Rsp32 *out=v?dm:dh;
+            __m128i i=_mm_loadu_si128((const __m128i *)(ai[row]+at));
+            __m128i f=_mm_and_si128(_mm_loadu_si128((const __m128i *)(af[row]+at)),mask);
+            __m128i borrow=_mm_and_si128(_mm_cmpgt_epi32(origin_f,f),_mm_set1_epi32(1));
+            i=_mm_sub_epi32(_mm_sub_epi32(_mm_srai_epi32(_mm_slli_epi32(i,16),16),origin_i),borrow);
+            i=_mm_and_si128(_mm_max_epi32(_mm_set1_epi32(-32768),_mm_min_epi32(_mm_set1_epi32(32767),i)),mask);
+            f=_mm_and_si128(_mm_sub_epi32(f,origin_f),mask);
+            rsp_store_pairs4(out+at,i,f);delta[v]=_mm_or_si128(_mm_slli_epi32(i,16),f);
+        }
+        for(v=0;v<2;v++) {
+            __m128i a=delta[0],b=delta[1],parts[2];
+            __m128i ca=_mm_set1_epi32((int16_t)(v?hm:mh)),cb=_mm_set1_epi32((int16_t)(v?lh:hl));
+            for(p=0;p<2;p++) {
+                __m128i aa=_mm_shuffle_epi32(a,_MM_SHUFFLE(1,1,0,0));
+                __m128i bb=_mm_shuffle_epi32(b,_MM_SHUFFLE(1,1,0,0));
+                parts[p]=hle_sra64(_mm_add_epi64(_mm_mul_epi32(aa,ca),_mm_mul_epi32(bb,cb)),16);
+                a=_mm_srli_si128(a,8);b=_mm_srli_si128(b,8);
+            }
+            a=hle_join64_low32(parts[0],parts[1]);
+            rsp_store_pairs4((v?dy:dx)+at,_mm_srli_epi32(a,16),_mm_and_si128(a,mask));
+        }
+    }
+}
+#endif
 static Rsp32 add32(Rsp32 a,Rsp32 b)
 {
     Rsp32 o;int sum=U16(a.f)+U16(b.f);
@@ -4051,8 +4067,14 @@ int rsp_tri_write_with_texrecip(int32_t *ew,
         rs_mh_y = clamp_s16(mh_y * scale); rs_hl_y = clamp_s16(hl_y * scale);
         rs_lh_x = clamp_s16(lh_x * scale); rs_hm_x = clamp_s16(hm_x * scale);
     }
+#if HLE_SIMD_ENABLED
+    rsp_gradients8(at_i,at_f,dA_H,dA_M,dA_x,dA_y,
+        scaled_deltas?rs_mh_y:mh_y,scaled_deltas?rs_hl_y:hl_y,
+        scaled_deltas?rs_lh_x:lh_x,scaled_deltas?rs_hm_x:hm_x);
+#endif
     for (k = 0; k < 8; k++)
     {
+#if !HLE_SIMD_ENABLED
         Rsp32 a1, a2, a3;
         a1.i = at_i[0][k]; a1.f = at_f[0][k];
         a2.i = at_i[1][k]; a2.f = at_f[1][k];
@@ -4076,6 +4098,7 @@ int rsp_tri_write_with_texrecip(int32_t *ew,
         acc += p_udh(dA_H[k].i, scaled_deltas ? rs_hm_x : hm_x);
         dA_y[k].i = (int32_t)((acc >> 32) & 0xffff);
         dA_y[k].f = (int32_t)((acc >> 16) & 0xffff);
+#endif
 
         if (s_tri_attr_rs || s_tri_attr_dkr)
         {
@@ -4677,43 +4700,20 @@ int rsp_tri_write_with_texrecip(int32_t *ew,
          * stores) */
         if (shaded)
         {
-        ew[nw + 0] = (int32_t)(((uint32_t)U16(base[0].i) << 16) | (uint32_t)U16(base[1].i));
-        ew[nw + 1] = (int32_t)(((uint32_t)U16(base[2].i) << 16) | (uint32_t)U16(base[3].i));
-        ew[nw + 2] = (int32_t)(((uint32_t)U16(dAdX[0].i) << 16) | (uint32_t)U16(dAdX[1].i));
-        ew[nw + 3] = (int32_t)(((uint32_t)U16(dAdX[2].i) << 16) | (uint32_t)U16(dAdX[3].i));
-        ew[nw + 4] = (int32_t)(((uint32_t)U16(base[0].f) << 16) | (uint32_t)U16(base[1].f));
-        ew[nw + 5] = (int32_t)(((uint32_t)U16(base[2].f) << 16) | (uint32_t)U16(base[3].f));
-        ew[nw + 6] = (int32_t)(((uint32_t)U16(dAdX[0].f) << 16) | (uint32_t)U16(dAdX[1].f));
-        ew[nw + 7] = (int32_t)(((uint32_t)U16(dAdX[2].f) << 16) | (uint32_t)U16(dAdX[3].f));
-        ew[nw + 8] = (int32_t)(((uint32_t)U16(dAdE[0].i) << 16) | (uint32_t)U16(dAdE[1].i));
-        ew[nw + 9] = (int32_t)(((uint32_t)U16(dAdE[2].i) << 16) | (uint32_t)U16(dAdE[3].i));
-        ew[nw +10] = (int32_t)(((uint32_t)U16(dAdY[0].i) << 16) | (uint32_t)U16(dAdY[1].i));
-        ew[nw +11] = (int32_t)(((uint32_t)U16(dAdY[2].i) << 16) | (uint32_t)U16(dAdY[3].i));
-        ew[nw +12] = (int32_t)(((uint32_t)U16(dAdE[0].f) << 16) | (uint32_t)U16(dAdE[1].f));
-        ew[nw +13] = (int32_t)(((uint32_t)U16(dAdE[2].f) << 16) | (uint32_t)U16(dAdE[3].f));
-        ew[nw +14] = (int32_t)(((uint32_t)U16(dAdY[0].f) << 16) | (uint32_t)U16(dAdY[1].f));
-        ew[nw +15] = (int32_t)(((uint32_t)U16(dAdY[2].f) << 16) | (uint32_t)U16(dAdY[3].f));
+        rdp_simd_pack_attrs(ew+nw,&base[0].i,&dAdX[0].i);
+        rdp_simd_pack_attrs(ew+nw+8,&dAdE[0].i,&dAdY[0].i);
         nw += 16;
         }
 
         if (textured)
         {
-            ew[nw + 0] = (int32_t)(((uint32_t)U16(base[4].i) << 16) | (uint32_t)U16(base[5].i));
-            ew[nw + 1] = (int32_t)(((uint32_t)U16(base[6].i) << 16) | (uint32_t)U16(pre_z_base.i));
-            ew[nw + 2] = (int32_t)(((uint32_t)U16(dAdX[4].i) << 16) | (uint32_t)U16(dAdX[5].i));
-            ew[nw + 3] = (int32_t)(((uint32_t)U16(dAdX[6].i) << 16) | (uint32_t)U16(pre_z_dAdX.i));
-            ew[nw + 4] = (int32_t)(((uint32_t)U16(base[4].f) << 16) | (uint32_t)U16(base[5].f));
-            ew[nw + 5] = (int32_t)(((uint32_t)U16(base[6].f) << 16) | (uint32_t)U16(pre_z_base.f));
-            ew[nw + 6] = (int32_t)(((uint32_t)U16(dAdX[4].f) << 16) | (uint32_t)U16(dAdX[5].f));
-            ew[nw + 7] = (int32_t)(((uint32_t)U16(dAdX[6].f) << 16) | (uint32_t)U16(pre_z_dAdX.f));
-            ew[nw + 8] = (int32_t)(((uint32_t)U16(dAdE[4].i) << 16) | (uint32_t)U16(dAdE[5].i));
-            ew[nw + 9] = (int32_t)(((uint32_t)U16(dAdE[6].i) << 16) | (uint32_t)U16(pre_z_dAdE.i));
-            ew[nw +10] = (int32_t)(((uint32_t)U16(dAdY[4].i) << 16) | (uint32_t)U16(dAdY[5].i));
-            ew[nw +11] = (int32_t)(((uint32_t)U16(dAdY[6].i) << 16) | (uint32_t)U16(pre_z_dAdY.i));
-            ew[nw +12] = (int32_t)(((uint32_t)U16(dAdE[4].f) << 16) | (uint32_t)U16(dAdE[5].f));
-            ew[nw +13] = (int32_t)(((uint32_t)U16(dAdE[6].f) << 16) | (uint32_t)U16(pre_z_dAdE.f));
-            ew[nw +14] = (int32_t)(((uint32_t)U16(dAdY[4].f) << 16) | (uint32_t)U16(dAdY[5].f));
-            ew[nw +15] = (int32_t)(((uint32_t)U16(dAdY[6].f) << 16) | (uint32_t)U16(pre_z_dAdY.f));
+            /* The fourth texture lane is the pre-Z value; packing it
+             * must not pick up the later depth-domain scaling in lane 7. */
+            Rsp32 tex[4][4];const Rsp32 *source[4]={base,dAdX,dAdE,dAdY};
+            Rsp32 depth[4]={pre_z_base,pre_z_dAdX,pre_z_dAdE,pre_z_dAdY};int g;
+            for(g=0;g<4;g++){memcpy(tex[g],source[g]+4,3*sizeof(Rsp32));tex[g][3]=depth[g];}
+            rdp_simd_pack_attrs(ew+nw,&tex[0][0].i,&tex[1][0].i);
+            rdp_simd_pack_attrs(ew+nw+8,&tex[2][0].i,&tex[3][0].i);
             nw += 16;
         }
         if (z_buffered)

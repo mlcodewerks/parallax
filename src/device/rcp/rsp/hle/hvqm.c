@@ -1,4 +1,5 @@
 #include "hle_timing.h"
+#include "hle_simd.h"
 /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * *
  *   Mupen64plus-rsp-hle - hvqm.c                                          *
  *   Mupen64Plus homepage: https://mupen64plus.org/                        *
@@ -259,6 +260,13 @@ static int process_info(struct hle_t* hle, uint8_t* base, int16_t* out)
         //LABEL8
         for (int i = 0; i < 16; i++)
         {
+#if HLE_SIMD_ENABLED
+            __m128i v=_mm_set1_epi16(4);
+            int16_t dc[5]={block.dc,block.dc_l,block.dc_r,block.dc_u,block.dc_d};
+            for(int term=0;term<5;term++)
+                v=_mm_add_epi16(v,_mm_mullo_epi16(_mm_loadu_si128((const __m128i *)(constant[term]+i)),_mm_set1_epi16(dc[term])));
+            _mm_storeu_si128((__m128i *)(out+i),_mm_srai_epi16(v,3));i+=7;continue;
+#endif
             out[i] = constant[0][i] * block.dc;
             out[i] += constant[1][i] * block.dc_l;
             out[i] += constant[2][i] * block.dc_r;
@@ -348,8 +356,7 @@ static int process_info(struct hle_t* hle, uint8_t* base, int16_t* out)
             {
                 int32_t recip = hvqm_vrcp32(max);
                 int32_t k = (int32_t)(basis.scale << 2);
-                for (int i = 0; i < 16; i++)
-                    out[i] += (int16_t)(((int64_t)vec[i] * k * recip + (1 << 14)) >> 15);
+                hle_hvqm_basis16(out,vec,k,recip);
             }
 
             block.nbase &= 8;
@@ -402,6 +409,15 @@ void store_rgba8888(struct hle_t* hle, struct RGBA color, uint32_t * addr)
 }
 
 typedef void(*store_pixel_t)(struct hle_t* hle, struct RGBA color, uint32_t * addr);
+
+static void store_row4(struct hle_t *hle,store_pixel_t store_pixel,const int16_t *y,
+    const int16_t *cb,const int16_t *cr,uint32_t *address)
+{
+    struct RGBA colors[4];
+    int16_t u[4]={cb[0],cb[0],cb[1],cb[1]},v[4]={cr[0],cr[0],cr[1],cr[1]};
+    hle_hvqm_rgba4((uint8_t *)colors,y,u,v,arg.alpha);
+    for(unsigned lane=0;lane<4;lane++)store_pixel(hle,colors[lane],address);
+}
 
 static void hvqm2_decode(struct hle_t* hle, int is32)
 {
@@ -497,16 +513,8 @@ static void hvqm2_decode(struct hle_t* hle, int is32)
                 for (int m = 0; m < arg.chroma_step_v; m++)
                 {
                     uint32_t addr = out_buf;
-                    for (int l = 0; l < 4; l++)
-                    {
-                        struct RGBA color = YCbCr_to_RGBA(pY1[l], pCb[l >> 1], pCr[l >> 1], arg.alpha);
-                        store_pixel(hle, color, &addr);
-                    }
-                    for (int l = 0; l < 4; l++)
-                    {
-                        struct RGBA color = YCbCr_to_RGBA(pY2[l], pCb[(l + 4) >> 1], pCr[(l + 4) >> 1], arg.alpha);
-                        store_pixel(hle, color, &addr);
-                    }
+                    store_row4(hle,store_pixel,pY1,pCb,pCr,&addr);
+                    store_row4(hle,store_pixel,pY2,pCb+2,pCr+2,&addr);
                     out_buf += skip;
                     pY1 += 4;
                     pY2 += 4;

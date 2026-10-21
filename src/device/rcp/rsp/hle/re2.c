@@ -28,6 +28,7 @@
 #include "hle_external.h"
 #include "hle_internal.h"
 #include "memory.h"
+#include "hle_simd.h"
 
 #define SATURATE8(x) ((unsigned int) x <= 255 ? x : (x < 0 ? 0: 255))
 
@@ -100,8 +101,21 @@ void resize_bilinear_task(struct hle_t* hle)
             uint32_t w_br = ((xf * yf) >> 16) * 4;
             uint16_t pixel;
             unsigned c;
-            uint32_t chan[3];
+            uint32_t chan[4];
 
+#if HLE_SIMD_ENABLED
+            {
+                __m128i v=_mm_set1_epi32(4),p;
+#define HLE_RE2_CORNER(off,weight) do { \
+    p=_mm_setr_epi32(win[((off)+0)&0xfff],win[((off)+1)&0xfff],win[((off)+2)&0xfff],0); \
+    v=_mm_add_epi32(v,_mm_srli_epi32(_mm_mullo_epi32(p,_mm_set1_epi32(weight)),16)); \
+} while(0)
+                HLE_RE2_CORNER(xi,w_tl);HLE_RE2_CORNER(xi+3,w_tr);
+                HLE_RE2_CORNER(xi+0x3c0,w_bl);HLE_RE2_CORNER(xi+0x3c0+3,w_br);
+#undef HLE_RE2_CORNER
+                _mm_storeu_si128((__m128i *)chan,_mm_and_si128(_mm_min_epu32(v,_mm_set1_epi32(255)),_mm_set1_epi32(0xf8)));
+            }
+#else
             for (c = 0; c < 3; ++c) {
                 uint32_t tl = win[(xi + c)                 & 0xfff];
                 uint32_t tr = win[(xi + 3 + c)             & 0xfff];
@@ -114,6 +128,7 @@ void resize_bilinear_task(struct hle_t* hle)
                     v = 255;
                 chan[c] = v & 0xf8;
             }
+#endif
 
             pixel = (uint16_t)((chan[2] << 8) | (chan[1] << 3) | (chan[0] >> 2) | 1);
             win[0x780 + 2 * j]     = (uint8_t)(pixel >> 8);
@@ -139,6 +154,9 @@ static int32_t sat16(int32_t x)
 
 static uint32_t YCbCr_to_RGBA(uint8_t Y, uint8_t Cb, uint8_t Cr)
 {
+#if HLE_SIMD_ENABLED
+    return hle_re2_rgba(Y,Cb,Cr);
+#else
     /* The RSP has no FPU: the video ucode does this with truncating VMUDM and
      * 16-bit coefficients held in DMEM. Those coefficients (read straight from
      * the RE2 ucode_data) are 38155, 45941, 23401, 11277, 58065 over 1<<16, so
@@ -168,6 +186,7 @@ static uint32_t YCbCr_to_RGBA(uint8_t Y, uint8_t Cb, uint8_t Cr)
 
     return ((uint32_t)(r7 >> 7) << 24) | ((uint32_t)(g7 >> 7) << 16) |
            ((uint32_t)(b7 >> 7) << 8) | 0;
+#endif
 }
 
 void decode_video_frame_task(struct hle_t* hle)

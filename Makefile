@@ -565,6 +565,18 @@ ifneq (,$(filter x86_64 amd64 x86 i386 i486 i586 i686,$(ARCH)))
 CXXFLAGS += -msse4.1
 endif
 
+# HLE integer kernels share SSE4.2 and the existing NEON translation layer.
+# Keep this ISA requirement local to HLE; scalar reference builds can opt out.
+HLE_SIMD ?= 1
+ifeq ($(HLE_SIMD),0)
+COREFLAGS += -DHLE_SIMD_DISABLE
+else
+ifneq (,$(filter x86_64 amd64 x86 i386 i486 i586 i686,$(ARCH)))
+$(addprefix $(CORE_DIR)/src/device/rcp/rsp/hle/,$(notdir $(patsubst %.c,%.o,$(wildcard $(CORE_DIR)/src/device/rcp/rsp/hle/*.c)))): CFLAGS += -msse4.2
+$(patsubst %.c,%.o,$(wildcard $(CORE_DIR)/src/device/rcp/rdp/angrylion/rdp_emit*.c)): CFLAGS += -msse4.2
+endif
+endif
+
 ifeq ($(HAVE_LTCG),1)
    CPUFLAGS += -flto
 endif
@@ -579,7 +591,7 @@ OBJECTS     += $(SOURCES_CXX:.cpp=.o) $(SOURCES_C:.c=.o) $(SOURCES_ASM:.S=.o) $(
 # Backend defines affect dispatch and private cache layouts. Rebuild between the
 # Ari64 emitter and interpreter-only configuration, or optimization settings.
 CPU_JIT_CONFIG := $(CORE_DIR)/.cpu-jit-config
-CPU_JIT_CONFIG_VALUE := glrdp=$(HAVE_GLRDP):headless=$(HEADLESS_BENCHMARK):headless-cpu=$(HEADLESS_BENCH_CPU):$(WITH_DYNAREC):$(if $(ARI64_DIR),ari64-emitter,interpreter):debug=$(DEBUG):profile=$(ARI64_PROFILE):interp=$(INTERP_OPTIMIZE):branchless=$(INTERP_BRANCHLESS)
+CPU_JIT_CONFIG_VALUE := glrdp=$(HAVE_GLRDP):headless=$(HEADLESS_BENCHMARK):headless-cpu=$(HEADLESS_BENCH_CPU):$(WITH_DYNAREC):$(if $(ARI64_DIR),ari64-emitter,interpreter):debug=$(DEBUG):profile=$(ARI64_PROFILE):interp=$(INTERP_OPTIMIZE):branchless=$(INTERP_BRANCHLESS):hle-simd=$(HLE_SIMD)
 ifneq ($(strip $(file <$(CPU_JIT_CONFIG))),$(CPU_JIT_CONFIG_VALUE))
 $(file >$(CPU_JIT_CONFIG),$(CPU_JIT_CONFIG_VALUE))
 endif

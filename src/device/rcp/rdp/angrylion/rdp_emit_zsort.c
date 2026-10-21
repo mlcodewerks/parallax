@@ -1,3 +1,4 @@
+#include "rdp_emit_simd.h"
 #include "../../rsp/hle/hle_timing.h"
 /* SGI ZSortp screen-space object walker. Grammar reference:
  * https://github.com/gonetz/GLideN64/blob/master/src/uCodes/ZSort.cpp
@@ -392,10 +393,7 @@ static int zs_transform(ZSortState *z, unsigned w1)
             zz = zs_get16(z->dmem, src + 4);
         int64_t p[4];
         int sx, sy, fog, cc = 0;
-        for (k = 0; k < 4; ++k)
-            p[k] = (int64_t)x * z->matrix[2][0][k] +
-                   (int64_t)y * z->matrix[2][1][k] +
-                   (int64_t)zz * z->matrix[2][2][k] + z->matrix[2][3][k];
+        hle_transform4(p,&z->matrix[2][0][0],x,y,zz);
         sx = z->gsp->viewport.vtrans_x / 16384;
         sy = z->gsp->viewport.vtrans_y / 16384;
         if (p[3])
@@ -525,22 +523,13 @@ static int zs_walk(ZSortState *z, unsigned start)
         }
         else if (op == 0xd5)
         {
-            unsigned s = w0 & 15, t = (w1 >> 16) & 15, d = w1 & 15, i, j, k;
+            unsigned s = w0 & 15, t = (w1 >> 16) & 15, d = w1 & 15;
             int32_t m[4][4];
             if (s < 4 || s > 8 || s & 1 || d < 4 || d > 8 || d & 1)
                 return 0;
             if (t < 4 || t > 8 || t & 1)
                 return 0;
-            for (i = 0; i < 4; ++i)
-                for (j = 0; j < 4; ++j)
-                {
-                    int64_t sum = 0;
-                    for (k = 0; k < 4; ++k)
-                        sum += ((int64_t)z->matrix[(s - 4) / 2][i][k] *
-                                z->matrix[(t - 4) / 2][k][j]) >>
-                               16;
-                    m[i][j] = (int32_t)sum;
-                }
+            rdp_simd_matrix_wrap4(&m[0][0],&z->matrix[(s-4)/2][0][0],&z->matrix[(t-4)/2][0][0]);
             memcpy(z->matrix[(d - 4) / 2], m, sizeof(m));
         }
         /* The main and embedded-RDP tables have different biases (DMEM

@@ -26,6 +26,7 @@
 #include <string.h>
 
 #include "arithmetics.h"
+#include "hle_simd.h"
 #include "hle_internal.h"
 #include "resample_hq.h"
 #include "memory.h"
@@ -199,29 +200,30 @@ static void MP3AB0(int32_t* v)
     static const uint16_t LUT3[4] = { 0xFB14, 0xD4DC, 0x31F2, 0x8E3A };
     int i;
 
-    for (i = 0; i < 8; i++) {
-        v[16 + i] = v[0 + i] + v[8 + i];
-        v[24 + i] = mp3_scale((v[0 + i] - v[8 + i]) * LUT2[i]);
-    }
+    for (i = 0; i < 8; i+=4)
+        hle_butterfly4(v+16+i,v+24+i,v+i,v+8+i,LUT2+i,resample_hq_enabled());
 
     /* Part 3: 4-wide butterflies */
 
-    for (i = 0; i < 4; i++) {
-        v[0 + i]  = v[16 + i] + v[20 + i];
-        v[4 + i]  = mp3_scale((v[16 + i] - v[20 + i]) * LUT3[i]);
-
-        v[8 + i]  = v[24 + i] + v[28 + i];
-        v[12 + i] = mp3_scale((v[24 + i] - v[28 + i]) * LUT3[i]);
-    }
+    hle_butterfly4(v,v+4,v+16,v+20,LUT3,resample_hq_enabled());
+    hle_butterfly4(v+8,v+12,v+24,v+28,LUT3,resample_hq_enabled());
 
     /* Part 4: 2-wide butterflies - 100% Accurate */
 
     for (i = 0; i < 16; i += 4) {
+#if HLE_SIMD_ENABLED
+        __m128i x=_mm_loadu_si128((const __m128i *)(v+i));
+        __m128i y=_mm_shuffle_epi32(x,_MM_SHUFFLE(1,0,3,2));
+        __m128i sum=_mm_add_epi32(x,y),diff=_mm_mullo_epi32(_mm_sub_epi32(x,y),_mm_setr_epi32(0xEC84,0x61F8,0,0));
+        diff=_mm_srai_epi32(_mm_add_epi32(diff,_mm_set1_epi32(resample_hq_enabled()?32768:0)),16);
+        _mm_storeu_si128((__m128i *)(v+16+i),_mm_unpacklo_epi64(sum,diff));
+#else
         v[16 + i] = v[0 + i] + v[2 + i];
         v[18 + i] = mp3_scale((v[0 + i] - v[2 + i]) * 0xEC84);
 
         v[17 + i] = v[1 + i] + v[3 + i];
         v[19 + i] = mp3_scale((v[1 + i] - v[3 + i]) * 0x61F8);
+#endif
     }
 }
 
