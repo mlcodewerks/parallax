@@ -200,7 +200,7 @@ else ifeq ($(platform), libnx)
    TARGET := $(TARGET_NAME)_libretro_$(platform).a
    CPUOPTS := -g -march=armv8-a+crc -mtune=cortex-a57 -mtp=soft -mcpu=cortex-a57+crc+fp+simd
    PLATCFLAGS = -O3 -ffast-math -funsafe-math-optimizations -fPIE -I$(PORTLIBS)/include/ -I$(LIBNX)/include/ -ffunction-sections -fdata-sections -ftls-model=local-exec -specs=$(LIBNX)/switch.specs
-   PLATCFLAGS += $(INCLUDE) -D__SWITCH__=1 -DSWITCH -DHAVE_LIBNX -D_GLIBCXX_USE_C99_MATH_TR1 -D_LDBL_EQ_DBL -funroll-loops #-DM64P_NETPLAY
+   PLATCFLAGS += $(INCLUDE) -D__SWITCH__=1 -DSWITCH -DHAVE_LIBNX -D_GLIBCXX_USE_C99_MATH_TR1 -D_LDBL_EQ_DBL -funroll-loops #-DPARALLAX_NETPLAY
    CXXFLAGS += -fno-rtti -std=gnu++11
    COREFLAGS += -DOS_LINUX -DEGL
    GLES = 0
@@ -493,7 +493,7 @@ else
       CC ?= x86_64-w64-mingw32-gcc
       CXX ?= x86_64-w64-mingw32-g++
       WITH_DYNAREC = x86_64
-      COREFLAGS += -DWIN64 #-DM64P_NETPLAY
+      COREFLAGS += -DWIN64 #-DPARALLAX_NETPLAY
       ASFLAGS = -f win64 -d WIN64
       PIC = 1
    else ifeq ($(MSYSTEM),MINGW32)
@@ -533,7 +533,7 @@ ifeq ($(LLE), 1)
    COREFLAGS += -DHAVE_LLE
 endif
 
-COREFLAGS += -D__STDC_CONSTANT_MACROS -D__STDC_LIMIT_MACROS -D__LIBRETRO__ -DUSE_FILE32API -DM64P_PLUGIN_API -DM64P_CORE_PROTOTYPES -D_ENDUSER_RELEASE -DSINC_LOWER_QUALITY -DTXFILTER_LIB -D__VEC4_OPT -DMUPENPLUSAPI
+COREFLAGS += -D__STDC_CONSTANT_MACROS -D__STDC_LIMIT_MACROS -D__LIBRETRO__ -DUSE_FILE32API -D_ENDUSER_RELEASE -DSINC_LOWER_QUALITY -DTXFILTER_LIB -D__VEC4_OPT
 
 ifeq ($(DEBUG), 1)
    CPUOPTS += -O0 -g
@@ -554,9 +554,9 @@ CPUOPTS += -fcommon
 CFLAGS += -std=gnu99 -D_CRT_SECURE_NO_WARNINGS -Wno-discarded-qualifiers
 
 ifeq ($(HEADLESS_BENCHMARK),1)
-CFLAGS += -DM64P_HEADLESS_BENCHMARK
+CFLAGS += -DPARALLAX_HEADLESS_BENCHMARK
 ifeq ($(HEADLESS_BENCH_CPU),pure)
-CFLAGS += -DM64P_HEADLESS_BENCH_PURE
+CFLAGS += -DPARALLAX_HEADLESS_BENCH_PURE
 endif
 endif
 CXXFLAGS += -std=c++17 -D_CRT_SECURE_NO_WARNINGS
@@ -591,7 +591,7 @@ ifeq ($(INTERP_OPTIMIZE),1)
 $(CORE_DIR)/src/device/r4300/pure_interp.o $(CORE_DIR)/src/device/r4300/cached_interp.o: CFLAGS += -O3
 endif
 
-$(CORE_DIR)/src/device/r4300/pure_interp.o: CFLAGS += -DM64P_INTERP_BRANCHLESS=$(INTERP_BRANCHLESS)
+$(CORE_DIR)/src/device/r4300/pure_interp.o: CFLAGS += -DPARALLAX_INTERP_BRANCHLESS=$(INTERP_BRANCHLESS)
 # Keep precise host operations behind an integer ABI; dispatch and guest checks use fast-math.
 $(CORE_DIR)/src/device/r4300/pure_interp.o: CFLAGS += -ffast-math
 $(CORE_DIR)/src/device/r4300/fpu_native.o: CFLAGS += -O3 -fno-fast-math -fno-math-errno -frounding-math -ffp-contract=off

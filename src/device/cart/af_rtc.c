@@ -21,8 +21,8 @@
 
 #include "af_rtc.h"
 
-#include "api/callbacks.h"
-#include "api/m64p_types.h"
+#include "core/log.h"
+#include "core/types.h"
 #include "backends/api/clock_backend.h"
 
 #include <time.h>
@@ -85,7 +85,7 @@ void af_rtc_read_block(struct af_rtc* rtc,
         *status = 0x00;
         break;
     case 1:
-        DebugMessage(M64MSG_ERROR, "AF-RTC reading block 1 is not implemented !");
+        core_log(CORE_LOG_ERROR, "AF-RTC reading block 1 is not implemented !");
         break;
     case 2:
         update_rtc(rtc);
@@ -94,7 +94,7 @@ void af_rtc_read_block(struct af_rtc* rtc,
         break;
 
     default:
-        DebugMessage(M64MSG_ERROR, "AF-RTC read invalid block: %u", block);
+        core_log(CORE_LOG_ERROR, "AF-RTC read invalid block: %u", block);
     }
 }
 
@@ -112,7 +112,7 @@ void af_rtc_write_block(struct af_rtc* rtc,
         if (rtc->control & 0x01) {
             break;
         }
-        DebugMessage(M64MSG_ERROR, "AF-RTC writing block 1 is not implemented !");
+        core_log(CORE_LOG_ERROR, "AF-RTC writing block 1 is not implemented !");
         break;
     case 2:
         /* block 2 read-only when control[1] is set */
@@ -121,11 +121,11 @@ void af_rtc_write_block(struct af_rtc* rtc,
         }
 
         /* TODO: implement block 2 writes */
-        DebugMessage(M64MSG_ERROR, "AF-RTC writing block 2 is not implemented !");
+        core_log(CORE_LOG_ERROR, "AF-RTC writing block 2 is not implemented !");
         break;
 
     default:
-        DebugMessage(M64MSG_ERROR, "AF-RTC write invalid block: %u", block);
+        core_log(CORE_LOG_ERROR, "AF-RTC write invalid block: %u", block);
     }
 }
 

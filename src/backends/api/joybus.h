@@ -19,8 +19,8 @@
  *   51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.          *
  * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
 
-#ifndef M64P_BACKENDS_API_JOYBUS_H
-#define M64P_BACKENDS_API_JOYBUS_H
+#ifndef PARALLAX_BACKENDS_API_JOYBUS_H
+#define PARALLAX_BACKENDS_API_JOYBUS_H
 
 #include <stdint.h>
 
@@ -52,7 +52,7 @@ enum joybus_device_types
 /* snippet which helps validate command format */
 #define JOYBUS_CHECK_COMMAND_FORMAT(expected_tx, expected_rx) \
     if (*tx != expected_tx || *rx != expected_rx) { \
-        DebugMessage(M64MSG_WARNING, "Unexpected command format %02x %02x %02x ", \
+        core_log(CORE_LOG_WARNING, "Unexpected command format %02x %02x %02x ", \
             *tx, *rx, cmd); \
         *rx |= 0x40; \
         break; \

@@ -16,7 +16,6 @@ INCFLAGS += \
 	-I$(ROOT_DIR)/custom \
 	-I$(ROOT_DIR)/custom/osal \
 	-I$(CORE_DIR)/src \
-	-I$(CORE_DIR)/src/api \
 	-I$(LIBRETRO_COMM_DIR)/include \
 	-I$(CORE_DIR)/src/device/rcp/rdp
 
@@ -25,12 +24,11 @@ ifneq (,$(findstring win,$(platform)))
 endif
 
 SOURCES_C = \
-	$(CORE_DIR)/src/api/callbacks.c \
-	$(ROOT_DIR)/src/api/config.c \
-	$(CORE_DIR)/src/api/frontend.c \
-	$(CORE_DIR)/src/backends/plugins_compat/audio_plugin_compat.c \
+	$(CORE_DIR)/src/core/lifecycle.c \
+	$(CORE_DIR)/src/core/file.c \
+	$(CORE_DIR)/src/core/log.c \
 	$(CORE_DIR)/src/backends/api/video_capture_backend.c \
-	$(CORE_DIR)/src/backends/plugins_compat/input_plugin_compat.c \
+	$(CORE_DIR)/src/core/controller.c \
 	$(CORE_DIR)/src/backends/clock_ctime_plus_delta.c \
 	$(CORE_DIR)/src/backends/dummy_video_capture.c \
 	$(CORE_DIR)/src/backends/file_storage.c \
@@ -66,22 +64,17 @@ SOURCES_C = \
 	$(CORE_DIR)/src/device/r4300/pure_interp.c \
 	$(CORE_DIR)/src/device/r4300/r4300_core.c \
 	$(CORE_DIR)/src/device/r4300/tlb.c \
-	$(CORE_DIR)/src/device/rcp/ai_controller.c \
-	$(CORE_DIR)/src/device/rcp/mi_controller.c \
-	$(CORE_DIR)/src/device/rcp/pi_controller.c \
+	$(CORE_DIR)/src/device/rcp/rcp.c \
 	$(CORE_DIR)/src/device/rcp/rdp/fb.c \
 	$(CORE_DIR)/src/device/rcp/rdp/rdp_core.c \
-	$(CORE_DIR)/src/device/rcp/ri_controller.c \
 	$(CORE_DIR)/src/device/rcp/rsp/rsp_core.c \
 	$(CORE_DIR)/src/device/rcp/rsp/rsp_dma_memory.c \
-	$(CORE_DIR)/src/device/rcp/si_controller.c \
-	$(CORE_DIR)/src/device/rcp/rdp/vi_controller.c \
 	$(CORE_DIR)/src/device/rdram.c \
 	$(CORE_DIR)/src/main/main.c \
 	$(CORE_DIR)/src/main/savestates.c \
 	$(CORE_DIR)/src/main/util.c \
 	$(CORE_DIR)/src/main/rom.c \
-	$(CORE_DIR)/src/plugin/plugin.c 
+	$(CORE_DIR)/src/core/backend.c 
 
 
 ANGRYLION_DIR = $(CORE_DIR)/src/device/rcp/rdp/angrylion
@@ -136,20 +129,18 @@ COREFLAGS += -I$(ROOT_DIR)/deps/md5
 
 
 ifneq (,$(findstring win,$(platform)))
-	SOURCES_C += $(ROOT_DIR)/custom/osal/osal_files_win32.c
 	SOURCES_C += $(ROOT_DIR)/deps/mman/sys/mman.c
 else
-	SOURCES_C += $(ROOT_DIR)/custom/osal/osal_files_unix.c
 endif
 
 # Libretro
 SOURCES_C += $(ROOT_DIR)/src/libretro.c \
 	$(LIBRETRO_COMM_DIR)/memmap/memalign.c \
-	$(ROOT_DIR)/src/plugin/emulate_game_controller_via_libretro.c \
+	$(ROOT_DIR)/src/core/input.c \
 	$(LIBRETRO_COMM_DIR)/audio/resampler/drivers/sinc_resampler.c \
 	$(LIBRETRO_COMM_DIR)/audio/resampler/drivers/nearest_resampler.c \
 	$(LIBRETRO_COMM_DIR)/audio/resampler/audio_resampler.c \
-	$(ROOT_DIR)/src/plugin/audio_backend_libretro.c \
+	$(ROOT_DIR)/src/core/audio.c \
 	$(LIBRETRO_COMM_DIR)/file/config_file.c \
 	$(LIBRETRO_COMM_DIR)/file/config_file_userdata.c \
 	$(LIBRETRO_COMM_DIR)/file/file_path.c \
@@ -166,8 +157,8 @@ SOURCES_C += $(ROOT_DIR)/src/libretro.c \
 	$(LIBRETRO_COMM_DIR)/string/stdstring.c \
 	$(LIBRETRO_COMM_DIR)/vfs/vfs_implementation.c \
 	$(LIBRETRO_COMM_DIR)/streams/file_stream.c \
+	$(LIBRETRO_COMM_DIR)/streams/file_stream_transforms.c \
 	$(LIBRETRO_COMM_DIR)/compat/fopen_utf8.c \
-	$(ROOT_DIR)/src/api/vidext_libretro.c \
 
 
 	PARALLEL_RSP_ARCH := simd

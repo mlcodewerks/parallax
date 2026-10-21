@@ -21,8 +21,8 @@
 
 #include "is_viewer.h"
 
-#define M64P_CORE_PROTOTYPES 1
-#include "api/callbacks.h"
+#define PARALLAX_CORE_PROTOTYPES 1
+#include "core/log.h"
 #include "main/util.h"
 
 #define __STDC_FORMAT_MACROS
@@ -43,7 +43,7 @@ void read_is_viewer(void* opaque, uint32_t address, uint32_t* value)
     struct is_viewer* is_viewer = (struct is_viewer*)opaque;
     address &= IS_ADDR_MASK;
     memcpy(value, &is_viewer->data[address], 4);
-    *value = m64p_swap32(*value);
+    *value = core_swap32(*value);
 }
 
 void write_is_viewer(void* opaque, uint32_t address, uint32_t value, uint32_t mask)
@@ -56,22 +56,22 @@ void write_is_viewer(void* opaque, uint32_t address, uint32_t value, uint32_t ma
         if (word > 0)
         {
             if (word > IS_BUFFER_SIZE - 0x20) {
-                DebugMessage(M64MSG_WARNING, "IS64: invalid transfer length %u", word);
+                core_log(CORE_LOG_WARNING, "IS64: invalid transfer length %u", word);
                 return;
             }
-            /* DebugMessage has a 512-byte buffer. Emit bounded continuation
+            /* core_log has a 512-byte buffer. Emit bounded continuation
              * records instead of losing long lines (e.g. timing sample arrays).
              * Process every newline, retaining the partial line after it. */
             for (uint32_t i = 0; i < word; ++i) {
                 char ch = is_viewer->data[0x20 + i];
                 if (ch == '\n') {
-                    DebugMessage(M64MSG_INFO, "IS64: %.*s", (int)is_viewer->buffer_pos,
+                    core_log(CORE_LOG_INFO, "IS64: %.*s", (int)is_viewer->buffer_pos,
                                  is_viewer->output_buffer);
                     is_viewer->buffer_pos = 0;
                 } else {
                     is_viewer->output_buffer[is_viewer->buffer_pos++] = ch;
                     if (is_viewer->buffer_pos == 480) {
-                        DebugMessage(M64MSG_INFO, "IS64+: %.*s", (int)is_viewer->buffer_pos,
+                        core_log(CORE_LOG_INFO, "IS64+: %.*s", (int)is_viewer->buffer_pos,
                                      is_viewer->output_buffer);
                         is_viewer->buffer_pos = 0;
                     }
@@ -81,7 +81,7 @@ void write_is_viewer(void* opaque, uint32_t address, uint32_t value, uint32_t ma
     }
     else
     {
-        word = m64p_swap32(word);
+        word = core_swap32(word);
         memcpy(&is_viewer->data[address], &word, sizeof(word));
     }
 }

@@ -1,8 +1,8 @@
 /* Standalone AArch64 backend checks, without emulator or libc dependencies.
  * cc -O3 benchmarks/fpu_neon_smoke.c -o fpu_neon_smoke && ./fpu_neon_smoke
  * Nonzero exit is the failing case index (100: host FP state changed).
- * M64P_FPU_FREESTANDING also permits cross-target frontend checks without a sysroot. */
-#ifdef M64P_FPU_FREESTANDING
+ * PARALLAX_FPU_FREESTANDING also permits cross-target frontend checks without a sysroot. */
+#ifdef PARALLAX_FPU_FREESTANDING
 typedef __UINT64_TYPE__ uint64_t;
 typedef __INT64_TYPE__ int64_t;
 typedef __UINT32_TYPE__ uint32_t;

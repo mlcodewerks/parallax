@@ -25,7 +25,7 @@
 
 #include <stdint.h>
 
-#include "api/m64p_types.h"
+#include "core/types.h"
 #include "device/device.h"
 #include "osal/preproc.h"
 
@@ -36,7 +36,6 @@
 #endif
 
 /* globals */
-extern m64p_handle g_CoreConfig;
 
 extern int g_RomWordsLittleEndian;
 extern int g_EmulatorRunning;
@@ -46,9 +45,8 @@ extern void* g_mem_base;
 
 extern struct device g_dev;
 
-extern m64p_media_loader g_media_loader;
 
-extern m64p_frame_callback g_FrameCallback;
+
 
 extern int g_gs_vi_counter;
 
@@ -59,13 +57,13 @@ void new_frame(void);
 void new_vi(void);
 
 void main_switch_next_pak(int control_id);
-void main_switch_plugin_pak(int control_id);
+void main_switch_accessory(int control_id);
 void main_change_gb_cart(int control_id);
 
 int  main_set_core_defaults(void);
-void main_message(m64p_msg_level level, unsigned int osd_corner, const char *format, ...) ATTR_FMT(3, 4);
+void main_message(core_log_level level, unsigned int osd_corner, const char *format, ...) ATTR_FMT(3, 4);
 
-m64p_error main_run(void);
+core_result main_run(void);
 void main_stop(void);
 void main_toggle_pause(void);
 void main_advance_one(void);
@@ -81,22 +79,19 @@ void main_state_inc_slot(void);
 int main_stateload(const void *data);
 int main_statesave(void *data);
 
-m64p_error main_core_state_query(m64p_core_param param, int *rval);
-m64p_error main_core_state_set(m64p_core_param param, int val);
 
-m64p_error main_get_screen_size(int *width, int *height);
-m64p_error main_read_screen(void *pixels, int bFront);
+core_result main_read_screen(void *pixels, int bFront);
 
-m64p_error main_volume_up(void);
-m64p_error main_volume_down(void);
-m64p_error main_volume_get_level(int *level);
-m64p_error main_volume_set_level(int level);
-m64p_error main_volume_mute(void);
+core_result main_volume_up(void);
+core_result main_volume_down(void);
+core_result main_volume_get_level(int *level);
+core_result main_volume_set_level(int level);
+core_result main_volume_mute(void);
 int        main_volume_get_muted(void);
 
-m64p_error main_reset(int do_hard_reset);
+core_result main_reset(int do_hard_reset);
 
-m64p_error open_pif(const unsigned char* pifimage, unsigned int size);
+core_result open_pif(const unsigned char* pifimage, unsigned int size);
 
 #endif /* __MAIN_H__ */
 

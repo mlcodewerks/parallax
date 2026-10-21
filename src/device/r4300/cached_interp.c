@@ -10,8 +10,8 @@
 #include "interp_thread_poll.h"
 #ifdef HAVE_ARI64_X64
 #include "new_dynarec/ari64_x64.h"
-#include "api/callbacks.h"
-#include "api/m64p_types.h"
+#include "core/log.h"
+#include "core/types.h"
 #endif
 
 #include <stdint.h>
@@ -1758,7 +1758,7 @@ static void ci_execute_jit(struct r4300_core* r, int one)
         *entry = ari64_x64_compile_optimized(state->jit, block, ops, count, ci_jit_step, &config);
         *generation = ari64_x64_generation(state->jit);
         if (!*entry) {
-            DebugMessage(M64MSG_ERROR, "Ari64 x64 executable code allocation/protection failed; stopping CPU");
+            core_log(CORE_LOG_ERROR, "Ari64 x64 executable code allocation/protection failed; stopping CPU");
             r->stop = 1;
             breakloop = true;
             return;
@@ -1779,19 +1779,19 @@ void cached_dynarec_stats(struct r4300_core* r, uint64_t stats[4])
     ari64_x64_stats(s ? s->jit : NULL, &stats[0], &stats[1]);
     stats[2] = s ? s->jit_entries : 0;
     stats[3] = s ? s->jit_commits : 0;
-    if (s) DebugMessage(M64MSG_INFO, "Ari64 x64 cache: new=%llu recycled=%llu verified=%llu changed=%llu replaced=%llu",
+    if (s) core_log(CORE_LOG_INFO, "Ari64 x64 cache: new=%llu recycled=%llu verified=%llu changed=%llu replaced=%llu",
         (unsigned long long)s->jit_compile_misses[0], (unsigned long long)s->jit_compile_misses[1],
         (unsigned long long)s->jit_verifications[0], (unsigned long long)s->jit_verifications[1], (unsigned long long)s->jit_replacements);
-    if (s) DebugMessage(M64MSG_INFO,"Ari64 x64 links: direct=%llu",(unsigned long long)s->jit_direct_links);
+    if (s) core_log(CORE_LOG_INFO,"Ari64 x64 links: direct=%llu",(unsigned long long)s->jit_direct_links);
 #ifdef ARI64_PROFILE
     if (s) {
         for (unsigned i = 0; i < 64; ++i)
             if (s->profile_slow[i] || s->profile_special[i] || s->profile_cop1[i] || s->profile_fpu[i])
-                DebugMessage(M64MSG_INFO,"Ari64 profile opcode %u: slow=%llu special=%llu cop1rs=%llu fpu=%llu", i,
+                core_log(CORE_LOG_INFO,"Ari64 profile opcode %u: slow=%llu special=%llu cop1rs=%llu fpu=%llu", i,
                     (unsigned long long)s->profile_slow[i], (unsigned long long)s->profile_special[i],
                     (unsigned long long)s->profile_cop1[i], (unsigned long long)s->profile_fpu[i]);
         for (unsigned i = 1; i <= 32; ++i)
-            if (s->profile_regions[i]) DebugMessage(M64MSG_INFO,"Ari64 profile guard count %u: %llu",i,(unsigned long long)s->profile_regions[i]);
+            if (s->profile_regions[i]) core_log(CORE_LOG_INFO,"Ari64 profile guard count %u: %llu",i,(unsigned long long)s->profile_regions[i]);
         for (unsigned rank = 0; rank < 24; ++rank) {
             struct cached_block* best = NULL;
             for (unsigned set = 0; set <= s->set_mask; ++set)
@@ -1800,9 +1800,9 @@ void cached_dynarec_stats(struct r4300_core* r, uint64_t stats[4])
                     if (b->valid && b->profile_entries && (!best || b->profile_entries > best->profile_entries)) best = b;
                 }
             if (!best) break;
-            DebugMessage(M64MSG_INFO,"Ari64 profile block %08x count=%u entries=%llu",best->virtual_pc,best->count,(unsigned long long)best->profile_entries);
+            core_log(CORE_LOG_INFO,"Ari64 profile block %08x count=%u entries=%llu",best->virtual_pc,best->count,(unsigned long long)best->profile_entries);
             for (unsigned n = 0; n < best->count; ++n)
-                DebugMessage(M64MSG_INFO,"Ari64 profile instruction %08x %08x",best->virtual_pc + 4*n,best->instructions[n].op);
+                core_log(CORE_LOG_INFO,"Ari64 profile instruction %08x %08x",best->virtual_pc + 4*n,best->instructions[n].op);
             best->profile_entries = 0;
         }
     }

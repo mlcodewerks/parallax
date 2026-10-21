@@ -25,9 +25,9 @@
 #include <string.h>
 #include <time.h>
 
-#define M64P_CORE_PROTOTYPES 1
-#include "api/m64p_types.h"
-#include "api/callbacks.h"
+#define PARALLAX_CORE_PROTOTYPES 1
+#include "core/types.h"
+#include "core/log.h"
 #include "backends/api/clock_backend.h"
 #include "backends/api/storage_backend.h"
 #include "device/disk.h"
@@ -138,7 +138,7 @@ static void read_C2(struct dd_controller* dd)
     sector %= 90;
     size_t offset = 0x40 * (sector - SECTORS_PER_BLOCK);
 
-    //DebugMessage(M64MSG_VERBOSE, "read C2: length=%08x, offset=%08x",
+    //core_log(CORE_LOG_VERBOSE, "read C2: length=%08x, offset=%08x",
     //        (uint32_t)length, (uint32_t)offset);
 
     for (i = 0; i < length; ++i) {
@@ -238,7 +238,7 @@ void dd_update_bm(void* opaque)
             }
         }
         else {
-            DebugMessage(M64MSG_ERROR, "DD Write, sector overrun");
+            core_log(CORE_LOG_ERROR, "DD Write, sector overrun");
         }
     }
     /* handle reads (BM mode 1) */
@@ -275,7 +275,7 @@ void dd_update_bm(void* opaque)
             }
         }
         else {
-            DebugMessage(M64MSG_ERROR, "DD Read, sector overrun");
+            core_log(CORE_LOG_ERROR, "DD Read, sector overrun");
         }
     }
 
@@ -331,7 +331,7 @@ void read_dd_regs(void* opaque, uint32_t address, uint32_t* value)
     struct dd_controller* dd = (struct dd_controller*)opaque;
 
     if (address < MM_DD_REGS || address >= MM_DD_MS_RAM) {
-        DebugMessage(M64MSG_ERROR, "Unknown access in DD registers MMIO space %08x", address);
+        core_log(CORE_LOG_ERROR, "Unknown access in DD registers MMIO space %08x", address);
         *value = 0;
         return;
     }
@@ -349,7 +349,7 @@ void read_dd_regs(void* opaque, uint32_t address, uint32_t* value)
     }
 
     *value = dd->regs[reg];
-    //DebugMessage(M64MSG_VERBOSE, "DD REG: %08X -> %08x", address, *value);
+    //core_log(CORE_LOG_VERBOSE, "DD REG: %08X -> %08x", address, *value);
 
     /* post read update. Not part of the returned value */
     switch(reg)
@@ -372,7 +372,7 @@ void write_dd_regs(void* opaque, uint32_t address, uint32_t value, uint32_t mask
     struct dd_controller* dd = (struct dd_controller*)opaque;
 
     if (address < MM_DD_REGS || address >= MM_DD_MS_RAM) {
-        DebugMessage(M64MSG_ERROR, "Unknown access in DD registers MMIO space %08x", address);
+        core_log(CORE_LOG_ERROR, "Unknown access in DD registers MMIO space %08x", address);
         return;
     }
 
@@ -380,7 +380,7 @@ void write_dd_regs(void* opaque, uint32_t address, uint32_t value, uint32_t mask
 
     assert(mask == ~UINT32_C(0));
 
-    //DebugMessage(M64MSG_VERBOSE, "DD REG: %08X <- %08x", address, value);
+    //core_log(CORE_LOG_VERBOSE, "DD REG: %08X <- %08x", address, value);
 
     switch (reg)
     {
@@ -424,7 +424,7 @@ void write_dd_regs(void* opaque, uint32_t address, uint32_t value, uint32_t mask
 
         /* Set Disk type */
         case 0x0b:
-            DebugMessage(M64MSG_VERBOSE, "Setting disk type %u", (dd->regs[DD_ASIC_DATA] >> 16) & 0xf);
+            core_log(CORE_LOG_VERBOSE, "Setting disk type %u", (dd->regs[DD_ASIC_DATA] >> 16) & 0xf);
             break;
 
         /* Read RTC in ASIC_DATA (BCD format) */
@@ -444,7 +444,7 @@ void write_dd_regs(void* opaque, uint32_t address, uint32_t value, uint32_t mask
             break;
 
         default:
-            DebugMessage(M64MSG_WARNING, "DD ASIC CMD not yet implemented (%08x)", value);
+            core_log(CORE_LOG_WARNING, "DD ASIC CMD not yet implemented (%08x)", value);
         }
 
         /* Signal a MECHA interrupt */
@@ -455,7 +455,7 @@ void write_dd_regs(void* opaque, uint32_t address, uint32_t value, uint32_t mask
         /* set sector */
         dd->regs[DD_ASIC_CUR_SECTOR] = (value & 0x00ff0000);
         if (dd->regs[DD_ASIC_CUR_SECTOR] != 0 && dd->regs[DD_ASIC_CUR_SECTOR] != 0x005a0000) {
-            DebugMessage(M64MSG_ERROR, "Start sector not aligned %08x", dd->regs[DD_ASIC_CUR_SECTOR]);
+            core_log(CORE_LOG_ERROR, "Start sector not aligned %08x", dd->regs[DD_ASIC_CUR_SECTOR]);
         }
 
         /* clear MECHA interrupt */
@@ -488,10 +488,10 @@ void write_dd_regs(void* opaque, uint32_t address, uint32_t value, uint32_t mask
         /* start transfer */
         if (value & DD_BM_CTL_START) {
             if (dd->bm_write && (value & DD_BM_CTL_MNGRMODE)) {
-                DebugMessage(M64MSG_WARNING, "Attempt to write disk with BM mode 1");
+                core_log(CORE_LOG_WARNING, "Attempt to write disk with BM mode 1");
             }
             if (!dd->bm_write && !(value & DD_BM_CTL_MNGRMODE)) {
-                DebugMessage(M64MSG_WARNING, "Attempt to read disk with BM mode 0");
+                core_log(CORE_LOG_WARNING, "Attempt to read disk with BM mode 0");
             }
             dd->regs[DD_ASIC_BM_STATUS_CTL] |= DD_BM_STATUS_RUNNING;
             dd_update_bm(dd);
@@ -500,7 +500,7 @@ void write_dd_regs(void* opaque, uint32_t address, uint32_t value, uint32_t mask
 
     case DD_ASIC_HARD_RESET:
         if (value != 0xaaaa0000) {
-            DebugMessage(M64MSG_WARNING, "Unexpected hard reset value %08x", value);
+            core_log(CORE_LOG_WARNING, "Unexpected hard reset value %08x", value);
         }
         dd->regs[DD_ASIC_CMD_STATUS] |= DD_STATUS_RST_STATE;
         break;
@@ -508,7 +508,7 @@ void write_dd_regs(void* opaque, uint32_t address, uint32_t value, uint32_t mask
     case DD_ASIC_HOST_SECBYTE:
         dd->regs[DD_ASIC_HOST_SECBYTE] = (value >> 16) & 0xff;
         if ((dd->regs[DD_ASIC_HOST_SECBYTE] + 1) != zone_sec_size[dd->bm_zone]) {
-            DebugMessage(M64MSG_WARNING, "Sector size %u set different than expected %u",
+            core_log(CORE_LOG_WARNING, "Sector size %u set different than expected %u",
                     dd->regs[DD_ASIC_HOST_SECBYTE] + 1, zone_sec_size[dd->bm_zone]);
         }
         break;
@@ -516,14 +516,14 @@ void write_dd_regs(void* opaque, uint32_t address, uint32_t value, uint32_t mask
     case DD_ASIC_SEC_BYTE:
         dd->regs[DD_ASIC_SEC_BYTE] = (value >> 24) & 0xff;
         if (dd->regs[DD_ASIC_SEC_BYTE] != SECTORS_PER_BLOCK + 4) {
-            DebugMessage(M64MSG_WARNING, "Sectors per block %u set different than expected %u",
+            core_log(CORE_LOG_WARNING, "Sectors per block %u set different than expected %u",
                     dd->regs[DD_ASIC_SEC_BYTE] + 1, SECTORS_PER_BLOCK + 4);
         }
         break;
 
     case DD_ASIC_CUR_TK: /* fallthrough */
     case DD_ASIC_CUR_SECTOR:
-        DebugMessage(M64MSG_WARNING, "Trying to write to read-only registers: %08x <- %08x", address, value);
+        core_log(CORE_LOG_WARNING, "Trying to write to read-only registers: %08x <- %08x", address, value);
         break;
 
     default:
@@ -539,12 +539,12 @@ void read_dd_rom(void* opaque, uint32_t address, uint32_t* value)
 
     *value = dd->rom[addr];
 
-    //DebugMessage(M64MSG_VERBOSE, "DD ROM: %08X -> %08x", address, *value);
+    //core_log(CORE_LOG_VERBOSE, "DD ROM: %08X -> %08x", address, *value);
 }
 
 void write_dd_rom(void* opaque, uint32_t address, uint32_t value, uint32_t mask)
 {
-    //DebugMessage(M64MSG_VERBOSE, "DD ROM: %08X <- %08x & %08x", address, value, mask);
+    //core_log(CORE_LOG_VERBOSE, "DD ROM: %08X <- %08x & %08x", address, value, mask);
 }
 
 unsigned int dd_dom_dma_read(void* opaque, const uint8_t* dram, uint32_t dram_addr, uint32_t cart_addr, uint32_t length)
@@ -553,7 +553,7 @@ unsigned int dd_dom_dma_read(void* opaque, const uint8_t* dram, uint32_t dram_ad
     uint8_t* mem;
     size_t i;
 
-    //DebugMessage(M64MSG_VERBOSE, "DD DMA read dram=%08x  cart=%08x length=%08x",
+    //core_log(CORE_LOG_VERBOSE, "DD DMA read dram=%08x  cart=%08x length=%08x",
     //        dram_addr, cart_addr, length);
 
     if (cart_addr == MM_DD_DS_BUFFER) {
@@ -566,7 +566,7 @@ unsigned int dd_dom_dma_read(void* opaque, const uint8_t* dram, uint32_t dram_ad
         return (length * 63) / 25;
     }
     else {
-        DebugMessage(M64MSG_ERROR, "Unknown DD dma read dram=%08x  cart=%08x length=%08x",
+        core_log(CORE_LOG_ERROR, "Unknown DD dma read dram=%08x  cart=%08x length=%08x",
             dram_addr, cart_addr, length);
 
         /* Recommended Count Per Op = 1, this seems to break very easily */
@@ -588,7 +588,7 @@ unsigned int dd_dom_dma_write(void* opaque, uint8_t* dram, uint32_t dram_addr, u
     const uint8_t* mem;
     size_t i;
 
-    //DebugMessage(M64MSG_VERBOSE, "DD DMA write dram=%08x  cart=%08x length=%08x",
+    //core_log(CORE_LOG_VERBOSE, "DD DMA write dram=%08x  cart=%08x length=%08x",
     //        dram_addr, cart_addr, length);
 
     if (cart_addr < MM_DD_ROM) {
@@ -603,7 +603,7 @@ unsigned int dd_dom_dma_write(void* opaque, uint8_t* dram, uint32_t dram_addr, u
             mem = (const uint8_t*)&dd->ds_buf;
         }
         else {
-            DebugMessage(M64MSG_ERROR, "Unknown DD dma write dram=%08x  cart=%08x length=%08x",
+            core_log(CORE_LOG_ERROR, "Unknown DD dma write dram=%08x  cart=%08x length=%08x",
                 dram_addr, cart_addr, length);
 
             /* Recommended Count Per Op = 1, this seems to break very easily */

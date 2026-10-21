@@ -23,13 +23,13 @@
 
 #include <stdlib.h>
 
-#include "api/callbacks.h"
-#include "api/m64p_types.h"
+#include "core/log.h"
+#include "core/types.h"
 #include "backends/api/storage_backend.h"
 #include "device/dd_controller.h"
 #include "main/util.h"
 
-#include <mupen64plus-next_common.h>
+#include <core/frontend.h>
 
 int open_file_storage(struct file_storage* fstorage, size_t size, const char* filename)
 {

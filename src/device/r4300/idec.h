@@ -19,8 +19,8 @@
  *   51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.          *
  * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
 
-#ifndef M64P_DEVICE_R4300_IDEC_H
-#define M64P_DEVICE_R4300_IDEC_H
+#ifndef PARALLAX_DEVICE_R4300_IDEC_H
+#define PARALLAX_DEVICE_R4300_IDEC_H
 
 #include "osal/preproc.h"
 

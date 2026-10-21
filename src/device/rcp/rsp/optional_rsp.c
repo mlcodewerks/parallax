@@ -1,10 +1,11 @@
+#include "core/file.h"
 /* Automatic task HLE and streaming graphics walkers. The native RSP remains
  * connected for undetected programs and their instruction continuations. */
 #include "optional_rsp.h"
 #include "renderer_options.h"
 #include "device/device.h"
 #include "main/main.h"
-#include "api/callbacks.h"
+#include "core/log.h"
 #include "device/rcp/rdp/rdp_core.h"
 #include "device/rcp/rdp/angrylion/rdp_emit_backend.h"
 #include "device/rcp/rdp/angrylion/rdp_emit_hle.h"
@@ -23,7 +24,7 @@
 #include "hle/hle_timing.h"
 #include "p_rsp/dpc_bridge.h"
 
-extern unsigned int parallelRSPDoRspCycles(unsigned int);
+extern unsigned int native_rsp_execute(unsigned int);
 extern void parallelRSPResetExecutedCycles(void);
 extern uint16_t parallelRSPGetVCO(void);
 extern void parallelRSPSetVCO(uint16_t);
@@ -36,7 +37,7 @@ extern void parallelRSPSetPacketCursor(uint32_t);
 extern void parallelRSPGetGraphicsLatches(uint16_t values[32][8]);
 extern void parallelRSPSetGraphicsLatches(const uint16_t values[32][8],uint32_t);
 static struct hle_t hle;
-static RSP_INFO info;
+static rsp_memory info;
 static void capture_cp0(uint32_t words[16])
 {
     const uint32_t values[16] = {
@@ -137,9 +138,9 @@ static void publish_fifo(unsigned int base,unsigned int bytes,int xbus)
 { rdp_publish_hle_fifo(&g_dev.dp,base,bytes,xbus); }
 static const RdpEmitBackend backend = {get_rdram, get_rdram_size, get_dmem, submit, time_packet, get_dpc_state, publish_fifo};
 
-void optional_rsp_init(RSP_INFO rsp_info)
+void optional_rsp_init(rsp_memory rsp_info)
 {
-    if (timing_capture_file) { fclose(timing_capture_file); timing_capture_file = NULL; }
+    if (timing_capture_file) { core_file_close(timing_capture_file); timing_capture_file = NULL; }
     timing_capture_prefix = getenv("HLE_TIMING_CAPTURE");
     timing_capture_skip = getenv("HLE_TIMING_CAPTURE_SKIP") ? (unsigned int)atoi(getenv("HLE_TIMING_CAPTURE_SKIP")) : 16u;
     timing_capture_stride = getenv("HLE_TIMING_CAPTURE_STRIDE") ? (unsigned int)atoi(getenv("HLE_TIMING_CAPTURE_STRIDE")) : 13u;
@@ -190,15 +191,15 @@ static int graphics_supported_memory(const uint32_t *task, unsigned char *ram, u
         static int captured;
         if (path && !captured)
         {
-            FILE *file = fopen(path, "wb");
+            core_file *file = core_file_open(path, "wb");
             if (file)
             {
                 unsigned int text_bytes = task[5] < 0xf80 ? task[5] : 0xf80;
-                fwrite(ram + task[4], 1, text_bytes, file);
-                fwrite(ram + task[6], 1, task[7], file);
-                fclose(file);
+                core_file_write_items(ram + task[4], 1, text_bytes, file);
+                core_file_write_items(ram + task[6], 1, task[7], file);
+                core_file_close(file);
                 captured = 1;
-                DebugMessage(M64MSG_INFO, "ZSortp capture: text %08x/%x data %08x/%x",
+                core_log(CORE_LOG_INFO, "ZSortp capture: text %08x/%x data %08x/%x",
                     task[4], text_bytes, task[6], task[7]);
             }
         }
@@ -237,7 +238,7 @@ static void graphics_capture_begin(const uint32_t *task)
     unsigned int i, sum = 0, skip, stride, limit;
     uint32_t header[4] = {0x484c5431u, 0, 0, 0x47465849u}, context[7], zero = 0;
     char path[1024];
-    FILE *file;
+    core_file *file;
     if (!graphics_capture_prefix || (task[1] & 1u)) return;
     if (getenv("HLE_GRAPHICS_CAPTURE_CLOCK") &&
         g_dev.r4300.cp0.count_clock < (int64_t)strtoull(getenv("HLE_GRAPHICS_CAPTURE_CLOCK"), NULL, 0)) return;
@@ -251,33 +252,33 @@ static void graphics_capture_begin(const uint32_t *task)
     i = graphics_capture_started++;
     if (i < skip || (i - skip) % stride || graphics_capture_count >= limit) return;
     snprintf(path, sizeof(path), "%s-%04u.rsp", graphics_capture_prefix, graphics_capture_count++);
-    file = fopen(path, "wb");
+    file = core_file_open(path, "wb");
     if (!file) return;
     header[2] = sum;
-    fwrite(header, sizeof(header), 1, file);
-    fwrite(info.RDRAM, 0x800000, 1, file);
-    fwrite(info.DMEM, 0x1000, 1, file);
-    fwrite(info.IMEM, 0x1000, 1, file);
-    fwrite(&zero, sizeof(zero), 1, file);
+    core_file_write_items(header, sizeof(header), 1, file);
+    core_file_write_items(info.RDRAM, 0x800000, 1, file);
+    core_file_write_items(info.DMEM, 0x1000, 1, file);
+    core_file_write_items(info.IMEM, 0x1000, 1, file);
+    core_file_write_items(&zero, sizeof(zero), 1, file);
     {
         uint32_t state[4] = {HLE_CAPTURE_VCO_MAGIC, parallelRSPGetVCO(),
                             HLE_CAPTURE_T6_MAGIC, parallelRSPGetT6()};
-        fwrite(state, sizeof(state), 1, file);
+        core_file_write_items(state, sizeof(state), 1, file);
     }
     parallelRSPGetF5Context(context);
     for (i = 0; i < 7; i++) {
         uint32_t pair[2] = {HLE_CAPTURE_F5_MAGIC + i, context[i]};
-        fwrite(pair, sizeof(pair), 1, file);
+        core_file_write_items(pair, sizeof(pair), 1, file);
     }
     {
         uint32_t state[PARALLEL_RSP_STATE_WORDS];
         uint32_t tag[2] = {HLE_CAPTURE_RSP_MAGIC, PARALLEL_RSP_STATE_WORDS};
         parallelRSPSaveState(state);
-        fwrite(tag, sizeof(tag), 1, file);
-        fwrite(state, sizeof(state), 1, file);
+        core_file_write_items(tag, sizeof(tag), 1, file);
+        core_file_write_items(state, sizeof(state), 1, file);
         { uint32_t cp0[16]; capture_cp0(cp0); hle_capture_write_cp0(file, cp0); }
     }
-    fclose(file);
+    core_file_close(file);
 }
 
 unsigned int optional_rsp_execute(unsigned int cycles)
@@ -363,7 +364,7 @@ native:
         graphics_capture_begin(task);
     timing_capture_begin(task);
     lle_tasks++;
-    cycles = parallelRSPDoRspCycles(cycles);
+    cycles = native_rsp_execute(cycles);
     timing_capture_end(cycles);
     return cycles;
 }
@@ -380,22 +381,28 @@ void HleProcessDlistList(void *u)
     rdp_emit_hle_process_dlist();
 }
 void HleProcessAlistList(void *u) { (void)u; }
-void HleProcessRdpList(void *u) { (void)u; if (!timing_probe_active) info.ProcessRdpList(); }
-void HleShowCFB(void *u) { (void)u; if (!timing_probe_active) info.ShowCFB(); }
+void HleProcessRdpList(void *u) { (void)u; if (!timing_probe_active) renderer_process_commands(); }
+void HleShowCFB(void *u) { (void)u; if (!timing_probe_active) renderer_show_framebuffer(); }
 int HleForwardTask(void *u)
 {
     (void)u;
     if (timing_probe_active) { timing_probe_failed = 1; return 1; }
     *info.SP_STATUS_REG = start_status;
-    forwarded_cycles = parallelRSPDoRspCycles(~0u);
+    forwarded_cycles = native_rsp_execute(~0u);
     forwarded = 1;
     return 0;
 }
+void optional_rsp_shutdown(void)
+{
+    if (timing_capture_file) core_file_close(timing_capture_file);
+    timing_capture_file = NULL;
+    timing_capture_prefix = graphics_capture_prefix = NULL;
+}
 void optional_rsp_report(void)
 {
-    DebugMessage(M64MSG_INFO, "RSP tasks: HLE graphics=%llu audio=%llu LLE=%llu other=%llu boot=%llu",
+    core_log(CORE_LOG_INFO, "RSP tasks: HLE graphics=%llu audio=%llu LLE=%llu other=%llu boot=%llu",
         graphics_tasks, audio_tasks, lle_tasks, other_tasks, boot_tasks);
-    DebugMessage(M64MSG_INFO, "RSP streaming continuations: F3DEX2=%llu Rogue=%llu BOSS=%llu Naboo=%llu",
+    core_log(CORE_LOG_INFO, "RSP streaming continuations: F3DEX2=%llu Rogue=%llu BOSS=%llu Naboo=%llu",
         graphics_resumes[HLE_RESUME_STREAMING], graphics_resumes[HLE_RESUME_RS],
         graphics_resumes[HLE_RESUME_ZBOSS], graphics_resumes[HLE_RESUME_NABOO]);
 }
@@ -472,7 +479,7 @@ static void probe_submit(const unsigned char *p, unsigned int base, unsigned int
         timing_probe_failed=1;
         return;
     }
-    FILE *dump = getenv("HLE_TIMING_RDP_DUMP") ? fopen(getenv("HLE_TIMING_RDP_DUMP"), "ab") : NULL;
+    core_file *dump = getenv("HLE_TIMING_RDP_DUMP") ? core_file_open(getenv("HLE_TIMING_RDP_DUMP"), "ab") : NULL;
     (void)base;
     for (i = 0; i + 4u <= bytes; i += 4u) {
         uint32_t word; memcpy(&word, p + i, 4);
@@ -482,7 +489,7 @@ static void probe_submit(const unsigned char *p, unsigned int base, unsigned int
         }
         probe_rdp_words++;
     }
-    if (dump) { fwrite(p, bytes, 1, dump); fclose(dump); }
+    if (dump) { core_file_write_items(p, bytes, 1, dump); core_file_close(dump); }
 }
 static unsigned int probe_dpc[3];
 static void probe_get_dpc_state(unsigned int state[3]) { memcpy(state,probe_dpc,sizeof(probe_dpc)); }
@@ -494,15 +501,15 @@ unsigned int optional_rsp_timing_replay(const char *path, char *family,
     timing_probe_status = 0;
     timing_probe_supported = 0;
     timing_probe_full_rdram = 0;
-    FILE *f = fopen(path, "rb");
+    core_file *f = core_file_open(path, "rb");
     uint32_t header[4], regs[32] = {0};
     unsigned char *memory = NULL, *snapshot = NULL, *expected_ram = NULL;
     struct hle_t probe;
     struct hle_timing_work work;
     probe_rdp_hash = UINT64_C(14695981039346656037); probe_rdp_words = 0;
     if (getenv("HLE_TIMING_RDP_DUMP")) {
-        FILE *dump = fopen(getenv("HLE_TIMING_RDP_DUMP"), "wb");
-        if (dump) fclose(dump);
+        core_file *dump = core_file_open(getenv("HLE_TIMING_RDP_DUMP"), "wb");
+        if (dump) core_file_close(dump);
     }
     unsigned int measured = 0;
     *diffs = *written = 0xffffffffu;
@@ -510,9 +517,9 @@ unsigned int optional_rsp_timing_replay(const char *path, char *family,
     memory = (unsigned char *)malloc(0x802000);
     snapshot = (unsigned char *)malloc(optional_rsp_state_size());
     expected_ram = (unsigned char *)malloc(0x800000);
-    if (!memory || !snapshot || !expected_ram || fread(header, sizeof(header), 1, f) != 1 ||
+    if (!memory || !snapshot || !expected_ram || core_file_read_items(header, sizeof(header), 1, f) != 1 ||
         header[0] != 0x484c5431u || (!header[1] && header[3] != 0x47465849u) ||
-        fread(memory, 0x802000, 1, f) != 1) goto finish;
+        core_file_read_items(memory, 0x802000, 1, f) != 1) goto finish;
     memcpy(expected_ram, memory, 0x800000);
     optional_rsp_save(snapshot);
     {
@@ -591,16 +598,16 @@ unsigned int optional_rsp_timing_replay(const char *path, char *family,
         *estimate = hle_timing_cycles(); measured = header[1];
         {
             uint32_t count;
-            if (fread(&count, sizeof(count), 1, f) == 1 && count <= HLE_CAPTURE_MAX_RANGES) {
+            if (core_file_read_items(&count, sizeof(count), 1, f) == 1 && count <= HLE_CAPTURE_MAX_RANGES) {
                 unsigned int r;
                 *diffs = *written = 0;
                 for (r = 0; r < count; r++) {
                     uint32_t span[2], i;
-                    if (fread(span, sizeof(span), 1, f) != 1 || span[0] >= 0x800000u ||
+                    if (core_file_read_items(span, sizeof(span), 1, f) != 1 || span[0] >= 0x800000u ||
                         span[1] > 0x800000u-span[0]) { *diffs = *written = 0xffffffffu; break; }
                     *written += span[1];
                     for (i = 0; i < span[1]; i++) {
-                        int expected = fgetc(f);
+                        int expected = core_file_getc(f);
                         if (expected < 0) { *diffs = *written = 0xffffffffu; break; }
                         expected_ram[span[0]+i] = (unsigned char)expected;
                         if (memory[span[0]+i] != (unsigned char)expected) {
@@ -632,16 +639,16 @@ unsigned int optional_rsp_timing_replay(const char *path, char *family,
     }
     timing_probe_active = 0;
     if(getenv("HLE_TIMING_RAM_DUMP")) {
-        FILE *out=fopen(getenv("HLE_TIMING_RAM_DUMP"),"wb");
-        if(out){fwrite(memory,0x800000,1,out);fclose(out);}
+        core_file *out=core_file_open(getenv("HLE_TIMING_RAM_DUMP"),"wb");
+        if(out){core_file_write_items(memory,0x800000,1,out);core_file_close(out);}
     }
     if (getenv("HLE_TIMING_GSP_DUMP")) {
         unsigned int size = rdp_emit_hle_state_size();
         void *state = malloc(size);
         if (state) {
-            FILE *out = fopen(getenv("HLE_TIMING_GSP_DUMP"), "wb");
+            core_file *out = core_file_open(getenv("HLE_TIMING_GSP_DUMP"), "wb");
             rdp_emit_hle_save(state);
-            if (out) { fwrite(state, size, 1, out); fclose(out); }
+            if (out) { core_file_write_items(state, size, 1, out); core_file_close(out); }
             free(state);
         }
     }
@@ -649,6 +656,6 @@ unsigned int optional_rsp_timing_replay(const char *path, char *family,
     rdp_emit_set_backend(&backend);
     probe_ram = probe_dmem = NULL;
 finish:
-    fclose(f); free(memory); free(snapshot); free(expected_ram);
+    core_file_close(f); free(memory); free(snapshot); free(expected_ram);
     return measured;
 }

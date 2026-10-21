@@ -19,8 +19,8 @@
  *   51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.          *
  * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
 
-#ifndef M64P_DEVICE_R4300_PURE_INTERP_H
-#define M64P_DEVICE_R4300_PURE_INTERP_H
+#ifndef PARALLAX_DEVICE_R4300_PURE_INTERP_H
+#define PARALLAX_DEVICE_R4300_PURE_INTERP_H
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -43,4 +43,4 @@ int pure_interp_fpu_compare_prepare(struct r4300_core*, uint32_t op, uint64_t in
 int pure_interp_jit_fpu_prepare(struct r4300_core*, uint32_t op, uint64_t inputs[3], uint64_t* commits);
 void pure_interp_fpu_compare_finish(struct r4300_core*, int result);
 
-#endif /* M64P_DEVICE_R4300_PURE_INTERP_H */
+#endif /* PARALLAX_DEVICE_R4300_PURE_INTERP_H */

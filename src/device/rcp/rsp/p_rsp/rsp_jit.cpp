@@ -1,3 +1,4 @@
+#include "core/file.h"
 #include "rsp_jit.hpp"
 #include "rsp/timing.hpp"
 #include "rsp_disasm.hpp"
@@ -2013,8 +2014,8 @@ Func CPU::jit_region(uint64_t hash, unsigned pc_word, unsigned instruction_count
 #ifdef RSP_JIT_CODE_DUMP
     if(const char *directory=std::getenv("RSP_JIT_CODE_DUMP")) {
         char path[1024];std::snprintf(path,sizeof(path),"%s/%03x.bin",directory,pc_word*4);
-        if(FILE *file=std::fopen(path,"wb")) {
-            std::fwrite(block_code,size_t(code_size),1,file);std::fclose(file);
+        if(core_file *file=core_file_open(path,"wb")) {
+            core_file_write_items(block_code,size_t(code_size),1,file);core_file_close(file);
         }
     }
 #endif

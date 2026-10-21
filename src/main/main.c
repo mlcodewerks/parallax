@@ -22,11 +22,7 @@
  *   51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.          *
  * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
 
-/* This is MUPEN64's main entry point. It contains code that is common
- * to both the gui and non-gui versions of mupen64. See
- * gui subdirectories for the gui-specific code.
- * if you want to implement an interface, you should look here
- */
+/* Device setup and execution for the libretro core. */
 
 #include <assert.h>
 #include <stdarg.h>
@@ -35,13 +31,9 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define M64P_CORE_PROTOTYPES 1
-#include "api/callbacks.h"
-#include "api/config.h"
-#include "api/m64p_config.h"
-#include "api/m64p_types.h"
-#include "api/m64p_vidext.h"
-#include "api/vidext.h"
+
+#include "core/log.h"
+#include "core/types.h"
 #include "backends/api/audio_out_backend.h"
 #include "backends/api/clock_backend.h"
 #include "backends/api/controller_input_backend.h"
@@ -49,7 +41,7 @@
 #include "backends/api/rumble_backend.h"
 #include "backends/api/storage_backend.h"
 #include "backends/api/video_capture_backend.h"
-#include "backends/plugins_compat/plugins_compat.h"
+#include "core/controller.h"
 #include "backends/clock_ctime_plus_delta.h"
 #include "backends/file_storage.h"
 #include "device/device.h"
@@ -60,11 +52,11 @@
 #include "device/controllers/paks/transferpak.h"
 #include "device/gb/gb_cart.h"
 #include "device/pif/bootrom_hle.h"
-#include "eventloop.h"
+
 #include "main.h"
 #include "savestates.h"
-#include "callbacks.h"
-#include "plugin/plugin.h"
+#include "core/log.h"
+#include "core/backend.h"
 #if defined(PROFILE)
 #include "profile.h"
 #endif
@@ -76,7 +68,7 @@
 #include "util.h"
 
 #include <libretro_private.h>
-#include <libco.h>
+
 
 
 #ifdef HAVE_LIBNX
@@ -87,20 +79,15 @@
 #ifdef __LIBRETRO__
 #include <file/file_path.h>
 #include <libretro_memory.h>
-#include <mupen64plus-next_common.h>
+#include <core/frontend.h>
 #endif // __LIBRETRO__
 
-#ifdef WITH_LIRC
-#include "lirc.h"
-#endif //WITH_LIRC
 
 /* version number for Core config section */
 #define CONFIG_PARAM_VERSION 1.01
 
 /** globals **/
-m64p_handle g_CoreConfig = NULL;
 
-m64p_frame_callback g_FrameCallback = NULL;
 
 int         g_RomWordsLittleEndian = 0; // after loading, ROM words are in native N64 byte order (big endian). We will swap them on x86
 int         g_EmulatorRunning = 0;      // need separate boolean to tell if emulator is running, since --nogui doesn't use a thread
@@ -108,17 +95,14 @@ int         g_EmulatorRunning = 0;      // need separate boolean to tell if emul
 
 int g_rom_pause;
 
-/* g_mem_base is global to allow plugins early access (before device is initialized).
- * Do not use this variable directly in emulation code.
- * Initialization and DeInitialization of this variable is done at CoreStartup and CoreShutdown.
- */
+/* Guest memory shared by devices and built-in backends. */
 void* g_mem_base = NULL;
 
 uint32_t g_start_address = UINT32_C(0xa4000040);
 
 struct device g_dev;
 
-m64p_media_loader g_media_loader;
+
 
 int g_gs_vi_counter = 0;
 
@@ -167,7 +151,10 @@ static char *get_flashram_path(void)
 
 static char *get_gb_ram_path(const char* gbrom, unsigned int control_id)
 {
-    return "";
+    const char *directory = NULL;
+    environ_cb(RETRO_ENVIRONMENT_GET_SAVE_DIRECTORY, &directory);
+    return directory && *directory && gbrom
+        ? formatstr("%s/%s.port%u.sav", directory, gbrom, control_id) : NULL;
 }
 
 const char *get_savestatepath(void)
@@ -182,18 +169,10 @@ const char *get_savesrampath(void)
 
 const char *get_dd_disk_save_path(const char* diskname, int save_format)
 {
-    char* newPath = (char*)malloc(PATH_MAX);
-    strcpy(newPath, diskname);
-    
-    if(save_format == 0)
-        strcat(newPath, ".disk_save");
-    else
-        strcat(newPath, ".ram");
-
-    return newPath;
+    return diskname ? formatstr("%s%s", diskname, save_format == 0 ? ".disk_save" : ".ram") : NULL;
 }
 
-void main_message(m64p_msg_level level, unsigned int corner, const char *format, ...)
+void main_message(core_log_level level, unsigned int corner, const char *format, ...)
 {
     va_list ap;
     char buffer[2049];
@@ -203,7 +182,7 @@ void main_message(m64p_msg_level level, unsigned int corner, const char *format,
     va_end(ap);
 
     /* send message to front-end */
-    DebugMessage(level, "%s", buffer);
+    core_log(level, "%s", buffer);
 }
 
 extern retro_input_poll_t poll_cb;
@@ -227,126 +206,13 @@ static int main_is_paused(void)
     return (g_EmulatorRunning && g_rom_pause);
 }
 
-m64p_error main_core_state_query(m64p_core_param param, int *rval)
-{
-    switch (param)
-    {
-        case M64CORE_EMU_STATE:
-            if (!g_EmulatorRunning)
-                *rval = M64EMU_STOPPED;
-            else if (g_rom_pause)
-                *rval = M64EMU_PAUSED;
-            else
-                *rval = M64EMU_RUNNING;
-            break;
-        case M64CORE_VIDEO_MODE:
-                *rval = M64VIDEO_FULLSCREEN;
-            break;
-        case M64CORE_SPEED_FACTOR:
-            *rval = l_SpeedFactor;
-            break;
-        case M64CORE_SPEED_LIMITER:
-            *rval = l_MainSpeedLimit;
-            break;
-        case M64CORE_VIDEO_SIZE:
-        {
-            int width, height;
-            if (!g_EmulatorRunning)
-                return M64ERR_INVALID_STATE;
-            main_get_screen_size(&width, &height);
-            *rval = (width << 16) + height;
-            break;
-        }
-        case M64CORE_AUDIO_VOLUME:
-        {
-            if (!g_EmulatorRunning)
-                return M64ERR_INVALID_STATE;    
-            return 100;
-        }
-        case M64CORE_AUDIO_MUTE:
-            *rval = 0;
-            break;
-        case M64CORE_INPUT_GAMESHARK:
-            *rval = event_gameshark_active();
-            break;
-        // these are only used for callbacks; they cannot be queried or set
-        default:
-            return M64ERR_INPUT_INVALID;
-    }
 
-    return M64ERR_SUCCESS;
-}
 
-m64p_error main_core_state_set(m64p_core_param param, int val)
-{
-    switch (param)
-    {
-        case M64CORE_EMU_STATE:
-            if (!g_EmulatorRunning)
-                return M64ERR_INVALID_STATE;
-            if (val == M64EMU_STOPPED)
-            {        
-                /* this stop function is asynchronous.  The emulator may not terminate until later */
-                main_stop();
-                return M64ERR_SUCCESS;
-            }
-            else if (val == M64EMU_RUNNING)
-            {
-                return M64ERR_SUCCESS;
-            }
-            else if (val == M64EMU_PAUSED)
-            {    
-                return M64ERR_SUCCESS;
-            }
-            return M64ERR_INPUT_INVALID;
-        case M64CORE_VIDEO_MODE:
-            if (!g_EmulatorRunning)
-                return M64ERR_INVALID_STATE;
-            gfx.changeWindow();
-            return M64ERR_SUCCESS;
-        case M64CORE_SPEED_FACTOR:
-            if (!g_EmulatorRunning)
-                return M64ERR_INVALID_STATE;
-            return M64ERR_SUCCESS;
-        case M64CORE_SPEED_LIMITER:
-            return M64ERR_SUCCESS;
-        case M64CORE_VIDEO_SIZE:
-        {
-            // the front-end app is telling us that the user has resized the video output frame, and so
-            // we should try to update the video plugin accordingly.  First, check state
-            int width, height;
-            if (!g_EmulatorRunning)
-                return M64ERR_INVALID_STATE;
-            width = (val >> 16) & 0xffff;
-            height = val & 0xffff;
-            // then call the video plugin.  if the video plugin supports resizing, it will resize its viewport and call
-            // VidExt_ResizeWindow to update the window manager handling our opengl output window
-            gfx.resizeVideoOutput(width, height);
-            return M64ERR_SUCCESS;
-        }
-        case M64CORE_AUDIO_VOLUME:
-            return M64ERR_SUCCESS;
-        case M64CORE_AUDIO_MUTE:
-            return M64ERR_SUCCESS;
-        case M64CORE_INPUT_GAMESHARK:
-            if (!g_EmulatorRunning)
-                return M64ERR_INVALID_STATE;
-            event_set_gameshark(val);
-            return M64ERR_SUCCESS;
-        // these are only used for callbacks; they cannot be queried or set
-            return M64ERR_INPUT_INVALID;
-        default:
-            return M64ERR_INPUT_INVALID;
-    }
-}
 
-m64p_error main_get_screen_size(int *width, int *height)
-{
-    gfx.readScreen(NULL, width, height, 0);
-    return M64ERR_SUCCESS;
-}
 
-m64p_error main_reset(int do_hard_reset)
+
+
+core_result main_reset(int do_hard_reset)
 {
     if (do_hard_reset) {
         hard_reset_device(&g_dev);
@@ -355,36 +221,27 @@ m64p_error main_reset(int do_hard_reset)
         soft_reset_device(&g_dev);
     }
 
-    return M64ERR_SUCCESS;
+    return CORE_OK;
 }
 
 /*********************************************************************************************************
 * global functions, callbacks from the r4300 core or from other plugins
 */
 
-static void video_plugin_render_callback(int bScreenRedrawn)
-{
-    // if the input plugin specified a render callback, call it now
-    if(input.renderCallback)
-    {
-        input.renderCallback();
-    }
-}
+
 
 int main_stateload(const void *data)
 {
-  return savestates_load_m64p(&g_dev, data);
+  return core_state_load(&g_dev, data);
 }
 
 int main_statesave(void *data)
 {
-    return savestates_save_m64p(&g_dev, data);
+    return core_state_save(&g_dev, data);
 }
 
 void new_frame(void)
 {
-    if (g_FrameCallback != NULL)
-        (*g_FrameCallback)(l_CurrentFrame);
 
     /* advance the current frame */
     l_CurrentFrame++;
@@ -392,7 +249,7 @@ void new_frame(void)
     if (l_FrameAdvance) {
         g_rom_pause = 1;
         l_FrameAdvance = 0;
-        StateChanged(M64CORE_EMU_STATE, M64EMU_PAUSED);
+
     }
 }
 
@@ -407,10 +264,10 @@ static void main_switch_pak(int control_id)
     change_pak(cont, l_paks[control_id][l_paks_idx[control_id]], l_ipaks[l_paks_idx[control_id]]);
 
     if (cont->ipak != NULL) {
-        DebugMessage(M64MSG_INFO, "Controller %u pak changed to %s", control_id, cont->ipak->name);
+        core_log(CORE_LOG_INFO, "Controller %u pak changed to %s", control_id, cont->ipak->name);
     }
     else {
-        DebugMessage(M64MSG_INFO, "Removing pak from controller %u", control_id);
+        core_log(CORE_LOG_INFO, "Removing pak from controller %u", control_id);
     }
 }
 
@@ -424,14 +281,14 @@ void main_switch_next_pak(int control_id)
     main_switch_pak(control_id);
 }
 
-void main_switch_plugin_pak(int control_id)
+void main_switch_accessory(int control_id)
 {
     //Don't switch to the selected pak if it's not available for the game
-    if (l_ipaks[l_pak_type_idx[Controls[control_id].Plugin]] == NULL) {
-        Controls[control_id].Plugin = PLUGIN_NONE;
+    if (l_ipaks[l_pak_type_idx[Controls[control_id].accessory]] == NULL) {
+        Controls[control_id].accessory = ACCESSORY_NONE;
     }
 
-    l_paks_idx[control_id] = l_pak_type_idx[Controls[control_id].Plugin];
+    l_paks_idx[control_id] = l_pak_type_idx[Controls[control_id].accessory];
 
     main_switch_pak(control_id);
 }
@@ -471,28 +328,12 @@ static void open_eep_file(struct file_storage* storage)
 
 static void load_dd_rom(uint8_t* rom, size_t* rom_size)
 {
-    /* ask the core loader for DD disk filename */
-    char* dd_ipl_rom_filename = (g_media_loader.get_dd_rom == NULL)
-        ? NULL
-        : g_media_loader.get_dd_rom(g_media_loader.cb_data);
-
-    char* sys_pathname;
-    environ_cb(RETRO_ENVIRONMENT_GET_SYSTEM_DIRECTORY, &sys_pathname);
-    char* pathname = (char*)malloc(2048);
-    strncpy(pathname, sys_pathname, 2048 - 1);
-    if (pathname[(strlen(pathname)-1)] != '/' && pathname[(strlen(pathname)-1)] != '\\')
-        strcat(pathname, PATH_DEFAULT_SLASH());
-    strcat(pathname, "Mupen64plus");
-    strcat(pathname, PATH_DEFAULT_SLASH());
-    strcat(pathname, "IPL.n64");
-
-    if(retro_dd_path_img)
-    {
-        dd_ipl_rom_filename = pathname;
-    }
-    else
-    {
-        dd_ipl_rom_filename = NULL;
+    char *dd_ipl_rom_filename = retro_dd_path_rom ? strdup(retro_dd_path_rom) : NULL;
+    if (!dd_ipl_rom_filename && retro_dd_path_img) {
+        const char *directory = NULL;
+        environ_cb(RETRO_ENVIRONMENT_GET_SYSTEM_DIRECTORY, &directory);
+        if (directory && *directory)
+            dd_ipl_rom_filename = formatstr("%s/IPL.n64", directory);
     }
 
     if ((dd_ipl_rom_filename == NULL) || (strlen(dd_ipl_rom_filename) == 0)) {
@@ -503,14 +344,19 @@ static void load_dd_rom(uint8_t* rom, size_t* rom_size)
     memset(&dd_rom, 0, sizeof(dd_rom));
 
     if (open_rom_file_storage(&dd_rom, dd_ipl_rom_filename) != file_ok) {
-        DebugMessage(M64MSG_ERROR, "Failed to load DD IPL ROM: %s. Disabling 64DD", dd_ipl_rom_filename);
+        core_log(CORE_LOG_ERROR, "Failed to load DD IPL ROM: %s. Disabling 64DD", dd_ipl_rom_filename);
         goto no_dd;
     }
 
-    DebugMessage(M64MSG_INFO, "DD IPL ROM: %s", dd_ipl_rom_filename);
+    core_log(CORE_LOG_INFO, "DD IPL ROM: %s", dd_ipl_rom_filename);
 
     /* load and swap DD IPL ROM */
     *rom_size = g_ifile_storage_ro.size(&dd_rom);
+    if (*rom_size < 4 || *rom_size > 0x400000u) {
+        close_file_storage(&dd_rom);
+        *rom_size = 0;
+        return;
+    }
     memcpy(rom, g_ifile_storage_ro.data(&dd_rom), *rom_size);
     close_file_storage(&dd_rom);
 
@@ -537,7 +383,7 @@ static void load_dd_rom(uint8_t* rom, size_t* rom_size)
         break;
 
     default: /* unknown */
-        DebugMessage(M64MSG_ERROR, "Invalid DD IPL ROM: Disabling 64DD.");
+        core_log(CORE_LOG_ERROR, "Invalid DD IPL ROM: Disabling 64DD.");
         *rom_size = 0;
         return;
     }
@@ -554,9 +400,7 @@ extern char* retro_dd_path_rom;
 static void load_dd_disk(struct dd_disk* dd_disk, const struct storage_backend_interface** dd_idisk)
 {
     /* ask the core loader for DD disk filename */
-    char* dd_disk_filename = (g_media_loader.get_dd_disk == NULL)
-        ? (retro_dd_path_img ? strdup(retro_dd_path_img) : NULL)
-        : g_media_loader.get_dd_disk(g_media_loader.cb_data);
+    char* dd_disk_filename = retro_dd_path_img ? strdup(retro_dd_path_img) : NULL;
 
     //printf("Load DD disk %s\n", dd_disk_filename);
     //fflush(stdout);
@@ -569,14 +413,14 @@ static void load_dd_disk(struct dd_disk* dd_disk, const struct storage_backend_i
     /* Get DD Disk size */
     size_t dd_size = 0;
     if (get_file_size(dd_disk_filename, &dd_size) != file_ok) {
-        DebugMessage(M64MSG_ERROR, "Can't get DD disk file size");
+        core_log(CORE_LOG_ERROR, "Can't get DD disk file size");
         goto no_disk;
     }
 
     struct file_storage* fstorage = malloc(sizeof(struct file_storage));
     struct file_storage* fstorage_save = malloc(sizeof(struct file_storage));
     if (fstorage == NULL || fstorage_save == NULL) {
-        DebugMessage(M64MSG_ERROR, "Failed to allocate DD file_storage");
+        core_log(CORE_LOG_ERROR, "Failed to allocate DD file_storage");
         if (fstorage != NULL)      { free(fstorage);      fstorage = NULL; }
         if (fstorage_save != NULL) { free(fstorage_save); fstorage_save = NULL; }
         goto no_disk;
@@ -586,14 +430,14 @@ static void load_dd_disk(struct dd_disk* dd_disk, const struct storage_backend_i
     int save_format = 0; //ConfigGetParamInt(g_CoreConfig, "SaveDiskFormat");
     /* MAME disks only support full disk save */
     if (dd_size == MAME_FORMAT_DUMP_SIZE && save_format != 0) {
-        DebugMessage(M64MSG_WARNING, "MAME disks only support full disk save format, switching to full disk format !");
+        core_log(CORE_LOG_WARNING, "MAME disks only support full disk save format, switching to full disk format !");
         save_format = 0;
     }
 
     /* Determine save file name */
     char* save_filename = get_dd_disk_save_path(dd_disk_filename, save_format);
     if (save_filename == NULL) {
-        DebugMessage(M64MSG_ERROR, "Failed to get DD save path, DD will be read-only.");
+        core_log(CORE_LOG_ERROR, "Failed to get DD save path, DD will be read-only.");
         save_format = -1;
     }
 
@@ -601,11 +445,11 @@ static void load_dd_disk(struct dd_disk* dd_disk, const struct storage_backend_i
     if (save_format == 0)
     {
         if (open_rom_file_storage(fstorage, save_filename) != file_ok) {
-            DebugMessage(M64MSG_ERROR, "Failed to load DD Disk save: %s.", save_filename);
+            core_log(CORE_LOG_ERROR, "Failed to load DD Disk save: %s.", save_filename);
 
             /* Try loading regular disk file */
             if (open_rom_file_storage(fstorage, dd_disk_filename) != file_ok) {
-                DebugMessage(M64MSG_ERROR, "Failed to load DD Disk: %s.", dd_disk_filename);
+                core_log(CORE_LOG_ERROR, "Failed to load DD Disk: %s.", dd_disk_filename);
                 goto free_fstorage;
             }
         }
@@ -614,7 +458,7 @@ static void load_dd_disk(struct dd_disk* dd_disk, const struct storage_backend_i
     {
         /* Try loading regular disk file */
         if (open_rom_file_storage(fstorage, dd_disk_filename) != file_ok) {
-            DebugMessage(M64MSG_ERROR, "Failed to load DD Disk: %s.", dd_disk_filename);
+            core_log(CORE_LOG_ERROR, "Failed to load DD Disk: %s.", dd_disk_filename);
             goto free_fstorage;
         }
     }
@@ -635,7 +479,7 @@ static void load_dd_disk(struct dd_disk* dd_disk, const struct storage_backend_i
     size_t size_ram = 0;
     uint8_t* new_data = scan_and_expand_disk_format(fstorage->data, fstorage->size, &format, &development, &offset_sys, &offset_id, &offset_ram, &size_ram);
     if (new_data == NULL) {
-        DebugMessage(M64MSG_ERROR, "Wrong disk format");
+        core_log(CORE_LOG_ERROR, "Wrong disk format");
         goto wrong_disk_format;
     }
     else {
@@ -647,7 +491,7 @@ static void load_dd_disk(struct dd_disk* dd_disk, const struct storage_backend_i
     {
         if (read_from_file(save_filename, &fstorage->data[offset_ram], size_ram) != file_ok)
         {
-            DebugMessage(M64MSG_ERROR, "Failed to load DD Disk RAM area (*.ram): %s.", save_filename);
+            core_log(CORE_LOG_ERROR, "Failed to load DD Disk RAM area (*.ram): %s.", save_filename);
         }
     }
 
@@ -687,14 +531,14 @@ static void load_dd_disk(struct dd_disk* dd_disk, const struct storage_backend_i
     /* Generate LBA conversion table */
     GenerateLBAToPhysTable(dd_disk);
 
-    DebugMessage(M64MSG_INFO, "DD Disk: %s - %zu - %s",
+    core_log(CORE_LOG_INFO, "DD Disk: %s - %zu - %s",
             dd_disk_filename,
             (*dd_idisk)->size(dd_disk),
             get_disk_format_name(format));
 
     uint32_t w = *(uint32_t*)(*dd_idisk)->data(dd_disk);
     if (w == DD_REGION_JP || w == DD_REGION_US || w == DD_REGION_DV) {
-        DebugMessage(M64MSG_WARNING, "Loading a saved disk");
+        core_log(CORE_LOG_WARNING, "Loading a saved disk");
     }
 
     free(dd_disk_filename);
@@ -743,9 +587,7 @@ static void init_gb_rom(void* opaque, void** storage, const struct storage_backe
     struct gb_cart_data* data = (struct gb_cart_data*)opaque;
 
     /* Ask the core loader for rom filename */
-    char* rom_filename = (g_media_loader.get_gb_cart_rom == NULL)
-        ? (retro_transferpak_rom_path ? strdup(retro_transferpak_rom_path) : NULL)
-        : g_media_loader.get_gb_cart_rom(g_media_loader.cb_data, data->control_id);
+    char* rom_filename = retro_transferpak_rom_path ? strdup(retro_transferpak_rom_path) : NULL;
 
     /* Handle the no cart case */
     if (rom_filename == NULL || strlen(rom_filename) == 0) {
@@ -787,9 +629,7 @@ static void init_gb_ram(void* opaque, size_t ram_size, void** storage, const str
     struct gb_cart_data* data = (struct gb_cart_data*)opaque;
 
     /* Ask the core loader for ram filename */
-    char* ram_filename = (g_media_loader.get_gb_cart_ram == NULL)
-        ? (retro_transferpak_ram_path ? strdup(retro_transferpak_ram_path) : NULL)
-        : g_media_loader.get_gb_cart_ram(g_media_loader.cb_data, data->control_id);
+    char* ram_filename = retro_transferpak_ram_path ? strdup(retro_transferpak_ram_path) : NULL;
 
     /* Handle the no RAM case
      * if NULL or empty string generate a filename
@@ -811,7 +651,7 @@ static void init_gb_ram(void* opaque, size_t ram_size, void** storage, const str
     }
 
     log_cb(RETRO_LOG_INFO, "GB Loader RAM: %s - %zu\n",
-            data->ram_fstorage.filename,
+            data->ram_fstorage.filename ? data->ram_fstorage.filename : "<memory>",
             data->ram_fstorage.size);
 
     /* init GB RAM storage */
@@ -842,7 +682,7 @@ void main_change_gb_cart(int control_id)
             data, init_gb_rom, release_gb_rom,
             data, init_gb_ram, release_gb_ram,
             NULL, &g_iclock_ctime_plus_delta,
-            &data->control_id, &g_irumble_backend_plugin_compat,
+            &data->control_id, &g_libretro_rumble_backend,
             data->gbcam_backend, data->igbcam_backend);
 
     if (gb_cart->read_gb_cart == NULL) {
@@ -864,10 +704,6 @@ void main_change_gb_cart(int control_id)
 /*********************************************************************************************************
 * emulation thread - runs the core
 */
-extern gfx_plugin_functions gfx_gln64;
-extern rsp_plugin_functions rsp_hle;
-extern input_plugin_functions dummy_input;
-extern audio_plugin_functions dummy_audio;
 
 unsigned int r4300_emumode;
 
@@ -879,7 +715,7 @@ struct file_storage eep;
     struct audio_out_backend_interface audio_out_backend_libretro;
 
     int control_ids[GAME_CONTROLLERS_COUNT];
-    struct controller_input_compat cin_compats[GAME_CONTROLLERS_COUNT];
+    struct frontend_controller cin_compats[GAME_CONTROLLERS_COUNT];
 
     struct file_storage mpk_storages[GAME_CONTROLLERS_COUNT];
     struct file_storage mpk;
@@ -931,7 +767,7 @@ void main_prerun(void)
     si_dma_duration = ROM_SETTINGS.sidmaduration;
 
     /* do byte-swapping if it hasn't been done yet */
-#if !defined(M64P_BIG_ENDIAN)
+#if !defined(PARALLAX_BIG_ENDIAN)
     if (g_RomWordsLittleEndian == 0)
     {
         swap_buffer((uint8_t*)mem_base_u32(g_mem_base, MM_CART_ROM), 4, g_rom_size/4);
@@ -951,33 +787,33 @@ void main_prerun(void)
         l_ipaks[k++] = &g_ibiopak;
     }
     if (ROM_SETTINGS.mempak) {
-        l_pak_type_idx[PLUGIN_MEMPAK] = k;
+        l_pak_type_idx[ACCESSORY_MEMPAK] = k;
         l_ipaks[k] = &g_imempak;
         ++k;
     }
     if (ROM_SETTINGS.rumble) {
-        l_pak_type_idx[PLUGIN_RUMBLE_PAK] = k;
-        l_pak_type_idx[PLUGIN_RAW] = k;
+        l_pak_type_idx[ACCESSORY_RUMBLE_PAK] = k;
+        l_pak_type_idx[ACCESSORY_RAW] = k;
         l_ipaks[k] = &g_irumblepak;
         ++k;
     }
     if (ROM_SETTINGS.transferpak) {
-        l_pak_type_idx[PLUGIN_TRANSFER_PAK] = k;
+        l_pak_type_idx[ACCESSORY_TRANSFER_PAK] = k;
         l_ipaks[k] = &g_itransferpak;
         ++k;
     }
-    l_pak_type_idx[PLUGIN_NONE] = k;
+    l_pak_type_idx[ACCESSORY_NONE] = k;
     l_ipaks[k] = NULL;
 
     if (!ROM_SETTINGS.mempak) {
-        l_pak_type_idx[PLUGIN_MEMPAK] = k;
+        l_pak_type_idx[ACCESSORY_MEMPAK] = k;
     }
     if (!ROM_SETTINGS.rumble) {
-        l_pak_type_idx[PLUGIN_RUMBLE_PAK] = k;
-        l_pak_type_idx[PLUGIN_RAW] = k;
+        l_pak_type_idx[ACCESSORY_RUMBLE_PAK] = k;
+        l_pak_type_idx[ACCESSORY_RAW] = k;
     }
     if (!ROM_SETTINGS.transferpak) {
-        l_pak_type_idx[PLUGIN_TRANSFER_PAK] = k;
+        l_pak_type_idx[ACCESSORY_TRANSFER_PAK] = k;
     }
 
     /* open storage files, provide default content if not present */
@@ -1014,7 +850,7 @@ void main_prerun(void)
         /* if input plugin requests RawData let the input plugin do the channel device processing */
         if (Controls[i].RawData) {
             joybus_devices[i] = &control_ids[i];
-            ijoybus_devices[i] = &g_ijoybus_device_plugin_compat;
+            ijoybus_devices[i] = &g_libretro_joybus_backend;
         }
         /* otherwise let the core do the processing */
         else {
@@ -1031,10 +867,8 @@ void main_prerun(void)
             cin_compats[i].control_id = (int)i;
             cin_compats[i].cont = &g_dev.controllers[i];
             cin_compats[i].tpk = &g_dev.transferpaks[i];
-            cin_compats[i].last_pak_type = Controls[i].Plugin;
+            cin_compats[i].last_pak_type = Controls[i].accessory;
             cin_compats[i].last_input = 0;
-            cin_compats[i].netplay_count = 0;
-            cin_compats[i].event_first = NULL;
 
             l_gb_carts_data[i].control_id = (int)i;
 
@@ -1044,8 +878,8 @@ void main_prerun(void)
             l_paks_idx[i] = 0;
 
             //Don't use the selected pak if it's not available for the game, instead use NONE
-            if (l_ipaks[l_pak_type_idx[Controls[i].Plugin]] == NULL) {
-                Controls[i].Plugin = PLUGIN_NONE;
+            if (l_ipaks[l_pak_type_idx[Controls[i].accessory]] == NULL) {
+                Controls[i].accessory = ACCESSORY_NONE;
             }
 
             /* init all compatibles paks */
@@ -1055,7 +889,7 @@ void main_prerun(void)
                     init_biopak(&g_dev.biopaks[i], 64);
                     l_paks[i][k] = &g_dev.biopaks[i];
 
-                    if (Controls[i].Plugin == PLUGIN_BIO_PAK) {
+                    if (Controls[i].accessory == ACCESSORY_BIO_PAK) {
                         l_paks_idx[i] = k;
                     }
                 }
@@ -1068,17 +902,17 @@ void main_prerun(void)
                     init_mempak(&g_dev.mempaks[i], &mpk_storages[i], &g_ifile_storage_ro);
                     l_paks[i][k] = &g_dev.mempaks[i];
 
-                    if (Controls[i].Plugin == PLUGIN_MEMPAK) {
+                    if (Controls[i].accessory == ACCESSORY_MEMPAK) {
                         l_paks_idx[i] = k;
                     }
                 }
                 /* Rumble Pak */
                 else if (l_ipaks[k] == &g_irumblepak) {
-                    init_rumblepak(&g_dev.rumblepaks[i], &control_ids[i], &g_irumble_backend_plugin_compat);
+                    init_rumblepak(&g_dev.rumblepaks[i], &control_ids[i], &g_libretro_rumble_backend);
                     l_paks[i][k] = &g_dev.rumblepaks[i];
 
-                    if (Controls[i].Plugin == PLUGIN_RUMBLE_PAK
-                     || Controls[i].Plugin == PLUGIN_RAW) {
+                    if (Controls[i].accessory == ACCESSORY_RUMBLE_PAK
+                     || Controls[i].accessory == ACCESSORY_RAW) {
                         l_paks_idx[i] = k;
                     }
                 }
@@ -1090,13 +924,13 @@ void main_prerun(void)
                             &l_gb_carts_data[i], init_gb_rom, release_gb_rom,
                             &l_gb_carts_data[i], init_gb_ram, release_gb_ram,
                             NULL, &g_iclock_ctime_plus_delta,
-                            &l_gb_carts_data[i].control_id, &g_irumble_backend_plugin_compat,
+                            &l_gb_carts_data[i].control_id, &g_libretro_rumble_backend,
                             l_gb_carts_data[i].gbcam_backend, l_gb_carts_data[i].igbcam_backend);
 
                     init_transferpak(&g_dev.transferpaks[i], (g_dev.gb_carts[i].read_gb_cart == NULL) ? NULL : &g_dev.gb_carts[i]);
                     l_paks[i][k] = &g_dev.transferpaks[i];
 
-                    if (Controls[i].Plugin == PLUGIN_TRANSFER_PAK) {
+                    if (Controls[i].accessory == ACCESSORY_TRANSFER_PAK) {
                         l_paks_idx[i] = k;
                     }
 
@@ -1108,7 +942,7 @@ void main_prerun(void)
                     l_ipaks[k] = NULL;
                     l_paks[i][k] = NULL;
 
-                    if (Controls[i].Plugin == PLUGIN_NONE) {
+                    if (Controls[i].accessory == ACCESSORY_NONE) {
                         l_paks_idx[i] = k;
                     }
 
@@ -1119,14 +953,14 @@ void main_prerun(void)
             /* init game_controller */
             init_game_controller(&g_dev.controllers[i],
                     cont_flavor,
-                    &cin_compats[i], &g_icontroller_input_backend_plugin_compat,
+                    &cin_compats[i], &g_libretro_controller_backend,
                     l_paks[i][l_paks_idx[i]], l_ipaks[l_paks_idx[i]]);
 
             if (l_ipaks[l_paks_idx[i]] != NULL) {
-                DebugMessage(M64MSG_INFO, "Game controller %u (%s) has a %s plugged in",
+                core_log(CORE_LOG_INFO, "Game controller %u (%s) has a %s plugged in",
                     (uint32_t) i, cont_flavor->name, l_ipaks[l_paks_idx[i]]->name);
             } else {
-                DebugMessage(M64MSG_INFO, "Game controller %u (%s) has nothing plugged in",
+                core_log(CORE_LOG_INFO, "Game controller %u (%s) has nothing plugged in",
                     (uint32_t) i, cont_flavor->name);
             }
         }
@@ -1161,21 +995,18 @@ void main_prerun(void)
                 dd_rom_size,
                 &dd_disk, dd_idisk);
 
-    // Attach rom to plugins
-    gfx.romOpen();
-    audio.romOpen();
-    input.romOpen();
+    /* Open the selected built-in renderer. */
+    renderer_open_content();
 
-    // setup rendering callback from video plugin to the core, for screenshots and On-Screen-Display
-    gfx.setRenderingCallback(video_plugin_render_callback);
+
 
     g_EmulatorRunning = 1;
-    StateChanged(M64CORE_EMU_STATE, M64EMU_RUNNING);
+
 
 #ifdef __LIBRETRO__
     g_dev.r4300.issue_policy = rom_cpu_issue_policy(ROM_SETTINGS.MD5);
     if (g_dev.r4300.issue_policy != CPU_ISSUE_DEFAULT)
-        DebugMessage(M64MSG_INFO, "CPU issue timing profile: %s",
+        core_log(CORE_LOG_INFO, "CPU issue timing profile: %s",
             g_dev.r4300.issue_policy == CPU_ISSUE_NATIVE ? "native" : "compatibility");
 #endif
     poweron_device(&g_dev);
@@ -1183,11 +1014,11 @@ void main_prerun(void)
 
 }
 
-m64p_error main_run(void)
+core_result main_run(void)
 {
    if(!*r4300_stop(&g_dev.r4300))
    run_r4300(&g_dev.r4300);
-   return M64ERR_SUCCESS;
+   return CORE_OK;
 }
 
 void main_stop(void)
@@ -1215,30 +1046,28 @@ void main_stop(void)
     close_dd_disk(&dd_disk);
 
     /* Emulation stopped */
-    rsp.romClosed();
-    input.romClosed();
-    audio.romClosed();
-    gfx.romClosed();
+    native_rsp_close();
+    renderer_close_content();
 
     // clean up
     g_EmulatorRunning = 0;
-    StateChanged(M64CORE_EMU_STATE, M64EMU_STOPPED);
+
     /* note: this operation is asynchronous.  It may be called from a thread other than the
        main emulator thread, and may return before the emulator is completely stopped */
 
 
-    DebugMessage(M64MSG_STATUS, "Stopping emulation.");
+    core_log(CORE_LOG_STATUS, "Stopping emulation.");
 
     if (g_rom_pause)
     {
         g_rom_pause = 0;
-        StateChanged(M64CORE_EMU_STATE, M64EMU_RUNNING);
+
     }
 
     stop_device(&g_dev);
 }
 
-m64p_error open_pif(const unsigned char* pifimage, unsigned int size)
+core_result open_pif(const unsigned char* pifimage, unsigned int size)
 {
     md5_byte_t pif_ntsc_md5[] = {0x49, 0x21, 0xD5, 0xF2, 0x16, 0x5D, 0xEE, 0x6E, 0x24, 0x96, 0xF4, 0x38, 0x8C, 0x4C, 0x81, 0xDA};
     md5_byte_t pif_pal_md5[]  = {0x2B, 0x6E, 0xEC, 0x58, 0x6F, 0xAA, 0x43, 0xF3, 0x46, 0x23, 0x33, 0xB8, 0x44, 0x83, 0x45, 0x54};
@@ -1253,18 +1082,18 @@ m64p_error open_pif(const unsigned char* pifimage, unsigned int size)
     md5_finish(&state, digest);
 
     if (memcmp(digest, pif_ntsc_md5, 16) == 0)
-        DebugMessage(M64MSG_INFO, "Using NTSC PIF ROM");
+        core_log(CORE_LOG_INFO, "Using NTSC PIF ROM");
     else if (memcmp(digest, pif_pal_md5, 16) == 0)
-        DebugMessage(M64MSG_INFO, "Using PAL PIF ROM");
+        core_log(CORE_LOG_INFO, "Using PAL PIF ROM");
     else
     {
-        DebugMessage(M64MSG_ERROR, "Invalid PIF ROM");
-        return M64ERR_INPUT_INVALID;
+        core_log(CORE_LOG_ERROR, "Invalid PIF ROM");
+        return CORE_INVALID_INPUT;
     }
 
     for (unsigned int i = 0; i < size; i += 4)
         *dst32++ = big32(*src32++);
 
     g_start_address = UINT32_C(0xbfc00000);
-    return M64ERR_SUCCESS;
+    return CORE_OK;
 }

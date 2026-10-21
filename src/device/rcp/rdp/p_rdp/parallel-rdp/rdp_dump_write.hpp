@@ -1,3 +1,4 @@
+#include "core/file.h"
 /* Copyright (c) 2021 Themaister
  *
  * Permission is hereby granted, free of charge, to any person obtaining
@@ -56,7 +57,7 @@ private:
 		RDP_DUMP_CMD_INT_MAX = 0x7fffffff
 	};
 
-	FILE *file = nullptr;
+	core_file *file = nullptr;
 	std::vector<uint8_t> rdp_dram_cache;
 	std::vector<uint8_t> rdp_hidden_dram_cache;
 	void flush(const void *dram_, uint32_t size, RDPDumpCmd block_cmd, RDPDumpCmd flush_cmd, uint8_t *cache);

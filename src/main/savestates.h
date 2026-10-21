@@ -25,41 +25,7 @@
 #ifndef __SAVESTAVES_H__
 #define __SAVESTAVES_H__
 
-typedef enum _savestates_job
-{
-    savestates_job_nothing,
-    savestates_job_load,
-    savestates_job_save
-} savestates_job;
-
-typedef enum _savestates_type
-{
-    savestates_type_unknown,
-    savestates_type_m64p,
-    savestates_type_pj64_zip,
-    savestates_type_pj64_unc
-} savestates_type;
-
-savestates_job savestates_get_job(void);
-void savestates_set_job(savestates_job j, savestates_type t, const char *fn);
-void savestates_init(void);
-void savestates_deinit(void);
-
-int savestates_load(void);
-int savestates_save(void);
-
-void savestates_select_slot(unsigned int s);
-unsigned int savestates_get_slot(void);
-void savestates_set_autoinc_slot(int b);
-void savestates_inc_slot(void);
-
-#ifndef __LIBRETRO__
-int savestates_save_m64p(const struct device* dev, char *filepath);
-int savestates_load_m64p(struct device* dev, char *filepath);
-#else
-int savestates_save_m64p(const struct device* dev, void *data);
-int savestates_load_m64p(struct device* dev, const void *data);
+struct device;
+int core_state_save(const struct device *dev, void *data);
+int core_state_load(struct device *dev, const void *data);
 #endif
-
-#endif /* __SAVESTAVES_H__ */
-

@@ -1,3 +1,4 @@
+#include "core/file.h"
 /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * *
  *   Mupen64plus - savestates.c                                            *
  *   Mupen64Plus homepage: https://mupen64plus.org/                        *
@@ -35,17 +36,15 @@
 #include <string.h>
 #include <sys/types.h>
 
-#define M64P_CORE_PROTOTYPES 1
-#include "api/callbacks.h"
-#include "api/config.h"
-#include "api/m64p_config.h"
-#include "api/m64p_types.h"
+#define PARALLAX_CORE_PROTOTYPES 1
+#include "core/log.h"
+#include "core/types.h"
 #include "backends/api/storage_backend.h"
 #include "device/device.h"
 #include "main/list.h"
 #include "main/main.h"
 #include "osal/preproc.h"
-#include "plugin/plugin.h"
+#include "core/backend.h"
 #include "rom.h"
 #include "savestates.h"
 #include "util.h"
@@ -66,83 +65,12 @@ _Static_assert(RDP_RASTER_STATE_OFFSET + 192 <= 20480,
 
 static const char* savestate_magic = "M64+SAVE";
 static const int savestate_latest_version = 0x00011a00;  /* 1.26: queued RDP busy counters */
-static const unsigned char pj64_magic[4] = { 0xC8, 0xA6, 0xD8, 0x23 };
-
-static savestates_job job = savestates_job_nothing;
-static savestates_type type = savestates_type_unknown;
-
-// Libretro will re-use fname for the ptr
-// This avoids ifdef shenanigans
-static char *fname = NULL;
-
-static unsigned int slot = 0;
-static int autoinc_save_slot = 0;
 
 struct savestate_work {
-    char *filepath;
     char *data;
     size_t size;
     void *mempointer;
 };
-
-/* Returns the malloc'd full path of the currently selected savestate. */
-static char *savestates_generate_path(savestates_type type)
-{
-    if(fname != NULL) /* A specific path was given. */
-    {
-        return strdup(fname);
-    }
-    else /* Use the selected savestate slot */
-    {
-        char *filename;
-        switch (type)
-        {
-            case savestates_type_m64p:
-                filename = formatstr("%s.st%d", ROM_SETTINGS.goodname, slot);
-                break;
-            default:
-                filename = NULL;
-                break;
-        }
-
-        if (filename != NULL)
-        {
-            char *filepath = formatstr("%s%s", get_savestatepath(), filename);
-            free(filename);
-            return filepath;
-        }
-        else
-            return NULL;
-    }
-}
-
-void savestates_select_slot(unsigned int s)
-{
-    if(s>9||s==slot)
-        return;
-    slot = s;
-    ConfigSetParameter(g_CoreConfig, "CurrentStateSlot", M64TYPE_INT, &s);
-    StateChanged(M64CORE_SAVESTATE_SLOT, slot);
-}
-
-/* Returns the currently selected save slot. */
-unsigned int savestates_get_slot(void)
-{
-    return slot;
-}
-
-/* Sets save state slot autoincrement on or off. */
-void savestates_set_autoinc_slot(int b)
-{
-    autoinc_save_slot = b;
-}
-
-void savestates_inc_slot(void)
-{
-    if(++slot>9)
-        slot = 0;
-    StateChanged(M64CORE_SAVESTATE_SLOT, slot);
-}
 
 #define GETARRAY(buff, type, count) \
     (to_little_endian_buffer(buff, sizeof(type),count), \
@@ -160,7 +88,7 @@ void savestates_inc_slot(void)
     do { type x = value; PUTARRAY(&x, buff, type, 1); } while(0)
 
 
-int savestates_load_m64p(struct device* dev, const void *data)
+int core_state_load(struct device* dev, const void *data)
 {
     unsigned char header[44];
     unsigned int version;
@@ -175,8 +103,6 @@ int savestates_load_m64p(struct device* dev, const void *data)
     unsigned char data_0001_0200[RDP_EXTRA_STATE_BYTES]; // cache, LLE RSP and optional HLE state
 
     uint32_t* cp0_regs = r4300_cp0_regs(&dev->r4300.cp0);
-
-
 
     memcpy(header, data, 44);
     curr = header;
@@ -293,8 +219,8 @@ int savestates_load_m64p(struct device* dev, const void *data)
     dev->vi.regs[VI_X_SCALE_REG] = GETDATA(curr, uint32_t);
     dev->vi.regs[VI_Y_SCALE_REG] = GETDATA(curr, uint32_t);
     legacy_vi_delay = GETDATA(curr, uint32_t);
-    gfx.viStatusChanged();
-    gfx.viWidthChanged();
+    renderer_vi_status_changed();
+    renderer_vi_width_changed();
 
     dev->ri.regs[RI_MODE_REG]         = GETDATA(curr, uint32_t);
     dev->ri.regs[RI_CONFIG_REG]       = GETDATA(curr, uint32_t);
@@ -532,7 +458,7 @@ int savestates_load_m64p(struct device* dev, const void *data)
                         memcpy(dev->transferpaks[i].gb_cart->cam.regs, cam_regs, POCKET_CAM_REGS_COUNT);
                     }
                     else {
-                        DebugMessage(M64MSG_WARNING,
+                        core_log(CORE_LOG_WARNING,
                             "Savestate GB cart mismatch. Current GB cart: %s. Expected GB cart : %s",
                             (rom[GB_CART_FINGERPRINT_OFFSET] == 0x00) ? "(none)" : (const char*)(rom + GB_CART_FINGERPRINT_OFFSET),
                             (gb_fingerprint[0] == 0x00) ? "(none)" : gb_fingerprint);
@@ -677,7 +603,7 @@ int savestates_load_m64p(struct device* dev, const void *data)
                         memcpy(dev->transferpaks[i].gb_cart->cam.regs, cam_regs, POCKET_CAM_REGS_COUNT);
                     }
                     else {
-                        DebugMessage(M64MSG_WARNING,
+                        core_log(CORE_LOG_WARNING,
                             "Savestate GB cart mismatch. Current GB cart: %s. Expected GB cart : %s",
                             (rom[GB_CART_FINGERPRINT_OFFSET] == 0x00) ? "(none)" : (const char*)(rom + GB_CART_FINGERPRINT_OFFSET),
                             (gb_fingerprint[0] == 0x00) ? "(none)" : gb_fingerprint);
@@ -921,8 +847,8 @@ int savestates_load_m64p(struct device* dev, const void *data)
     }
 
     /* Zilmar-Spec plugin expect a call with control_id = -1 when RAM processing is done */
-    if (input.controllerCommand) {
-        input.controllerCommand(-1, NULL);
+    if (core_input_command) {
+        core_input_command(-1, NULL);
     }
 
     /* Retire old CPU mappings before dropping their range records. */
@@ -1006,29 +932,7 @@ int savestates_load_m64p(struct device* dev, const void *data)
     return 1;
 }
 
-static int read_data_from_file(void *file, void *buffer, size_t length)
-{
-    return fread(buffer, 1, length, file) == length;
-}
-
-int savestates_load(void)
-{
-    int ret = 0;
-    struct device* dev = &g_dev;
-    if(fname)
-    {
-        ret = savestates_load_m64p(dev, fname);
-        fname = NULL;
-    } else {
-        ret = 0;
-    }
-    // deliver callback to indicate completion of state loading operation
-    StateChanged(M64CORE_STATE_LOADCOMPLETE, ret);
-
-    return ret;
-}
-
-int savestates_save_m64p(const struct device* dev, void *data)
+int core_state_save(const struct device* dev, void *data)
 {
     unsigned char outbuf[4];
     int i;
@@ -1052,8 +956,6 @@ int savestates_save_m64p(const struct device* dev, void *data)
     }
     save->mempointer = data;
 
-    if(autoinc_save_slot)
-        savestates_inc_slot();
 
     save_eventqueue_infos(&dev->r4300.cp0, queue);
 
@@ -1062,7 +964,6 @@ int savestates_save_m64p(const struct device* dev, void *data)
     save->data = curr = malloc(save->size);
     if (save->data == NULL)
     {
-        free(save->filepath);
         free(save);
 
         return 0;
@@ -1512,28 +1413,3 @@ int savestates_save_m64p(const struct device* dev, void *data)
     return 1;
 }
 
-int savestates_save(void)
-{
-    int ret = 0;
-    const struct device* dev = &g_dev;
-
-    if(fname)
-    {
-        ret = savestates_save_m64p(dev, fname);
-        fname = NULL;
-    } else {
-        ret = 0;
-    }
-    // deliver callback to indicate completion of state saving operation
-    StateChanged(M64CORE_STATE_SAVECOMPLETE, ret);
-
-    return ret;
-}
-
-void savestates_init(void)
-{
-}
-
-void savestates_deinit(void)
-{
-}

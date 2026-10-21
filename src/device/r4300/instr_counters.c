@@ -24,8 +24,8 @@
 #include <stdio.h>
 #include <string.h>
 
-#include "api/callbacks.h"
-#include "api/m64p_types.h"
+#include "core/log.h"
+#include "core/types.h"
 
 /* various constants */
 static char instr_name[][10] =
@@ -80,7 +80,7 @@ void instr_counters_print(void)
     unsigned int iTypeCount[11] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
     unsigned int iTotal = 0;
     char line[128], param[24];
-    DebugMessage(M64MSG_INFO, "Instruction counters:");
+    core_log(CORE_LOG_INFO, "Instruction counters:");
     line[0] = 0;
     for (i = 0; i < 131; i++)
     {
@@ -88,15 +88,15 @@ void instr_counters_print(void)
         strcat(line, param);
         if (i % 5 == 4)
         {
-            DebugMessage(M64MSG_INFO, "%s", line);
+            core_log(CORE_LOG_INFO, "%s", line);
             line[0] = 0;
         }
         iTypeCount[instr_type[i]] += instr_count[i];
         iTotal += instr_count[i];
     }
-    DebugMessage(M64MSG_INFO, "Instruction type summary (total instructions = %i)", iTotal);
+    core_log(CORE_LOG_INFO, "Instruction type summary (total instructions = %i)", iTotal);
     for (i = 0; i < 11; i++)
     {
-        DebugMessage(M64MSG_INFO, "%20s: %04.1f%% (%i)", instr_typename[i], (float) iTypeCount[i] * 100.0 / iTotal, iTypeCount[i]);
+        core_log(CORE_LOG_INFO, "%20s: %04.1f%% (%i)", instr_typename[i], (float) iTypeCount[i] * 100.0 / iTotal, iTypeCount[i]);
     }
 }

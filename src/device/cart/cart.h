@@ -19,8 +19,8 @@
  *   51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.          *
  * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
 
-#ifndef M64P_DEVICE_CART_CART_H
-#define M64P_DEVICE_CART_CART_H
+#ifndef PARALLAX_DEVICE_CART_CART_H
+#define PARALLAX_DEVICE_CART_CART_H
 
 #include "backends/api/joybus.h"
 

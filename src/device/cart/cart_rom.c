@@ -21,13 +21,13 @@
 
 #include "cart_rom.h"
 
-#define M64P_CORE_PROTOTYPES 1
-#include "api/callbacks.h"
-#include "api/m64p_types.h"
+#define PARALLAX_CORE_PROTOTYPES 1
+#include "core/log.h"
+#include "core/types.h"
 
 #include "device/memory.h"
 #include "device/r4300/r4300_core.h"
-#include "device/rcp/pi_controller.h"
+#include "device/rcp/rcp.h"
 
 #define __STDC_FORMAT_MACROS
 #include <inttypes.h>
@@ -85,7 +85,7 @@ unsigned int cart_rom_dma_read(void* opaque, const uint8_t* dram, uint32_t dram_
 {
     cart_addr &= CART_ROM_ADDR_MASK;
 
-    DebugMessage(M64MSG_WARNING, "DMA Writing to CART_ROM: 0x%" PRIX32 " -> 0x%" PRIX32 " (0x%" PRIX32 ")", dram_addr, cart_addr, length);
+    core_log(CORE_LOG_WARNING, "DMA Writing to CART_ROM: 0x%" PRIX32 " -> 0x%" PRIX32 " (0x%" PRIX32 ")", dram_addr, cart_addr, length);
 
     return /* length / 8 */0x1000;
 }

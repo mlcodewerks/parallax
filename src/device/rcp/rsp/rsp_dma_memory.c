@@ -1,7 +1,7 @@
 /* Shared memory-coherence callbacks for CPU- and RSP-initiated DMA. */
 #include "rsp_core.h"
 #include "device/r4300/r4300_core.h"
-#include "device/rcp/mi_controller.h"
+#include "device/rcp/rcp.h"
 #include "device/rcp/rdp/rdp_core.h"
 #ifdef __LIBRETRO__
 #include "optional_rsp.h"

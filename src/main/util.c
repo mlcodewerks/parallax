@@ -38,10 +38,11 @@
 #define __STDC_FORMAT_MACROS
 #include <inttypes.h>
 
-#include "osal/files.h"
+#define OSAL_DIR_SEPARATORS "\\/"
 #include "osal/preproc.h"
 #include "rom.h"
 #include "util.h"
+#include "core/file.h"
 
 /**********************
      File utilities
@@ -49,172 +50,63 @@
 
 file_status_t read_from_file(const char *filename, void *data, size_t size)
 {
-    FILE *f = fopen(filename, "rb");
-    if (f == NULL)
-    {
-        return file_open_error;
-    }
-
-    if (fread(data, 1, size, f) != size)
-    {
-        fclose(f);
-        return file_read_error;
-    }
-
-    fclose(f);
-    return file_ok;
+    core_file *file = core_file_open(filename, "rb");
+    if (!file) return file_open_error;
+    bool ok = core_file_read_exact(file, data, size);
+    int closed = core_file_close(file);
+    return ok && !closed ? file_ok : file_read_error;
 }
-
 file_status_t write_to_file(const char *filename, const void *data, size_t size)
 {
-    FILE *f = fopen(filename, "wb");
-    if (f == NULL)
-    {
-        return file_open_error;
-    }
-
-    if (fwrite(data, 1, size, f) != size)
-    {
-        fclose(f);
-        return file_write_error;
-    }
-
-    fclose(f);
-    return file_ok;
+    core_file *file = core_file_open(filename, "wb");
+    if (!file) return file_open_error;
+    bool ok = core_file_write_exact(file, data, size);
+    int closed = core_file_close(file);
+    return ok && !closed ? file_ok : file_write_error;
 }
-
-
 file_status_t write_chunk_to_file(const char *filename, const void *data, size_t size, size_t offset)
 {
-    FILE *f;
-
-    /* first try to open with rb+ to avoid wiping existing content,
-     * otherwise create file */
-    if ((f = fopen(filename, "rb+")) == NULL) {
-        if ((f = fopen(filename, "wb")) == NULL) {
-            return file_open_error;
+    if (offset > INT64_MAX) return file_size_error;
+    core_file *file = core_file_open(filename, "rb+");
+    if (!file) file = core_file_open(filename, "wb");
+    if (!file) return file_open_error;
+    bool ok = core_file_seek_position(file, (int64_t)offset, RETRO_VFS_SEEK_POSITION_START) == (int64_t)offset;
+    if (ok) ok = core_file_write_exact(file, data, size);
+    int closed = core_file_close(file);
+    return ok && !closed ? file_ok : file_write_error;
+}
+file_status_t load_file(const char *filename, void **buffer, size_t *size)
+{
+    if (!buffer || !size) return file_read_error;
+    *buffer = NULL; *size = 0;
+    core_file *file = core_file_open(filename, "rb");
+    if (!file) return file_open_error;
+    int64_t length = core_file_size(file);
+    file_status_t status = file_size_error;
+    if (length >= 0 && (uint64_t)length <= SIZE_MAX) {
+        void *data = malloc(length ? (size_t)length : 1);
+        status = file_read_error;
+        if (data) {
+            if (core_file_read_exact(file, data, (size_t)length)) {
+                *buffer = data; *size = (size_t)length; status = file_ok;
+            } else free(data);
         }
     }
-
-    /* According to POSIX fseek past file size is supported and will fill with zeros bytes
-     * (and use sparse file if supported).
-     * So we can use it to position next write operation at desired offset.
-     */
-    if (fseek(f, offset, SEEK_SET)) {
-        fclose(f);
-        return file_open_error;
+    if (core_file_close(file) && status == file_ok) {
+        free(*buffer); *buffer = NULL; *size = 0; status = file_read_error;
     }
-
-    if (fwrite(data, 1, size, f) != size)
-    {
-        fclose(f);
-        return file_write_error;
-    }
-
-    fclose(f);
+    return status;
+}
+file_status_t get_file_size(const char *filename, size_t *size)
+{
+    if (!size) return file_size_error;
+    core_file *file = core_file_open(filename, "rb");
+    if (!file) return file_open_error;
+    int64_t length = core_file_size(file);
+    int closed = core_file_close(file);
+    if (length < 0 || (uint64_t)length > SIZE_MAX || closed) return file_size_error;
+    *size = (size_t)length;
     return file_ok;
-}
-
-
-file_status_t load_file(const char* filename, void** buffer, size_t* size)
-{
-    FILE* fd;
-    size_t l_size, bytes_read;
-    void* l_buffer;
-    int err;
-    file_status_t ret;
-
-    /* open file */
-    ret = file_open_error;
-    fd = fopen(filename, "rb");
-    if (fd == NULL)
-    {
-        return file_open_error;
-    }
-
-    /* obtain file size */
-    ret = file_size_error;
-    err = fseek(fd, 0, SEEK_END);
-    if (err != 0)
-    {
-        goto close_file;
-    }
-
-    err = ftell(fd);
-    if (err == -1)
-    {
-        goto close_file;
-    }
-    l_size = (size_t)err;
-
-    err = fseek(fd, 0, SEEK_SET);
-    if (err != 0)
-    {
-        goto close_file;
-    }
-
-    /* allocate buffer */
-    l_buffer = malloc(l_size);
-    if (l_buffer == NULL)
-    {
-        goto close_file;
-    }
-
-    /* copy file content to buffer */
-    ret = file_read_error;
-    bytes_read = fread(l_buffer, 1, l_size, fd);
-    if (bytes_read != l_size)
-    {
-        free(l_buffer);
-        goto close_file;
-    }
-
-    /* commit buffer,size */
-    ret = file_ok;
-    *buffer = l_buffer;
-    *size = l_size;
-
-    /* close file */
-close_file:
-    fclose(fd);
-    return ret;
-}
-
-file_status_t get_file_size(const char* filename, size_t* size)
-{
-    FILE* fd;
-    int err;
-    file_status_t ret;
-
-    /* open file */
-    ret = file_open_error;
-    fd = fopen(filename, "rb");
-    if (fd == NULL)
-    {
-        return file_open_error;
-    }
-
-    /* obtain file size */
-    ret = file_size_error;
-    err = fseek(fd, 0, SEEK_END);
-    if (err != 0)
-    {
-        goto close_file;
-    }
-
-    err = ftell(fd);
-    if (err == -1)
-    {
-        goto close_file;
-    }
-
-    ret = file_ok;
-    *size = (size_t)err;
-
-    /* close file */
-close_file:
-    fclose(fd);
-    return ret;
 }
 
 /**********************
@@ -227,32 +119,32 @@ void swap_buffer(void *buffer, size_t length, size_t count)
     {
         uint16_t *pun = (uint16_t *) buffer;
         for (i = 0; i < count; i++)
-            pun[i] = m64p_swap16(pun[i]);
+            pun[i] = core_swap16(pun[i]);
     }
     else if (length == 4)
     {
         uint32_t *pun = (uint32_t *) buffer;
         for (i = 0; i < count; i++)
-            pun[i] = m64p_swap32(pun[i]);
+            pun[i] = core_swap32(pun[i]);
     }
     else if (length == 8)
     {
         uint64_t *pun = (uint64_t *) buffer;
         for (i = 0; i < count; i++)
-            pun[i] = m64p_swap64(pun[i]);
+            pun[i] = core_swap64(pun[i]);
     }
 }
 
 void to_little_endian_buffer(void *buffer, size_t length, size_t count)
 {
-#if defined(M64P_BIG_ENDIAN)
+#if defined(PARALLAX_BIG_ENDIAN)
     swap_buffer(buffer, length, count);
 #endif
 }
 
 void to_big_endian_buffer(void *buffer, size_t length, size_t count)
 {
-#if !defined(M64P_BIG_ENDIAN)
+#if !defined(PARALLAX_BIG_ENDIAN)
     swap_buffer(buffer, length, count);
 #endif
 }

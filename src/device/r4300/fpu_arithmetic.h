@@ -65,7 +65,7 @@ static int fpu_output(struct r4300_core* cpu, uint64_t* bits, int single)
     return 0;
 }
 
-static M64P_FORCE_INLINE int fpu_prepare(struct r4300_core* cpu, uint32_t op, uint64_t inputs[3])
+static PARALLAX_FORCE_INLINE int fpu_prepare(struct r4300_core* cpu, uint32_t op, uint64_t inputs[3])
 {
     unsigned int fmt = RS_OF(op), fn = op & 63;
     unsigned int fs = (cpu->cp0.regs[CP0_STATUS_REG] & CP0_STATUS_FR) ? FS_OF(op) : (FS_OF(op) & ~1);
@@ -110,7 +110,7 @@ static M64P_FORCE_INLINE int fpu_prepare(struct r4300_core* cpu, uint32_t op, ui
     return 1;
 }
 
-static M64P_FORCE_INLINE void fpu_finish(struct r4300_core* cpu, uint32_t op, uint64_t bits, unsigned int flags)
+static PARALLAX_FORCE_INLINE void fpu_finish(struct r4300_core* cpu, uint32_t op, uint64_t bits, unsigned int flags)
 {
     unsigned int fmt = RS_OF(op), fn = op & 63, fd = FD_OF(op);
     int single = fmt == 16, out_single = fn == 32 ? 1 : fn == 33 ? 0 : single;

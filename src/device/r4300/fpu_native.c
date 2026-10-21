@@ -72,7 +72,7 @@ static FPU_NOINLINE uint64_t fpu_convert(unsigned int fmt, unsigned int fn, uint
 
 /* A function boundary keeps the arithmetic between the MXCSR writes/reads.
  * SSE scalar instructions also avoid CRT sqrt domain-error differences. */
-#if defined(OSAL_SSE) && (defined(__SSE2__) || defined(_M_X64)) && !defined(M64P_FPU_PORTABLE)
+#if defined(OSAL_SSE) && (defined(__SSE2__) || defined(_M_X64)) && !defined(PARALLAX_FPU_PORTABLE)
 #define FPU_NATIVE_SSE2 1
 #if defined(__x86_64__) || defined(_M_X64)
 /* Intrinsics can be speculated by the compiler even with strict FP flags.

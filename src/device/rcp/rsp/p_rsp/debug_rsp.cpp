@@ -50,7 +50,7 @@ void CPU::init_symbol_table()
 {
 #define S(sym) symbol_table["RSP_" #sym] = reinterpret_cast<uint64_t>(RSP_##sym)
 	S(EXIT);
-	S(CALL);
+	S(CORE_CALL);
 	S(RETURN);
 	S(REPORT_PC);
 

@@ -21,12 +21,12 @@
 
 #include "rdram.h"
 
-#include "api/m64p_types.h"
-#include "api/callbacks.h"
+#include "core/types.h"
+#include "core/log.h"
 #include "device/device.h"
 #include "device/memory.h"
 #include "device/r4300/r4300_core.h"
-#include "device/rcp/ri_controller.h"
+#include "device/rcp/rcp.h"
 
 #include <string.h>
 
@@ -108,7 +108,7 @@ static void map_corrupt_rdram(struct rdram* rdram, int corrupt)
 
     mapping.begin = MM_RDRAM_DRAM;
     mapping.end = MM_RDRAM_DRAM + rdram->dram_size - 1;
-    mapping.type = M64P_MEM_RDRAM;
+    mapping.type = CORE_MEMORY_RDRAM;
     mapping.handler.opaque = rdram;
     mapping.handler.read32 = (corrupt)
         ? read_rdram_dram_corrupted
@@ -136,7 +136,7 @@ void poweron_rdram(struct rdram* rdram)
     memset(rdram->regs, 0, RDRAM_MAX_MODULES_COUNT*RDRAM_REGS_COUNT*sizeof(uint32_t));
     memset(rdram->dram, 0, rdram->dram_size);
 
-    DebugMessage(M64MSG_INFO, "Initializing %u RDRAM modules for a total of %u MB",
+    core_log(CORE_LOG_INFO, "Initializing %u RDRAM modules for a total of %u MB",
         (uint32_t) modules, (uint32_t) rdram->dram_size / (1024*1024));
 
     for (module = 0; module < modules; ++module) {
@@ -159,7 +159,7 @@ void read_rdram_regs(void* opaque, uint32_t address, uint32_t* value)
     size_t module;
 
     if (address & RDRAM_BCAST_ADDRESS_MASK) {
-        DebugMessage(M64MSG_WARNING, "Reading from broadcast address is unsupported %08x", address);
+        core_log(CORE_LOG_WARNING, "Reading from broadcast address is unsupported %08x", address);
         return;
     }
 
@@ -202,7 +202,7 @@ void write_rdram_regs(void* opaque, uint32_t address, uint32_t value, uint32_t m
          * the amount of detected memory can be found in s4 */
         size_t ipl3_rdram_size = r4300_regs(rdram->r4300)[20] & UINT32_C(0x0fffffff);
         if (ipl3_rdram_size != rdram->dram_size) {
-            DebugMessage(M64MSG_ERROR, "IPL3 detected %u MB of RDRAM != %u MB",
+            core_log(CORE_LOG_ERROR, "IPL3 detected %u MB of RDRAM != %u MB",
                 (uint32_t) ipl3_rdram_size / (1024*1024), (uint32_t) rdram->dram_size / (1024*1024));
         }
     }

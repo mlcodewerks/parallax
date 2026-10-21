@@ -32,6 +32,9 @@ static const char* dlerror(void)
 #include "gl_context.h"
 #include <string.h>
 #include "input_script.h"
+#ifdef PARALLAX_TEST_VFS
+#include "frontend_vfs.h"
+#endif
 
 static const char *g_directory = ".";
 static uint64_t g_vi_count;
@@ -97,6 +100,10 @@ static void log_callback(enum retro_log_level level, const char *format, ...)
 
 static bool environment_callback(unsigned command, void *data)
 {
+#ifdef PARALLAX_TEST_VFS
+    if (command == RETRO_ENVIRONMENT_GET_VFS_INTERFACE)
+        return frontend_vfs_environment(command, data);
+#endif
     switch (command)
     {
         case RETRO_ENVIRONMENT_GET_SYSTEM_DIRECTORY:

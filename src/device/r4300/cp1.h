@@ -19,8 +19,8 @@
  *   51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.          *
  * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
 
-#ifndef M64P_DEVICE_R4300_CP1_H
-#define M64P_DEVICE_R4300_CP1_H
+#ifndef PARALLAX_DEVICE_R4300_CP1_H
+#define PARALLAX_DEVICE_R4300_CP1_H
 
 #include <stdint.h>
 #include "osal/preproc.h"
@@ -90,5 +90,5 @@ void set_fpr_pointers(struct cp1* cp1, uint32_t newStatus);
 
 void update_x86_rounding_mode(struct cp1* cp1);
 
-#endif /* M64P_DEVICE_R4300_CP1_H */
+#endif /* PARALLAX_DEVICE_R4300_CP1_H */
 

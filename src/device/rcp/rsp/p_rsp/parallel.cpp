@@ -7,12 +7,12 @@
 #include "dpc_bridge.h"
 #include "hle_boot_probe.hpp"
 
-#include "m64p_plugin.h"
-#include "rsp_1.1.h"
+#include "core/backend.h"
+
 #ifdef __LIBRETRO__
 #include "renderer_options.h"
 extern "C" {
-#include "api/callbacks.h"
+#include "core/log.h"
 }
 #endif
 
@@ -21,7 +21,7 @@ extern "C" {
 
 namespace RSP
 {
-RSP_INFO rsp;
+rsp_memory rsp;
 #ifdef DEBUG_JIT
 RSP::CPU cpu;
 #else
@@ -124,7 +124,7 @@ extern "C"
 	}
 #endif
 
-	EXPORT unsigned int CALL parallelRSPDoRspCycles(unsigned int cycles)
+	unsigned int native_rsp_execute(unsigned int cycles)
 	{
 		if (*RSP::rsp.SP_STATUS_REG & (SP_STATUS_HALT | SP_STATUS_BROKE))
 			return 0;
@@ -182,34 +182,16 @@ extern "C"
 	}
     void parallelRSPResetExecutedCycles(void) { RSP::cpu.get_state().cycles = 0; }
 
-	EXPORT m64p_error CALL parallelRSPPluginGetVersion(m64p_plugin_type *PluginType, int *PluginVersion,
-	                                                   int *APIVersion, const char **PluginNamePtr, int *Capabilities)
-	{
-		/* set version info */
-		if (PluginType != NULL)
-			*PluginType = M64PLUGIN_RSP;
 
-		if (PluginVersion != NULL)
-			*PluginVersion = RSP_PARALLEL_VERSION;
 
-		if (APIVersion != NULL)
-			*APIVersion = RSP_PLUGIN_API_VERSION;
-
-		if (Capabilities != NULL)
-			*Capabilities = 0;
-
-		return M64ERR_SUCCESS;
-	}
-
-	EXPORT void CALL parallelRSPRomClosed(void)
+	void native_rsp_close(void)
 	{
 		*RSP::rsp.SP_PC_REG = 0x00000000;
 	}
 
-	EXPORT void CALL parallelRSPInitiateRSP(RSP_INFO Rsp_Info, unsigned int *CycleCount)
+	void native_rsp_init(rsp_memory Rsp_Info)
 	{
-		if (CycleCount)
-			*CycleCount = 0;
+
 
 		if (Rsp_Info.DMEM == Rsp_Info.IMEM) /* usually dummy RSP data for testing */
 			return; /* DMA is not executed just because plugin initiates. */
@@ -246,7 +228,7 @@ extern "C"
 		RSP::cpu.set_rdram(reinterpret_cast<uint32_t *>(Rsp_Info.RDRAM));
 #if defined(__LIBRETRO__) && !defined(DEBUG_JIT)
         RSP::cpu.set_cycle_timing(renderer_component_timing());
-        DebugMessage(M64MSG_INFO,"RSP backend: JIT LLE; per-cycle timing %s",
+        core_log(CORE_LOG_INFO,"RSP backend: JIT LLE; per-cycle timing %s",
                      renderer_component_timing() ? "on" : "off");
 #endif
 	}

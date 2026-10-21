@@ -1,8 +1,9 @@
+#include "core/file.h"
 /* Opt-in native task captures for offline timing calibration. The file
  * contains a versioned header, host-native RDRAM, DMEM and IMEM. Native
  * cycles are accumulated until BREAK, including all execution slices. */
 static const char *timing_capture_prefix;
-static FILE *timing_capture_file;
+static core_file *timing_capture_file;
 static unsigned int timing_capture_started, timing_capture_count;
 static unsigned int timing_capture_elapsed;
 static uint32_t timing_capture_ranges[512][2];
@@ -63,13 +64,13 @@ static void timing_capture_begin(const uint32_t *task)
     if (hle_get_task_kind(&hle) == HLE_TASK_UNKNOWN) return;
     if (!boot) header[3] = *(const uint32_t *)(info.RDRAM + task[6] + 0x10);
     snprintf(path, sizeof(path), "%s-%04u.rsp", timing_capture_prefix, timing_capture_count++);
-    timing_capture_file = fopen(path, "wb+");
+    timing_capture_file = core_file_open(path, "wb+");
     if (!timing_capture_file) return;
-    if (fwrite(header, sizeof(header), 1, timing_capture_file) != 1 ||
-        fwrite(info.RDRAM, 0x800000, 1, timing_capture_file) != 1 ||
-        fwrite(info.DMEM, 0x1000, 1, timing_capture_file) != 1 ||
-        fwrite(info.IMEM, 0x1000, 1, timing_capture_file) != 1) {
-        fclose(timing_capture_file); timing_capture_file = NULL; return;
+    if (core_file_write_items(header, sizeof(header), 1, timing_capture_file) != 1 ||
+        core_file_write_items(info.RDRAM, 0x800000, 1, timing_capture_file) != 1 ||
+        core_file_write_items(info.DMEM, 0x1000, 1, timing_capture_file) != 1 ||
+        core_file_write_items(info.IMEM, 0x1000, 1, timing_capture_file) != 1) {
+        core_file_close(timing_capture_file); timing_capture_file = NULL; return;
     }
     timing_capture_elapsed = 0;
     timing_capture_vco=parallelRSPGetVCO();
@@ -91,26 +92,26 @@ static void timing_capture_end(unsigned int cycles)
         fprintf(stderr, "HLE timing capture omitted: more than 512 DMA output ranges\n");
         timing_capture_elapsed = 0;
     }
-    fseek(timing_capture_file, 0, SEEK_END);
-    fwrite(&timing_capture_nranges, sizeof(timing_capture_nranges), 1, timing_capture_file);
+    core_file_seek(timing_capture_file, 0, SEEK_END);
+    core_file_write_items(&timing_capture_nranges, sizeof(timing_capture_nranges), 1, timing_capture_file);
     for (i = 0; i < timing_capture_nranges; i++) {
-        fwrite(timing_capture_ranges[i], sizeof(timing_capture_ranges[i]), 1, timing_capture_file);
-        fwrite(info.RDRAM + timing_capture_ranges[i][0], timing_capture_ranges[i][1], 1, timing_capture_file);
+        core_file_write_items(timing_capture_ranges[i], sizeof(timing_capture_ranges[i]), 1, timing_capture_file);
+        core_file_write_items(info.RDRAM + timing_capture_ranges[i][0], timing_capture_ranges[i][1], 1, timing_capture_file);
     }
     {
         uint32_t context[4]={HLE_CAPTURE_VCO_MAGIC,timing_capture_vco,HLE_CAPTURE_T6_MAGIC,timing_capture_t6};
-        fwrite(context,sizeof(context),1,timing_capture_file);
+        core_file_write_items(context,sizeof(context),1,timing_capture_file);
         for(i=0;i<7;i++){
             uint32_t pair[2]={HLE_CAPTURE_F5_MAGIC+i,timing_capture_f5[i]};
-            fwrite(pair,sizeof(pair),1,timing_capture_file);
+            core_file_write_items(pair,sizeof(pair),1,timing_capture_file);
         }
         { uint32_t tag[2]={HLE_CAPTURE_RSP_MAGIC,PARALLEL_RSP_STATE_WORDS};
-          fwrite(tag,sizeof(tag),1,timing_capture_file);
-          fwrite(timing_capture_rsp,sizeof(timing_capture_rsp),1,timing_capture_file); }
+          core_file_write_items(tag,sizeof(tag),1,timing_capture_file);
+          core_file_write_items(timing_capture_rsp,sizeof(timing_capture_rsp),1,timing_capture_file); }
         hle_capture_write_cp0(timing_capture_file,timing_capture_cp0);
     }
-    fseek(timing_capture_file, 4, SEEK_SET);
-    fwrite(&timing_capture_elapsed, sizeof(timing_capture_elapsed), 1, timing_capture_file);
-    fclose(timing_capture_file);
+    core_file_seek(timing_capture_file, 4, SEEK_SET);
+    core_file_write_items(&timing_capture_elapsed, sizeof(timing_capture_elapsed), 1, timing_capture_file);
+    core_file_close(timing_capture_file);
     timing_capture_file = NULL;
 }

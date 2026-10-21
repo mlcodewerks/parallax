@@ -22,17 +22,17 @@
 #include "fb.h"
 #include "rdp_timing.h"
 
-#include "api/m64p_types.h"
-#include "api/callbacks.h"
+#include "core/types.h"
+#include "core/log.h"
 #include "device/memory.h"
 #include "device/r4300/r4300_core.h"
 #include "device/rdram.h"
 #include "osal/preproc.h"
-#include "plugin/plugin.h"
+#include "core/backend.h"
 
 #include <string.h>
 
-static osal_inline size_t fb_buffer_size(const FrameBufferInfo* fb_info)
+static osal_inline size_t fb_buffer_size(const core_framebuffer_info* fb_info)
 {
     return fb_info->width * fb_info->height * fb_info->size;
 }
@@ -58,7 +58,7 @@ void pre_framebuffer_read(struct fb* fb, uint32_t address)
         uint32_t end   = fb->infos[i].addr + fb_buffer_size(&fb->infos[i]) - 1;
 
         if ((address >= begin) && (address <= end) && (fb->dirty_page[address >> 12])) {
-            gfx.fBRead(address);
+            renderer_framebuffer_read(address);
             fb->dirty_page[address >> 12] = 0;
         }
     }
@@ -111,7 +111,7 @@ void post_framebuffer_write(struct fb* fb, uint32_t address, uint32_t length)
              * into word notifications would overwrite later same-value DMA
              * bytes before their notifications arrive. Notify the complete
              * write once, also when it crosses an image boundary. */
-            gfx.fBWrite(address, length);
+            renderer_framebuffer_write(address, length);
             return;
         }
     }
@@ -208,7 +208,7 @@ void write_rdram_fb(void* opaque, uint32_t address, uint32_t value, uint32_t mas
         break;
 
     default:
-        DebugMessage(M64MSG_WARNING, "Unknown mask %08x !!!", mask);
+        core_log(CORE_LOG_WARNING, "Unknown mask %08x !!!", mask);
     }
 
     post_framebuffer_write(fb, addr, size);
@@ -221,7 +221,7 @@ void write_rdram_fb(void* opaque, uint32_t address, uint32_t value, uint32_t mas
 
 static void unprotect_timing_ranges(struct fb *fb)
 {
-    struct mem_mapping mapping = {0, 0, M64P_MEM_RDRAM, {fb->rdram, RW(rdram_dram)}};
+    struct mem_mapping mapping = {0, 0, CORE_MEMORY_RDRAM, {fb->rdram, RW(rdram_dram)}};
     for (unsigned i = 0; i < 8; ++i) if (fb->timing_bytes[i]) {
         mapping.begin = fb->timing_address[i];
         mapping.end = mapping.begin + fb->timing_bytes[i] - 1;
@@ -233,11 +233,11 @@ static void unprotect_timing_ranges(struct fb *fb)
 void protect_framebuffers(struct fb* fb)
 {
     size_t i, j;
-    struct mem_mapping fb_mapping = { 0, 0, M64P_MEM_RDRAM, { fb, RW(rdram_fb) } };
+    struct mem_mapping fb_mapping = { 0, 0, CORE_MEMORY_RDRAM, { fb, RW(rdram_fb) } };
 
     unprotect_timing_ranges(fb);
-    if (gfx.fBGetFrameBufferInfo && gfx.fBRead && gfx.fBWrite)
-        gfx.fBGetFrameBufferInfo(fb->infos);
+    if (renderer_framebuffer_info && renderer_framebuffer_read && renderer_framebuffer_write)
+        renderer_framebuffer_info(fb->infos);
     else
         memset(fb->infos, 0, sizeof(fb->infos));
 
@@ -289,7 +289,7 @@ void protect_framebuffers(struct fb* fb)
 void unprotect_framebuffers(struct fb* fb)
 {
     size_t i;
-    struct mem_mapping ram_mapping = { 0, 0, M64P_MEM_RDRAM, { fb->rdram, RW(rdram_dram) } };
+    struct mem_mapping ram_mapping = { 0, 0, CORE_MEMORY_RDRAM, { fb->rdram, RW(rdram_dram) } };
 
     unprotect_timing_ranges(fb);
 

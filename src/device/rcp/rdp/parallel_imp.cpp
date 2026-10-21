@@ -7,7 +7,7 @@
 #include "device.hpp"
 #include "gfxstructdefs.h"
 #include "para_intf.h"
-#include "Gfx #1.3.h"
+
 #include "common.h"
 #include "gfxstructdefs.h"
 #include <libretro_vulkan.h>

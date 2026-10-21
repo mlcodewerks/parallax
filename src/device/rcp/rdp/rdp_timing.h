@@ -185,6 +185,12 @@ static uint64_t rdp_timing_span(const struct rdp_timing* t, int y, int left, int
          * store to have already accounted for that inter-buffer boundary. */
         if (color_write && depth_read && !color_read && !depth_write && segments > 1)
             bus += (segments - 1) * 3;
+        /* Write-only color/Z buffers end on the Z row too. The next
+         * buffer starts with a color store, so it must reopen that row.
+         * There is no read turnaround to cover this store-to-store
+         * boundary. A single buffer has no return transition. */
+        if (color_write && depth_write && !color_read && !depth_read && segments > 1)
+            bus += (segments - 1) * 3;
     }
     bus += segments * 3 * turnarounds;
     uint64_t raster = pixels * (t->cycle_type + 1);

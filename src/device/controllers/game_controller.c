@@ -21,14 +21,11 @@
 
 #include "game_controller.h"
 
-#include "api/callbacks.h"
-#include "api/m64p_types.h"
+#include "core/log.h"
+#include "core/types.h"
 #include "backends/api/controller_input_backend.h"
 #include "backends/api/joybus.h"
 
-#ifdef COMPARE_CORE
-#include "api/debugger.h"
-#endif
 
 #include <stdint.h>
 #include <string.h>
@@ -188,7 +185,7 @@ static void process_controller_command(void* jbd,
     uint8_t cmd = tx_buf[0];
 
     /* if controller can't successfully be polled, consider it to be absent */
-    if (cont->icin->get_input(cont->cin, &input_) != M64ERR_SUCCESS) {
+    if (cont->icin->get_input(cont->cin, &input_) != CORE_OK) {
         *rx |= 0x80;
         return;
     }
@@ -210,9 +207,6 @@ static void process_controller_command(void* jbd,
         JOYBUS_CHECK_COMMAND_FORMAT(1, 4)
 
         *((uint32_t*)(rx_buf)) = input_;
-#ifdef COMPARE_CORE
-        CoreCompareDataSync(4, rx_buf);
-#endif
     } break;
 
     case JCMD_PAK_READ: {
@@ -226,7 +220,7 @@ static void process_controller_command(void* jbd,
     } break;
 
     default:
-        DebugMessage(M64MSG_WARNING, "cont: Unknown command %02x %02x %02x",
+        core_log(CORE_LOG_WARNING, "cont: Unknown command %02x %02x %02x",
             *tx, *rx, cmd);
     }
 }

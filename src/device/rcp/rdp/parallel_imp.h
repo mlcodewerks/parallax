@@ -1,6 +1,6 @@
 
-#include "m64p_plugin.h"
-#include "m64p_common.h"
+#include "core/backend.h"
+#include "core/types.h"
 #include "gfxstructdefs.h"
 
 #ifdef __cplusplus

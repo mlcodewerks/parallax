@@ -2,11 +2,11 @@
  * Scalar SIMD instructions avoid exceptions from unused vector lanes. Explicit
  * instructions keep FPCR-dependent operations ordered, even under LTO.
  * AArch32 NEON lacks double precision and retains the portable backend. */
-#ifndef M64P_DEVICE_R4300_FPU_NEON_H
-#define M64P_DEVICE_R4300_FPU_NEON_H
+#ifndef PARALLAX_DEVICE_R4300_FPU_NEON_H
+#define PARALLAX_DEVICE_R4300_FPU_NEON_H
 
 #if defined(__aarch64__) && defined(__ARM_NEON) && \
-    (defined(__GNUC__) || defined(__clang__)) && !defined(M64P_FPU_PORTABLE)
+    (defined(__GNUC__) || defined(__clang__)) && !defined(PARALLAX_FPU_PORTABLE)
 #define FPU_NATIVE_NEON 1
 
 static FPU_NOINLINE uint64_t fpu_neon_calc(unsigned int fmt, unsigned int fn,

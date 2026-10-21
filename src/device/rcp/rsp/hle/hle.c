@@ -1,3 +1,4 @@
+#include "core/file.h"
 /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * *
  *   Mupen64plus-rsp-hle - hle.c                                           *
  *   Mupen64Plus homepage: https://mupen64plus.org/                        *
@@ -255,9 +256,9 @@ static void send_dlist_to_gfx_plugin(struct hle_t* hle)
         *dram_u32(hle, text + 0x14u) == 0x356b2800u &&
         *dram_u32(hle, text + 0x18u) == 0x408b2000u)
         *hle->sp_status = (*hle->sp_status & ~SP_STATUS_SIG1) | SP_STATUS_SIG4;
-    /* Since GFX_INFO version 2, these bits are set before calling the ProcessDlistList function.
+    /* Since renderer_memory version 2, these bits are set before calling the ProcessDlistList function.
      * And the GFX plugin is responsible to unset them if needed.
-     * For GFX_INFO version < 2, the GFX plugin didn't have access to sp_status so
+     * For renderer_memory version < 2, the GFX plugin didn't have access to sp_status so
      * it doesn't matter if we set these bits before calling ProcessDlistList function.
      */
     *hle->sp_status |= SP_STATUS_TASKDONE | SP_STATUS_BROKE | SP_STATUS_HALT;
@@ -721,11 +722,11 @@ static ucode_func_t try_normal_task_detection(struct hle_t* hle)
     {
         const char *tp = getenv("HLE_UCODE_DUMP");
         if (tp) {
-            FILE *tf = fopen(tp, "wb");
+            core_file *tf = core_file_open(tp, "wb");
             if (tf) {
-                fwrite((void*)dram_u32(hle, *dmem_u32(hle, TASK_UCODE)), 1, 0x1000, tf);
-                fwrite((void*)dram_u32(hle, *dmem_u32(hle, TASK_UCODE_DATA)), 1, 0x800, tf);
-                fclose(tf);
+                core_file_write_items((void*)dram_u32(hle, *dmem_u32(hle, TASK_UCODE)), 1, 0x1000, tf);
+                core_file_write_items((void*)dram_u32(hle, *dmem_u32(hle, TASK_UCODE_DATA)), 1, 0x800, tf);
+                core_file_close(tf);
             }
         }
     }
@@ -959,31 +960,31 @@ static void dump_unknown_non_task(struct hle_t* hle, unsigned int uc_start)
 static void dump_binary(struct hle_t* hle, const char *const filename,
                         const unsigned char *const bytes, unsigned int size)
 {
-    FILE *f;
+    core_file *f;
 
     /* if file already exists, do nothing */
-    f = fopen(filename, "r");
+    f = core_file_open(filename, "r");
     if (f == NULL) {
         /* else we write bytes to the file */
-        f = fopen(filename, "wb");
+        f = core_file_open(filename, "wb");
         if (f != NULL) {
-            if (fwrite(bytes, 1, size, f) != size)
+            if (core_file_write_items(bytes, 1, size, f) != size)
                 HleErrorMessage(hle->user_defined, "Writing error on %s", filename);
-            fclose(f);
+            core_file_close(f);
         } else
             HleErrorMessage(hle->user_defined, "Couldn't open %s for writing !", filename);
     } else
-        fclose(f);
+        core_file_close(f);
 }
 
 static void dump_task(struct hle_t* hle, const char *const filename)
 {
-    FILE *f;
+    core_file *f;
 
-    f = fopen(filename, "r");
+    f = core_file_open(filename, "r");
     if (f == NULL) {
-        f = fopen(filename, "w");
-        fprintf(f,
+        f = core_file_open(filename, "w");
+        core_file_printf(f,
                 "type = %d\n"
                 "flags = %d\n"
                 "ucode_boot  = %#08x size  = %#x\n"
@@ -1002,9 +1003,9 @@ static void dump_task(struct hle_t* hle, const char *const filename)
                 *dmem_u32(hle, TASK_OUTPUT_BUFF),    *dmem_u32(hle, TASK_OUTPUT_BUFF_SIZE),
                 *dmem_u32(hle, TASK_DATA_PTR),       *dmem_u32(hle, TASK_DATA_SIZE),
                 *dmem_u32(hle, TASK_YIELD_DATA_PTR), *dmem_u32(hle, TASK_YIELD_DATA_SIZE));
-        fclose(f);
+        core_file_close(f);
     } else
-        fclose(f);
+        core_file_close(f);
 }
 #endif
 

@@ -9,9 +9,9 @@
 #include <memory>
 #include <vector>
 extern "C" {
-#include "api/m64p_plugin.h"
+#include "core/backend.h"
 #include "rdp_core.h"
-extern GFX_INFO gfx_info;
+extern renderer_memory gfx_info;
 extern retro_log_printf_t log_cb;
 extern bool libretro_swap_buffer;
 }
@@ -215,7 +215,7 @@ void glrdp_fb_write(uint32_t address, uint32_t size) {
         renderer->fb_write(address, size);
 }
 void glrdp_fb_info(void *data) {
-    auto *info = static_cast<FrameBufferInfo *>(data);
+    auto *info = static_cast<core_framebuffer_info *>(data);
     std::memset(info, 0, 6 * sizeof(*info));
     if (!renderer || !parser)
         return;

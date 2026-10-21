@@ -26,14 +26,14 @@
 #include <stdint.h>
 #include <string.h>
 
-#include "api/callbacks.h"
-#include "api/m64p_plugin.h"
-#include "api/m64p_types.h"
+#include "core/log.h"
+#include "core/backend.h"
+#include "core/types.h"
 #include "backends/api/joybus.h"
 #include "device/memory.h"
 #include "device/r4300/r4300_core.h"
-#include "device/rcp/si_controller.h"
-#include "plugin/plugin.h"
+#include "device/rcp/rcp.h"
+#include "core/backend.h"
 
 #define __STDC_FORMAT_MACROS
 #include <inttypes.h>
@@ -44,14 +44,14 @@ void print_pif(struct pif* pif)
 {
     int i;
     for (i=0; i<(64/8); i++) {
-        DebugMessage(M64MSG_INFO, "%02" PRIX8 " %02" PRIX8 " %02" PRIX8 " %02" PRIX8 " | %02" PRIX8 " %02" PRIX8 " %02" PRIX8 " %02" PRIX8,
+        core_log(CORE_LOG_INFO, "%02" PRIX8 " %02" PRIX8 " %02" PRIX8 " %02" PRIX8 " | %02" PRIX8 " %02" PRIX8 " %02" PRIX8 " %02" PRIX8,
                      pif->ram[i*8+0], pif->ram[i*8+1],pif->ram[i*8+2], pif->ram[i*8+3],
                      pif->ram[i*8+4], pif->ram[i*8+5],pif->ram[i*8+6], pif->ram[i*8+7]);
     }
 
     for(i = 0; i < PIF_CHANNELS_COUNT; ++i) {
         if (pif->channels[i].tx != NULL) {
-            DebugMessage(M64MSG_INFO, "Channel %u, tx=%02x rx=%02x cmd=%02x",
+            core_log(CORE_LOG_INFO, "Channel %u, tx=%02x rx=%02x cmd=%02x",
                 i,
                 *(pif->channels[i].tx),
                 *(pif->channels[i].rx),
@@ -225,7 +225,7 @@ void setup_channels_format(struct pif* pif)
             }
 
             if ((i + 2) >= PIF_RAM_SIZE) {
-                DebugMessage(M64MSG_WARNING, "Truncated PIF command ! Stopping PIF channel processing");
+                core_log(CORE_LOG_WARNING, "Truncated PIF command ! Stopping PIF channel processing");
                 i = PIF_RAM_SIZE;
                 continue;
             }
@@ -236,12 +236,12 @@ void setup_channels_format(struct pif* pif)
     }
 
     /* Zilmar-Spec plugin expect a call with control_id = -1 when RAM processing is done */
-    if (input.controllerCommand) {
-        input.controllerCommand(-1, NULL);
+    if (core_input_command) {
+        core_input_command(-1, NULL);
     }
 
 #ifdef DEBUG_PIF
-    DebugMessage(M64MSG_INFO, "PIF setup channel");
+    core_log(CORE_LOG_INFO, "PIF setup channel");
     print_pif(pif);
 #endif
 }
@@ -270,7 +270,7 @@ static void process_cic_challenge(struct pif* pif)
     }
 
 #ifdef DEBUG_PIF
-    DebugMessage(M64MSG_INFO, "PIF cic challenge");
+    core_log(CORE_LOG_INFO, "PIF cic challenge");
     print_pif(pif);
 #endif
 }
@@ -299,7 +299,7 @@ void write_pif_mem(void* opaque, uint32_t address, uint32_t value, uint32_t mask
 
     if (addr < PIF_ROM_SIZE)
     {
-        DebugMessage(M64MSG_ERROR, "Invalid write to PIF ROM: %08" PRIX32, address);
+        core_log(CORE_LOG_ERROR, "Invalid write to PIF ROM: %08" PRIX32, address);
         return;
     }
 
@@ -328,7 +328,7 @@ void process_pif_ram(struct pif* pif)
 
     if (flags == 0) {
 #ifdef DEBUG_PIF
-        DebugMessage(M64MSG_INFO, "PIF process pif ram status=0x00");
+        core_log(CORE_LOG_INFO, "PIF process pif ram status=0x00");
         print_pif(pif);
 #endif
         return;
@@ -366,7 +366,7 @@ void process_pif_ram(struct pif* pif)
 #ifdef DEBUG_PIF
     if (flags & 0xf4)
     {
-        DebugMessage(M64MSG_ERROR, "error in process_pif_ram(): %" PRIX8, flags);
+        core_log(CORE_LOG_ERROR, "error in process_pif_ram(): %" PRIX8, flags);
     }
 #endif
 
@@ -383,12 +383,12 @@ void update_pif_ram(struct pif* pif)
     }
 
     /* Zilmar-Spec plugin expect a call with control_id = -1 when RAM processing is done */
-    if (input.readController) {
-        input.readController(-1, NULL);
+    if (core_input_read) {
+        core_input_read(-1, NULL);
     }
 
 #ifdef DEBUG_PIF
-    DebugMessage(M64MSG_INFO, "PIF post read");
+    core_log(CORE_LOG_INFO, "PIF post read");
     print_pif(pif);
 #endif
 }

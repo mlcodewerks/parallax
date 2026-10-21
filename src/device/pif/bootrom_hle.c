@@ -24,14 +24,14 @@
 #include <stdint.h>
 #include <string.h>
 
-#include "api/m64p_types.h"
+#include "core/types.h"
 #include "device/device.h"
 #include "device/r4300/r4300_core.h"
-#include "device/rcp/ai_controller.h"
-#include "device/rcp/pi_controller.h"
+#include "device/rcp/rcp.h"
+#include "device/rcp/rcp.h"
 #include "device/rcp/rsp/rsp_core.h"
-#include "device/rcp/si_controller.h"
-#include "device/rcp/rdp/vi_controller.h"
+#include "device/rcp/rcp.h"
+#include "device/rcp/rcp.h"
 #include "main/rom.h"
 
 static unsigned int get_tv_type(void)

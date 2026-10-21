@@ -20,7 +20,7 @@
  * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
 
 #include "rdp_core.h"
-#include "vi_controller.h"
+#include "device/rcp/rcp.h"
 
 #include <string.h>
 
@@ -28,10 +28,10 @@
 #include "device/rdram.h"
 #include "device/r4300/cp0.h"
 #include "device/r4300/r4300_core.h"
-#include "device/rcp/mi_controller.h"
+#include "device/rcp/rcp.h"
 #include "device/rcp/rsp/rsp_core.h"
 #include "device/rcp/rsp/rsp_timing.h"
-#include "plugin/plugin.h"
+#include "core/backend.h"
 #ifdef __LIBRETRO__
 #include "renderer_options.h"
 #include "angrylion/n64video.h"
@@ -287,7 +287,7 @@ static void process_dpc_commands(struct rdp_core* dp, int from_rsp)
     }
     retire_counters(dp, dp->mi->r4300->cp0.count_clock * 4);
     unprotect_framebuffers(&dp->fb);
-    gfx.processRDPList();
+    renderer_process_commands();
     protect_framebuffers(&dp->fb);
     dp->dpc_regs[DPC_STATUS_REG] |= DPC_STATUS_CBUF_READY;
 
@@ -347,7 +347,7 @@ static void update_dpc_status(struct rdp_core* dp, uint32_t w, int from_rsp)
         if (dp->do_on_unfreeze & DELAY_DP_INT)
             signal_rcp_interrupt(dp->mi, MI_INTR_DP);
         if (dp->do_on_unfreeze & DELAY_UPDATESCREEN)
-            gfx.updateScreen();
+            renderer_present();
         dp->do_on_unfreeze = 0;
         process_dpc_commands(dp, from_rsp);
     }

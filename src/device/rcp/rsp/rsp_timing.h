@@ -1,5 +1,5 @@
-#ifndef M64P_RSP_TIMING_H
-#define M64P_RSP_TIMING_H
+#ifndef PARALLAX_RSP_TIMING_H
+#define PARALLAX_RSP_TIMING_H
 #include <stdint.h>
 
 /* RSP runs at 62.5 MHz, COUNT at 46.875 MHz. Deadlines round up, but

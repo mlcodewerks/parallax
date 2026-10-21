@@ -1,3 +1,4 @@
+#include "core/file.h"
 #include "rdp_renderer.hpp"
 #include "rdp_combiner_usage.hpp"
 #include "vi_filter_shader.hpp"
@@ -3335,11 +3336,11 @@ void RDPRenderer::capture_bmp(const char *path) {
     info_header.image_size = std::uint32_t(pixels.size());
     file_header.size = file_header.pixel_offset + info_header.image_size;
 
-    FILE *file = std::fopen(path, "wb");
+    core_file *file = core_file_open(path, "wb");
     if (!file)
         return;
-    std::fwrite(&file_header, 1, sizeof(file_header), file);
-    std::fwrite(&info_header, 1, sizeof(info_header), file);
-    std::fwrite(pixels.data(), 1, pixels.size(), file);
-    std::fclose(file);
+    core_file_write_items(&file_header, 1, sizeof(file_header), file);
+    core_file_write_items(&info_header, 1, sizeof(info_header), file);
+    core_file_write_items(pixels.data(), 1, pixels.size(), file);
+    core_file_close(file);
 }

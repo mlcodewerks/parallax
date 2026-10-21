@@ -1,3 +1,4 @@
+#include "core/file.h"
 /* Copyright (c) 2021 Themaister
  *
  * Permission is hereby granted, free of charge, to any person obtaining
@@ -31,7 +32,7 @@ RDPDumpWriter::~RDPDumpWriter()
 {
 	end();
 	if (file)
-		fclose(file);
+		core_file_close(file);
 }
 
 bool RDPDumpWriter::init(const char *path, uint32_t dram_size, uint32_t hidden_dram_size)
@@ -44,13 +45,13 @@ bool RDPDumpWriter::init(const char *path, uint32_t dram_size, uint32_t hidden_d
 	rdp_hidden_dram_cache.clear();
 	rdp_hidden_dram_cache.resize(hidden_dram_size);
 
-	file = fopen(path, "wb");
+	file = core_file_open(path, "wb");
 	if (!file)
 		return false;
 
-	fwrite("RDPDUMP2", 8, 1, file);
-	fwrite(&dram_size, sizeof(dram_size), 1, file);
-	fwrite(&hidden_dram_size, sizeof(hidden_dram_size), 1, file);
+	core_file_write_items("RDPDUMP2", 8, 1, file);
+	core_file_write_items(&dram_size, sizeof(dram_size), 1, file);
+	core_file_write_items(&hidden_dram_size, sizeof(hidden_dram_size), 1, file);
 	return true;
 }
 
@@ -60,7 +61,7 @@ void RDPDumpWriter::end_frame()
 		return;
 
 	uint32_t cmd = RDP_DUMP_CMD_END_FRAME;
-	fwrite(&cmd, sizeof(cmd), 1, file);
+	core_file_write_items(&cmd, sizeof(cmd), 1, file);
 }
 
 void RDPDumpWriter::end()
@@ -69,9 +70,9 @@ void RDPDumpWriter::end()
 		return;
 
 	uint32_t cmd = RDP_DUMP_CMD_EOF;
-	fwrite(&cmd, sizeof(cmd), 1, file);
+	core_file_write_items(&cmd, sizeof(cmd), 1, file);
 
-	fclose(file);
+	core_file_close(file);
 	file = nullptr;
 
 	rdp_dram_cache.clear();
@@ -94,16 +95,16 @@ void RDPDumpWriter::flush(const void *dram_, uint32_t size,
 		if (memcmp(dram + i, cache + i, block_size) != 0)
 		{
 			uint32_t cmd = block_cmd;
-			fwrite(&cmd, sizeof(cmd), 1, file);
-			fwrite(&i, sizeof(i), 1, file);
-			fwrite(&block_size, sizeof(block_size), 1, file);
-			fwrite(dram + i, 1, block_size, file);
+			core_file_write_items(&cmd, sizeof(cmd), 1, file);
+			core_file_write_items(&i, sizeof(i), 1, file);
+			core_file_write_items(&block_size, sizeof(block_size), 1, file);
+			core_file_write_items(dram + i, 1, block_size, file);
 			memcpy(cache + i, dram + i, block_size);
 		}
 	}
 
 	uint32_t cmd = flush_cmd;
-	fwrite(&cmd, sizeof(cmd), 1, file);
+	core_file_write_items(&cmd, sizeof(cmd), 1, file);
 
 }
 
@@ -123,7 +124,7 @@ void RDPDumpWriter::signal_complete()
 		return;
 
 	uint32_t cmd = RDP_DUMP_CMD_SIGNAL_COMPLETE;
-	fwrite(&cmd, sizeof(cmd), 1, file);
+	core_file_write_items(&cmd, sizeof(cmd), 1, file);
 }
 
 void RDPDumpWriter::emit_command(uint32_t command, const uint32_t *cmd_data, uint32_t cmd_words)
@@ -132,10 +133,10 @@ void RDPDumpWriter::emit_command(uint32_t command, const uint32_t *cmd_data, uin
 		return;
 
 	uint32_t cmd = RDP_DUMP_CMD_RDP_COMMAND;
-	fwrite(&cmd, sizeof(cmd), 1, file);
-	fwrite(&command, sizeof(command), 1, file);
-	fwrite(&cmd_words, sizeof(cmd_words), 1, file);
-	fwrite(cmd_data, sizeof(*cmd_data), cmd_words, file);
+	core_file_write_items(&cmd, sizeof(cmd), 1, file);
+	core_file_write_items(&command, sizeof(command), 1, file);
+	core_file_write_items(&cmd_words, sizeof(cmd_words), 1, file);
+	core_file_write_items(cmd_data, sizeof(*cmd_data), cmd_words, file);
 }
 
 void RDPDumpWriter::set_vi_register(uint32_t vi_register, uint32_t value)
@@ -144,8 +145,8 @@ void RDPDumpWriter::set_vi_register(uint32_t vi_register, uint32_t value)
 		return;
 
 	uint32_t cmd = RDP_DUMP_CMD_SET_VI_REGISTER;
-	fwrite(&cmd, sizeof(cmd), 1, file);
-	fwrite(&vi_register, sizeof(vi_register), 1, file);
-	fwrite(&value, sizeof(value), 1, file);
+	core_file_write_items(&cmd, sizeof(cmd), 1, file);
+	core_file_write_items(&vi_register, sizeof(vi_register), 1, file);
+	core_file_write_items(&value, sizeof(value), 1, file);
 }
 }

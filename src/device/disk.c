@@ -22,9 +22,9 @@
 #include <stdlib.h>
 #include "disk.h"
 
-#define M64P_CORE_PROTOTYPES 1
-#include "api/m64p_types.h"
-#include "api/callbacks.h"
+#define PARALLAX_CORE_PROTOTYPES 1
+#include "core/types.h"
+#include "core/log.h"
 #include "backends/api/storage_backend.h"
 #include "main/util.h"
 
@@ -304,7 +304,7 @@ static uint8_t* get_sector_base_sdk(const struct dd_disk* disk,
 
     if (lba > MAX_LBA)
     {
-        DebugMessage(M64MSG_ERROR, "Invalid LBA (Head:%d - Track:%04x - Block:%d)", head, track, block);
+        core_log(CORE_LOG_ERROR, "Invalid LBA (Head:%d - Track:%04x - Block:%d)", head, track, block);
         return NULL;
     }
 
@@ -331,7 +331,7 @@ static uint8_t* get_sector_base_sdk(const struct dd_disk* disk,
     }
 
     //if (lba <= MAX_LBA && sector == 0)
-    //    DebugMessage(M64MSG_VERBOSE, "LBA %d - Offset %08X - Size %04X", lba, offset, sector_size * SECTORS_PER_BLOCK);
+    //    core_log(CORE_LOG_VERBOSE, "LBA %d - Offset %08X - Size %04X", lba, offset, sector_size * SECTORS_PER_BLOCK);
 
     return disk->istorage->data(disk->storage) + offset;
 }
@@ -372,12 +372,12 @@ static uint8_t* get_sector_base_d64(const struct dd_disk* disk,
     else
     {
         //Invalid
-        DebugMessage(M64MSG_ERROR, "Invalid LBA (Head:%d - Track:%04x - Block:%d)", head, track, block);
+        core_log(CORE_LOG_ERROR, "Invalid LBA (Head:%d - Track:%04x - Block:%d)", head, track, block);
         return NULL;
     }
 
     //if (lba <= MAX_LBA && sector == 0)
-    //    DebugMessage(M64MSG_VERBOSE, "LBA %d - Offset %08X - Size %04X", lba, offset, sector_size * SECTORS_PER_BLOCK);
+    //    core_log(CORE_LOG_VERBOSE, "LBA %d - Offset %08X - Size %04X", lba, offset, sector_size * SECTORS_PER_BLOCK);
 
     return disk->istorage->data(disk->storage) + offset;
 }
@@ -476,7 +476,7 @@ uint8_t* scan_and_expand_disk_format(uint8_t* data, size_t size,
 
     if (isValidDisk == -1)
     {
-        DebugMessage(M64MSG_ERROR, "Invalid DD Disk System Data.");
+        core_log(CORE_LOG_ERROR, "Invalid DD Disk System Data.");
         return NULL;
     }
 
@@ -508,7 +508,7 @@ uint8_t* scan_and_expand_disk_format(uint8_t* data, size_t size,
 
         if (isValidDiskID == -1)
         {
-            DebugMessage(M64MSG_ERROR, "Invalid DD Disk ID Data.");
+            core_log(CORE_LOG_ERROR, "Invalid DD Disk ID Data.");
             return NULL;
         }
     }
@@ -530,24 +530,24 @@ uint8_t* scan_and_expand_disk_format(uint8_t* data, size_t size,
         size_t d64_size = D64_OFFSET_DATA + rom_size + ram_size;
         size_t full_d64_size = D64_OFFSET_DATA + rom_size + RAM_SIZES[disk_type];
 
-        //DebugMessage(M64MSG_INFO, "D64 Disk Areas - ROM: 0000 - %04X / RAM: %04X - %04X", rom_lba_end, ram_lba_start, ram_lba_end);
+        //core_log(CORE_LOG_INFO, "D64 Disk Areas - ROM: 0000 - %04X / RAM: %04X - %04X", rom_lba_end, ram_lba_start, ram_lba_end);
 
         if (ram_lba_start != (RAM_START_LBA[disk_type] - 24) && ram_lba_start != 0xFFFF)
         {
             isValidDisk = -1;
-            DebugMessage(M64MSG_ERROR, "Invalid D64 Disk RAM Start Info (expected %04X)", (RAM_START_LBA[disk_type] - SYSTEM_LBAS));
+            core_log(CORE_LOG_ERROR, "Invalid D64 Disk RAM Start Info (expected %04X)", (RAM_START_LBA[disk_type] - SYSTEM_LBAS));
         }
         else if (size != d64_size)
         {
             isValidDisk = -1;
-            DebugMessage(M64MSG_ERROR, "Invalid D64 Disk size %zu (calculated 0x200 + 0x%zx + 0x%zx = %zu).", size, rom_size, ram_size, d64_size);
+            core_log(CORE_LOG_ERROR, "Invalid D64 Disk size %zu (calculated 0x200 + 0x%zx + 0x%zx = %zu).", size, rom_size, ram_size, d64_size);
         }
         else
         {
             //Change Size to fit all of RAM Area possible
             uint8_t* buffer = malloc(full_d64_size);
             if (buffer == NULL) {
-                DebugMessage(M64MSG_ERROR, "Failed to allocate memory for D64 disk dump");
+                core_log(CORE_LOG_ERROR, "Failed to allocate memory for D64 disk dump");
                 return NULL;
             }
             memset(buffer, 0, full_d64_size);
@@ -599,7 +599,7 @@ uint8_t* scan_and_expand_disk_format(uint8_t* data, size_t size,
     default:
         if (isValidDisk == -1)
         {
-            DebugMessage(M64MSG_ERROR, "Invalid DD Disk size %zu.", size);
+            core_log(CORE_LOG_ERROR, "Invalid DD Disk size %zu.", size);
             return NULL;
         }
         else

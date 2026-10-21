@@ -1,7 +1,7 @@
 
 
-#ifndef M64P_DEVICE_R4300_CACHED_INTERP_H
-#define M64P_DEVICE_R4300_CACHED_INTERP_H
+#ifndef PARALLAX_DEVICE_R4300_CACHED_INTERP_H
+#define PARALLAX_DEVICE_R4300_CACHED_INTERP_H
 
 #include <stddef.h>
 #include <stdint.h>
@@ -24,4 +24,4 @@ uint64_t cached_dynarec_direct_links(struct r4300_core* r4300);
 void cached_dynarec_code_stats(struct r4300_core*, uint64_t stats[3]);
 #endif
 
-#endif /* M64P_DEVICE_R4300_CACHED_INTERP_H */
+#endif /* PARALLAX_DEVICE_R4300_CACHED_INTERP_H */

@@ -30,11 +30,11 @@
 #define __STDC_FORMAT_MACROS
 #include <inttypes.h>
 
-#define M64P_CORE_PROTOTYPES 1
-#include "api/callbacks.h"
-#include "api/config.h"
-#include "api/m64p_config.h"
-#include "api/m64p_types.h"
+#define PARALLAX_CORE_PROTOTYPES 1
+#include "core/log.h"
+
+#include "rom_database.h"
+#include "core/types.h"
 #include "device/device.h"
 #include "device/r4300/cached_interp.h"
 #include "main.h"
@@ -59,11 +59,11 @@ static _romdatabase g_romdatabase;
 /* Global loaded rom size. */
 int g_rom_size = 0;
 
-m64p_rom_header   ROM_HEADER;
+core_rom_header   ROM_HEADER;
 rom_params        ROM_PARAMS;
-m64p_rom_settings ROM_SETTINGS;
+core_rom_settings ROM_SETTINGS;
 
-static m64p_system_type rom_country_code_to_system_type(uint16_t country_code);
+static core_system_type rom_country_code_to_system_type(uint16_t country_code);
 
 static const uint8_t Z64_SIGNATURE[4] = { 0x80, 0x37, 0x12, 0x40 };
 static const uint8_t V64_SIGNATURE[4] = { 0x37, 0x80, 0x40, 0x12 };
@@ -107,7 +107,7 @@ static void swap_copy_rom(void* dst, const void* src, size_t len, unsigned char*
         /* .v64 images have byte-swapped half-words (16-bit). */
         for (i = 0; i < len; i += 2)
         {
-            *dst16++ = m64p_swap16(*src16++);
+            *dst16++ = core_swap16(*src16++);
         }
     }
     else if (memcmp(src, N64_SIGNATURE, sizeof(N64_SIGNATURE)) == 0)
@@ -120,7 +120,7 @@ static void swap_copy_rom(void* dst, const void* src, size_t len, unsigned char*
         /* .n64 images have byte-swapped words (32-bit). */
         for (i = 0; i < len; i += 4)
         {
-            *dst32++ = m64p_swap32(*src32++);
+            *dst32++ = core_swap32(*src32++);
         }
     }
     else {
@@ -129,7 +129,7 @@ static void swap_copy_rom(void* dst, const void* src, size_t len, unsigned char*
     }
 }
 
-m64p_error open_rom(const unsigned char* romimage, unsigned int size)
+core_result open_rom(const unsigned char* romimage, unsigned int size)
 {
     md5_state_t state;
     md5_byte_t digest[16];
@@ -141,8 +141,8 @@ m64p_error open_rom(const unsigned char* romimage, unsigned int size)
     /* check input requirements */
     if (romimage == NULL || !is_valid_rom(romimage))
     {
-        DebugMessage(M64MSG_ERROR, "open_rom(): not a valid ROM image");
-        return M64ERR_INPUT_INVALID;
+        core_log(CORE_LOG_ERROR, "open_rom(): not a valid ROM image");
+        return CORE_INVALID_INPUT;
     }
 
     /* Clear Byte-swapped flag, since ROM is now deleted. */
@@ -152,7 +152,7 @@ m64p_error open_rom(const unsigned char* romimage, unsigned int size)
     swap_copy_rom((uint8_t*)mem_base_u32(g_mem_base, MM_CART_ROM), romimage, size, &imagetype);
     /* ROM is now in N64 native (big endian) byte order */
 
-    memcpy(&ROM_HEADER, (uint8_t*)mem_base_u32(g_mem_base, MM_CART_ROM), sizeof(m64p_rom_header));
+    memcpy(&ROM_HEADER, (uint8_t*)mem_base_u32(g_mem_base, MM_CART_ROM), sizeof(core_rom_header));
 
     /* Calculate MD5 hash  */
     md5_init(&state);
@@ -208,34 +208,34 @@ m64p_error open_rom(const unsigned char* romimage, unsigned int size)
     }
 
     /* print out a bunch of info about the ROM */
-    DebugMessage(M64MSG_INFO, "Goodname: %s", ROM_SETTINGS.goodname);
-    DebugMessage(M64MSG_INFO, "Name: %s", ROM_HEADER.Name);
+    core_log(CORE_LOG_INFO, "Goodname: %s", ROM_SETTINGS.goodname);
+    core_log(CORE_LOG_INFO, "Name: %s", ROM_HEADER.Name);
     imagestring(imagetype, buffer);
-    DebugMessage(M64MSG_INFO, "MD5: %s", ROM_SETTINGS.MD5);
-    DebugMessage(M64MSG_INFO, "CRC: %08" PRIX32 " %08" PRIX32, tohl(ROM_HEADER.CRC1), tohl(ROM_HEADER.CRC2));
-    DebugMessage(M64MSG_INFO, "Imagetype: %s", buffer);
-    DebugMessage(M64MSG_INFO, "Rom size: %d bytes (or %d Mb or %d Megabits)", g_rom_size, g_rom_size/1024/1024, g_rom_size/1024/1024*8);
-    DebugMessage(M64MSG_VERBOSE, "ClockRate = %" PRIX32, tohl(ROM_HEADER.ClockRate));
-    DebugMessage(M64MSG_INFO, "Version: %" PRIX32, tohl(ROM_HEADER.Release));
+    core_log(CORE_LOG_INFO, "MD5: %s", ROM_SETTINGS.MD5);
+    core_log(CORE_LOG_INFO, "CRC: %08" PRIX32 " %08" PRIX32, tohl(ROM_HEADER.CRC1), tohl(ROM_HEADER.CRC2));
+    core_log(CORE_LOG_INFO, "Imagetype: %s", buffer);
+    core_log(CORE_LOG_INFO, "Rom size: %d bytes (or %d Mb or %d Megabits)", g_rom_size, g_rom_size/1024/1024, g_rom_size/1024/1024*8);
+    core_log(CORE_LOG_VERBOSE, "ClockRate = %" PRIX32, tohl(ROM_HEADER.ClockRate));
+    core_log(CORE_LOG_INFO, "Version: %" PRIX32, tohl(ROM_HEADER.Release));
     if(tohl(ROM_HEADER.Manufacturer_ID) == 'N')
-        DebugMessage(M64MSG_INFO, "Manufacturer: Nintendo");
+        core_log(CORE_LOG_INFO, "Manufacturer: Nintendo");
     else
-        DebugMessage(M64MSG_INFO, "Manufacturer: %" PRIX32, tohl(ROM_HEADER.Manufacturer_ID));
-    DebugMessage(M64MSG_VERBOSE, "Cartridge_ID: %" PRIX16, ROM_HEADER.Cartridge_ID);
+        core_log(CORE_LOG_INFO, "Manufacturer: %" PRIX32, tohl(ROM_HEADER.Manufacturer_ID));
+    core_log(CORE_LOG_VERBOSE, "Cartridge_ID: %" PRIX16, ROM_HEADER.Cartridge_ID);
     countrycodestring(ROM_HEADER.Country_code, buffer);
-    DebugMessage(M64MSG_INFO, "Country: %s", buffer);
-    DebugMessage(M64MSG_VERBOSE, "PC = %" PRIX32, tohl(ROM_HEADER.PC));
-    DebugMessage(M64MSG_VERBOSE, "Save type: %d", ROM_SETTINGS.savetype);
+    core_log(CORE_LOG_INFO, "Country: %s", buffer);
+    core_log(CORE_LOG_VERBOSE, "PC = %" PRIX32, tohl(ROM_HEADER.PC));
+    core_log(CORE_LOG_VERBOSE, "Save type: %d", ROM_SETTINGS.savetype);
 
-    return M64ERR_SUCCESS;
+    return CORE_OK;
 }
 
-m64p_error close_rom(void)
+core_result close_rom(void)
 {
     if (g_dev.r4300.cached_interp) {
         uint64_t cache[2];
         cached_interp_cache_stats(&g_dev.r4300, cache);
-        DebugMessage(M64MSG_INFO, "Cached CPU blocks: decoded=%" PRIu64 " restored=%" PRIu64,
+        core_log(CORE_LOG_INFO, "Cached CPU blocks: decoded=%" PRIu64 " restored=%" PRIu64,
             cache[0], cache[1]);
     }
 #ifdef HAVE_ARI64_X64
@@ -243,13 +243,13 @@ m64p_error close_rom(void)
         uint64_t stats[4], optimized[2], code[3];
         cached_dynarec_stats(&g_dev.r4300, stats);
         cached_dynarec_optimization_stats(&g_dev.r4300, optimized);
-        DebugMessage(M64MSG_INFO, "Ari64 x64: blocks=%" PRIu64 " native=%" PRIu64
+        core_log(CORE_LOG_INFO, "Ari64 x64: blocks=%" PRIu64 " native=%" PRIu64
             " entries=%" PRIu64 " commits=%" PRIu64,
             stats[0], stats[1], stats[2], stats[3]);
-        DebugMessage(M64MSG_INFO, "Ari64 optimization: fast=%" PRIu64 " links=%" PRIu64 " direct=%" PRIu64,
+        core_log(CORE_LOG_INFO, "Ari64 optimization: fast=%" PRIu64 " links=%" PRIu64 " direct=%" PRIu64,
             optimized[0], optimized[1], cached_dynarec_direct_links(&g_dev.r4300));
         cached_dynarec_code_stats(&g_dev.r4300, code);
-        DebugMessage(M64MSG_INFO, "Ari64 linkage: bytes=%" PRIu64 " relative_calls=%" PRIu64 " absolute_calls=%" PRIu64,
+        core_log(CORE_LOG_INFO, "Ari64 linkage: bytes=%" PRIu64 " relative_calls=%" PRIu64 " absolute_calls=%" PRIu64,
             code[0], code[1], code[2]);
     }
 #endif
@@ -257,16 +257,16 @@ m64p_error close_rom(void)
 
     /* Clear Byte-swapped flag, since ROM is now deleted. */
     g_RomWordsLittleEndian = 0;
-    DebugMessage(M64MSG_STATUS, "Rom closed.");
+    core_log(CORE_LOG_STATUS, "Rom closed.");
 
-    return M64ERR_SUCCESS;
+    return CORE_OK;
 }
 
 /********************************************************************************************/
 /* ROM utility functions */
 
 // Get the system type associated to a ROM country code.
-static m64p_system_type rom_country_code_to_system_type(uint16_t country_code)
+static core_system_type rom_country_code_to_system_type(uint16_t country_code)
 {
     switch (country_code & UINT16_C(0xFF))
     {
@@ -304,7 +304,7 @@ static size_t romdatabase_resolve_round(void)
 
         ref = ini_search_by_md5(entry->entry.refmd5);
         if (!ref) {
-            DebugMessage(M64MSG_WARNING, "ROM Database: Error solving RefMD5s");
+            core_log(CORE_LOG_WARNING, "ROM Database: Error solving RefMD5s");
             continue;
         }
 
@@ -410,7 +410,7 @@ static void romdatabase_resolve(void)
     do {
         skipped = romdatabase_resolve_round();
         if (skipped == last_skipped) {
-            DebugMessage(M64MSG_ERROR, "Unable to resolve rom database entries (loop)");
+            core_log(CORE_LOG_ERROR, "Unable to resolve rom database entries (loop)");
             break;
         }
         last_skipped = skipped;
@@ -422,24 +422,17 @@ static void romdatabase_resolve(void)
 
 void romdatabase_open(void)
 {
-    FILE *fPtr;
+    const char *cursor = inifile;
     char buffer[256];
     romdatabase_search* search = NULL;
     romdatabase_search** next_search;
 
     int counter, value, lineno;
     unsigned char index;
-    const char *pathname = ConfigGetSharedDataFilepath("mupen64plus.ini");
+
 
     if(g_romdatabase.have_database)
         return;
-
-    /* Open romdatabase. */
-    if (pathname == NULL || (fPtr = fopen(pathname, "rb")) == NULL)
-    {
-        DebugMessage(M64MSG_ERROR, "Unable to open rom database file '%s'.", pathname);
-        return;
-    }
 
     g_romdatabase.have_database = 1;
 
@@ -453,8 +446,15 @@ void romdatabase_open(void)
     next_search = &g_romdatabase.list;
 
     /* Parse ROM database file */
-    for (lineno = 1; fgets(buffer, 255, fPtr) != NULL; lineno++)
+    for (lineno = 1; *cursor; lineno++)
     {
+        size_t length = 0;
+        while (*cursor && length < 254) {
+            char ch = *cursor++;
+            buffer[length++] = ch;
+            if (ch == '\n') break;
+        }
+        buffer[length] = 0;
         char *line = buffer;
         ini_line l = ini_parse_line(&line);
         switch (l.type)
@@ -464,7 +464,7 @@ void romdatabase_open(void)
             md5_byte_t md5[16];
             if (!parse_hex(l.name, md5, 16))
             {
-                DebugMessage(M64MSG_WARNING, "ROM Database: Invalid MD5 on line %i", lineno);
+                core_log(CORE_LOG_WARNING, "ROM Database: Invalid MD5 on line %i", lineno);
                 search = NULL;
                 continue;
             }
@@ -507,7 +507,7 @@ void romdatabase_open(void)
             // or if some error happened on INI_SECTION (e.g. parsing).
             if (search == NULL)
             {
-                DebugMessage(M64MSG_WARNING, "ROM Database: Ignoring property on line %i", lineno);
+                core_log(CORE_LOG_WARNING, "ROM Database: Ignoring property on line %i", lineno);
                 continue;
             }
             if(!strcmp(l.name, "GoodName"))
@@ -530,7 +530,7 @@ void romdatabase_open(void)
                 else
                 {
                     search->entry.crc1 = search->entry.crc2 = 0;
-                    DebugMessage(M64MSG_WARNING, "ROM Database: Invalid CRC on line %i", lineno);
+                    core_log(CORE_LOG_WARNING, "ROM Database: Invalid CRC on line %i", lineno);
                 }
             }
             else if(!strcmp(l.name, "RefMD5"))
@@ -542,7 +542,7 @@ void romdatabase_open(void)
                     memcpy(search->entry.refmd5, md5, 16);
                 }
                 else
-                    DebugMessage(M64MSG_WARNING, "ROM Database: Invalid RefMD5 on line %i", lineno);
+                    core_log(CORE_LOG_WARNING, "ROM Database: Invalid RefMD5 on line %i", lineno);
             }
             else if(!strcmp(l.name, "SaveType"))
             {
@@ -565,7 +565,7 @@ void romdatabase_open(void)
                     search->entry.savetype = SAVETYPE_NONE;
                     search->entry.set_flags |= ROMDATABASE_ENTRY_SAVETYPE;
                 } else {
-                    DebugMessage(M64MSG_WARNING, "ROM Database: Invalid save type on line %i", lineno);
+                    core_log(CORE_LOG_WARNING, "ROM Database: Invalid save type on line %i", lineno);
                 }
             }
             else if(!strcmp(l.name, "Status"))
@@ -574,7 +574,7 @@ void romdatabase_open(void)
                     search->entry.status = value;
                     search->entry.set_flags |= ROMDATABASE_ENTRY_STATUS;
                 } else {
-                    DebugMessage(M64MSG_WARNING, "ROM Database: Invalid status on line %i", lineno);
+                    core_log(CORE_LOG_WARNING, "ROM Database: Invalid status on line %i", lineno);
                 }
             }
             else if(!strcmp(l.name, "Players"))
@@ -583,7 +583,7 @@ void romdatabase_open(void)
                     search->entry.players = value;
                     search->entry.set_flags |= ROMDATABASE_ENTRY_PLAYERS;
                 } else {
-                    DebugMessage(M64MSG_WARNING, "ROM Database: Invalid player count on line %i", lineno);
+                    core_log(CORE_LOG_WARNING, "ROM Database: Invalid player count on line %i", lineno);
                 }
             }
             else if(!strcmp(l.name, "Rumble"))
@@ -595,7 +595,7 @@ void romdatabase_open(void)
                     search->entry.rumble = 0;
                     search->entry.set_flags |= ROMDATABASE_ENTRY_RUMBLE;
                 } else {
-                    DebugMessage(M64MSG_WARNING, "ROM Database: Invalid rumble string on line %i", lineno);
+                    core_log(CORE_LOG_WARNING, "ROM Database: Invalid rumble string on line %i", lineno);
                 }
             }
             else if(!strcmp(l.name, "CountPerOp"))
@@ -604,7 +604,7 @@ void romdatabase_open(void)
                     search->entry.countperop = value;
                     search->entry.set_flags |= ROMDATABASE_ENTRY_COUNTEROP;
                 } else {
-                    DebugMessage(M64MSG_WARNING, "ROM Database: Invalid CountPerOp on line %i", lineno);
+                    core_log(CORE_LOG_WARNING, "ROM Database: Invalid CountPerOp on line %i", lineno);
                 }
             }
             else if (!strcmp(l.name, "DisableExtraMem"))
@@ -630,7 +630,7 @@ void romdatabase_open(void)
                 if (len1 != 0 && len2 > 0) {
                     newcheat = malloc(len1 + 1 + len2 + 1);
                     if (!newcheat) {
-                        DebugMessage(M64MSG_WARNING, "ROM Database: Failed to append cheat");
+                        core_log(CORE_LOG_WARNING, "ROM Database: Failed to append cheat");
                     } else {
                         strcpy(newcheat, search->entry.cheats);
                         strcat(newcheat, ";");
@@ -651,7 +651,7 @@ void romdatabase_open(void)
                     search->entry.transferpak = 0;
                     search->entry.set_flags |= ROMDATABASE_ENTRY_TRANSFERPAK;
                 } else {
-                    DebugMessage(M64MSG_WARNING, "ROM Database: Invalid transferpak string on line %i", lineno);
+                    core_log(CORE_LOG_WARNING, "ROM Database: Invalid transferpak string on line %i", lineno);
                 }
             }
             else if(!strcmp(l.name, "Mempak"))
@@ -663,7 +663,7 @@ void romdatabase_open(void)
                     search->entry.mempak = 0;
                     search->entry.set_flags |= ROMDATABASE_ENTRY_MEMPAK;
                 } else {
-                    DebugMessage(M64MSG_WARNING, "ROM Database: Invalid mempak string on line %i", lineno);
+                    core_log(CORE_LOG_WARNING, "ROM Database: Invalid mempak string on line %i", lineno);
                 }
             }
             else if(!strcmp(l.name, "Biopak"))
@@ -675,7 +675,7 @@ void romdatabase_open(void)
                     search->entry.biopak = 0;
                     search->entry.set_flags |= ROMDATABASE_ENTRY_BIOPAK;
                 } else {
-                    DebugMessage(M64MSG_WARNING, "ROM Database: Invalid biopak string on line %i", lineno);
+                    core_log(CORE_LOG_WARNING, "ROM Database: Invalid biopak string on line %i", lineno);
                 }
             }
             else if(!strcmp(l.name, "SiDmaDuration"))
@@ -684,12 +684,12 @@ void romdatabase_open(void)
                     search->entry.sidmaduration = value;
                     search->entry.set_flags |= ROMDATABASE_ENTRY_SIDMADURATION;
                 } else {
-                    DebugMessage(M64MSG_WARNING, "ROM Database: Invalid SiDmaDuration on line %i", lineno);
+                    core_log(CORE_LOG_WARNING, "ROM Database: Invalid SiDmaDuration on line %i", lineno);
                 }
             }
             else
             {
-                DebugMessage(M64MSG_WARNING, "ROM Database: Unknown property on line %i", lineno);
+                core_log(CORE_LOG_WARNING, "ROM Database: Unknown property on line %i", lineno);
             }
             break;
         default:
@@ -697,7 +697,6 @@ void romdatabase_open(void)
         }
     }
 
-    fclose(fPtr);
     romdatabase_resolve();
 }
 
@@ -717,7 +716,7 @@ void romdatabase_close(void)
         free(g_romdatabase.list);
         g_romdatabase.list = search;
         }
-    /* The indices point into the freed list. A subsequent CoreStartup must
+    /* The indices point into the freed list. A subsequent content load must
      * rebuild the database rather than treating those pointers as live. */
     memset(&g_romdatabase, 0, sizeof(g_romdatabase));
 }

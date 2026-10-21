@@ -19,14 +19,14 @@
  *   51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.          *
  * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
 
-#ifndef M64P_R4300_INTERP_MEMORY_H
-#define M64P_R4300_INTERP_MEMORY_H
+#ifndef PARALLAX_R4300_INTERP_MEMORY_H
+#define PARALLAX_R4300_INTERP_MEMORY_H
 #include "r4300_core.h"
 #include "timing.h"
 #include "tlb.h"
 #include "device/memory.h"
 #include "device/rdram.h"
-#include "api/callbacks.h"
+#include "core/log.h"
 
 #if defined(__GNUC__) || defined(__clang__)
 #define INTERP_MEM_LIKELY(x) __builtin_expect(!!(x), 1)
@@ -123,7 +123,7 @@ static osal_force_inline int interp_read_aligned_dword(struct r4300_core* r4300,
     uint32_t w1;
 
     if (INTERP_MEM_UNLIKELY((address & UINT32_C(7)) != 0))
-        DebugMessage(M64MSG_WARNING, "Unaligned dword read %08x", address);
+        core_log(CORE_LOG_WARNING, "Unaligned dword read %08x", address);
 
     if (INTERP_MEM_UNLIKELY((address & UINT32_C(0xc0000000)) != UINT32_C(0x80000000)))
     {
@@ -182,7 +182,7 @@ static osal_force_inline int interp_write_aligned_dword(struct r4300_core* r4300
 {
     const uint32_t virtual_address = address;
     if (INTERP_MEM_UNLIKELY((address & UINT32_C(7)) != 0))
-        DebugMessage(M64MSG_WARNING, "Unaligned dword write %08x", address);
+        core_log(CORE_LOG_WARNING, "Unaligned dword write %08x", address);
 
     if (INTERP_MEM_UNLIKELY((address & UINT32_C(0xc0000000)) != UINT32_C(0x80000000)))
     {

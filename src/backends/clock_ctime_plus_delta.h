@@ -19,8 +19,8 @@
  *   51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.          *
  * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
 
-#ifndef M64P_BACKENDS_CLOCK_CTIME_PLUS_DELTA_H
-#define M64P_BACKENDS_CLOCK_CTIME_PLUS_DELTA_H
+#ifndef PARALLAX_BACKENDS_CLOCK_CTIME_PLUS_DELTA_H
+#define PARALLAX_BACKENDS_CLOCK_CTIME_PLUS_DELTA_H
 
 #include "backends/api/clock_backend.h"
 

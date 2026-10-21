@@ -29,16 +29,17 @@
 
 #include "device/memory.h"
 #include "device/r4300/r4300_core.h"
-#include "device/rcp/mi_controller.h"
+#include "device/rcp/rcp.h"
 #include "device/rcp/rdp/rdp_core.h"
-#include "device/rcp/ri_controller.h"
+#include "device/rcp/rcp.h"
 #include "device/rdram.h"
 #include "main/main.h"
 #if defined(PROFILE)
 #include "main/profile.h"
 #endif
-#include "plugin/plugin.h"
-#include "api/callbacks.h"
+#include "core/backend.h"
+#include "optional_rsp.h"
+#include "core/log.h"
 #include "rsp_ucode_capture.h"
 
 static void do_sp_dma(struct rsp_core* sp, const struct sp_dma* dma, int64_t start)
@@ -109,7 +110,7 @@ static void fifo_push(struct rsp_core* sp, uint32_t dir)
 {
     if (sp->regs[SP_DMA_FULL_REG])
     {
-        DebugMessage(M64MSG_WARNING, "RSP DMA attempted but FIFO queue already full.");
+        core_log(CORE_LOG_WARNING, "RSP DMA attempted but FIFO queue already full.");
         return;
     }
 
@@ -334,12 +335,12 @@ static void do_SP_Task_at(struct rsp_core* sp, int64_t start_clock, uint32_t ove
     {
         unprotect_framebuffers(&sp->dp->fb);
 
-        //gfx.processDList();
+        //renderer_process_display_list();
         sp->regs2[SP_PC_REG] &= 0xfff;
 #if defined(PROFILE)
         timed_section_start(TIMED_SECTION_GFX);
 #endif
-        executed_cycles = rsp.doRspCycles(0xffffffff);
+        executed_cycles = optional_rsp_execute(0xffffffff);
 #if defined(PROFILE)
         timed_section_end(TIMED_SECTION_GFX);
 #endif
@@ -357,7 +358,7 @@ static void do_SP_Task_at(struct rsp_core* sp, int64_t start_clock, uint32_t ove
 #if defined(PROFILE)
         timed_section_start(TIMED_SECTION_AUDIO);
 #endif
-        executed_cycles = rsp.doRspCycles(0xffffffff);
+        executed_cycles = optional_rsp_execute(0xffffffff);
 #if defined(PROFILE)
         timed_section_end(TIMED_SECTION_AUDIO);
 #endif
@@ -368,7 +369,7 @@ static void do_SP_Task_at(struct rsp_core* sp, int64_t start_clock, uint32_t ove
     else
     {
         sp->regs2[SP_PC_REG] &= 0xfff;
-        executed_cycles = rsp.doRspCycles(0xffffffff);
+        executed_cycles = optional_rsp_execute(0xffffffff);
         sp->regs2[SP_PC_REG] |= save_pc;
 
         sp_delay_time = 0;

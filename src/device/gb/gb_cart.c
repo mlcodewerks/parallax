@@ -25,8 +25,8 @@
 
 #include "gb_cart.h"
 
-#include "api/m64p_types.h"
-#include "api/callbacks.h"
+#include "core/types.h"
+#include "core/log.h"
 #include "backends/api/rumble_backend.h"
 #include "backends/api/storage_backend.h"
 #include "backends/api/video_capture_backend.h"
@@ -60,7 +60,7 @@ static void read_rom(const void* rom_storage, const struct storage_backend_inter
 
     if (address + size > irom_storage->size(rom_storage))
     {
-        DebugMessage(M64MSG_WARNING, "Out of bound read from GB ROM %04x", address);
+        core_log(CORE_LOG_WARNING, "Out of bound read from GB ROM %04x", address);
         return;
     }
 
@@ -75,21 +75,21 @@ static void read_ram(const void* ram_storage, const struct storage_backend_inter
 
     /* RAM has to be enabled before use */
     if (!enabled) {
-        DebugMessage(M64MSG_WARNING, "Trying to read from non enabled GB RAM %04x", address);
+        core_log(CORE_LOG_WARNING, "Trying to read from non enabled GB RAM %04x", address);
         memset(data, 0xff, size);
         return;
     }
 
     /* RAM must be present */
     if (iram_storage->data(ram_storage) == NULL) {
-        DebugMessage(M64MSG_WARNING, "Trying to read from absent GB RAM %04x", address);
+        core_log(CORE_LOG_WARNING, "Trying to read from absent GB RAM %04x", address);
         memset(data, 0xff, size);
         return;
     }
 
     if (address + size > iram_storage->size(ram_storage))
     {
-        DebugMessage(M64MSG_WARNING, "Out of bound read from GB RAM %04x", address);
+        core_log(CORE_LOG_WARNING, "Out of bound read from GB RAM %04x", address);
         return;
     }
 
@@ -111,19 +111,19 @@ static void write_ram(void* ram_storage, const struct storage_backend_interface*
 
     /* RAM has to be enabled before use */
     if (!enabled) {
-        DebugMessage(M64MSG_WARNING, "Trying to write to non enabled GB RAM %04x", address);
+        core_log(CORE_LOG_WARNING, "Trying to write to non enabled GB RAM %04x", address);
         return;
     }
 
     /* RAM must be present */
     if (iram_storage->data(ram_storage) == NULL) {
-        DebugMessage(M64MSG_WARNING, "Trying to write to absent GB RAM %04x", address);
+        core_log(CORE_LOG_WARNING, "Trying to write to absent GB RAM %04x", address);
         return;
     }
 
     if (address + size > iram_storage->size(ram_storage))
     {
-        DebugMessage(M64MSG_WARNING, "Out of bound write to GB RAM %04x", address);
+        core_log(CORE_LOG_WARNING, "Out of bound write to GB RAM %04x", address);
         return;
     }
 
@@ -142,7 +142,7 @@ static void write_ram(void* ram_storage, const struct storage_backend_interface*
 static void set_ram_enable(struct gb_cart* gb_cart, uint8_t value)
 {
     gb_cart->ram_enable = ((value & 0x0f) == 0x0a) ? 1 : 0;
-    DebugMessage(M64MSG_VERBOSE, "RAM enable = %02x", gb_cart->ram_enable);
+    core_log(CORE_LOG_VERBOSE, "RAM enable = %02x", gb_cart->ram_enable);
 }
 
 
@@ -166,7 +166,7 @@ static int read_gb_cart_nombc(struct gb_cart* gb_cart, uint16_t address, uint8_t
         break;
 
     default:
-        DebugMessage(M64MSG_WARNING, "Invalid cart read (nombc): %04x", address);
+        core_log(CORE_LOG_WARNING, "Invalid cart read (nombc): %04x", address);
     }
 
     return 0;
@@ -181,7 +181,7 @@ static int write_gb_cart_nombc(struct gb_cart* gb_cart, uint16_t address, const 
     case (0x2000 >> 13):
     case (0x4000 >> 13):
     case (0x6000 >> 13):
-        DebugMessage(M64MSG_VERBOSE, "Trying to write to GB ROM %04x", address);
+        core_log(CORE_LOG_VERBOSE, "Trying to write to GB ROM %04x", address);
         break;
 
     /* 0xa000-0xbfff: RAM */
@@ -190,7 +190,7 @@ static int write_gb_cart_nombc(struct gb_cart* gb_cart, uint16_t address, const 
         break;
 
     default:
-        DebugMessage(M64MSG_WARNING, "Invalid cart write (nombc): %04x", address);
+        core_log(CORE_LOG_WARNING, "Invalid cart write (nombc): %04x", address);
     }
 
     return 0;
@@ -219,7 +219,7 @@ static int read_gb_cart_mbc1(struct gb_cart* gb_cart, uint16_t address, uint8_t*
         break;
 
     default:
-        DebugMessage(M64MSG_WARNING, "Invalid cart read (MBC1): %04x", address);
+        core_log(CORE_LOG_WARNING, "Invalid cart read (MBC1): %04x", address);
     }
 
     return 0;
@@ -241,7 +241,7 @@ static int write_gb_cart_mbc1(struct gb_cart* gb_cart, uint16_t address, const u
     case (0x2000 >> 13):
         bank = value & 0x1f;
         gb_cart->rom_bank = (gb_cart->rom_bank & ~UINT8_C(0x1f)) | (bank == 0) ? 1 : bank;
-        DebugMessage(M64MSG_VERBOSE, "MBC1 set rom bank %02x", gb_cart->rom_bank);
+        core_log(CORE_LOG_VERBOSE, "MBC1 set rom bank %02x", gb_cart->rom_bank);
         break;
 
     /* 0x4000-0x5fff: RAM bank / upper ROM bank select (2 bits) */
@@ -255,7 +255,7 @@ static int write_gb_cart_mbc1(struct gb_cart* gb_cart, uint16_t address, const u
             /* RAM mode */
             gb_cart->ram_bank = bank;
         }
-        DebugMessage(M64MSG_VERBOSE, "MBC1 set ram bank %02x", gb_cart->ram_bank);
+        core_log(CORE_LOG_VERBOSE, "MBC1 set ram bank %02x", gb_cart->ram_bank);
         break;
 
     /* 0x6000-0x7fff: ROM/RAM mode (1 bit) */
@@ -276,7 +276,7 @@ static int write_gb_cart_mbc1(struct gb_cart* gb_cart, uint16_t address, const u
         break;
 
     default:
-        DebugMessage(M64MSG_WARNING, "Invalid cart write (MBC1): %04x", address);
+        core_log(CORE_LOG_WARNING, "Invalid cart write (MBC1): %04x", address);
     }
 
     return 0;
@@ -304,7 +304,7 @@ static int read_gb_cart_mbc2(struct gb_cart* gb_cart, uint16_t address, uint8_t*
         break;
 
     default:
-        DebugMessage(M64MSG_WARNING, "Invalid cart read (MBC2): %04x", address);
+        core_log(CORE_LOG_WARNING, "Invalid cart read (MBC2): %04x", address);
     }
 
     return 0;
@@ -329,7 +329,7 @@ static int write_gb_cart_mbc2(struct gb_cart* gb_cart, uint16_t address, const u
         if ((address & 0x0100) != 0) {
             bank = value & 0x0f;
             gb_cart->rom_bank = (bank == 0) ? 1 : bank;
-            DebugMessage(M64MSG_VERBOSE, "MBC2 set rom bank %02x", gb_cart->rom_bank);
+            core_log(CORE_LOG_VERBOSE, "MBC2 set rom bank %02x", gb_cart->rom_bank);
         }
         break;
 
@@ -339,7 +339,7 @@ static int write_gb_cart_mbc2(struct gb_cart* gb_cart, uint16_t address, const u
         break;
 
     default:
-        DebugMessage(M64MSG_WARNING, "Invalid cart write (MBC2): %04x", address);
+        core_log(CORE_LOG_WARNING, "Invalid cart write (MBC2): %04x", address);
     }
 
     return 0;
@@ -386,13 +386,13 @@ static int read_gb_cart_mbc3(struct gb_cart* gb_cart, uint16_t address, uint8_t*
         case 0x0c:
             /* RAM has to be enabled before use */
             if (!gb_cart->ram_enable) {
-                DebugMessage(M64MSG_WARNING, "Trying to read from non enabled GB RAM %04x", address);
+                core_log(CORE_LOG_WARNING, "Trying to read from non enabled GB RAM %04x", address);
                 memset(data, 0xff, size);
                 break;
             }
 
             if (!(gb_cart->extra_devices & GED_RTC)) {
-                DebugMessage(M64MSG_WARNING, "Trying to read from absent RTC %04x", address);
+                core_log(CORE_LOG_WARNING, "Trying to read from absent RTC %04x", address);
                 memset(data, 0xff, size);
                 break;
             }
@@ -401,12 +401,12 @@ static int read_gb_cart_mbc3(struct gb_cart* gb_cart, uint16_t address, uint8_t*
             break;
 
         default:
-            DebugMessage(M64MSG_WARNING, "Unknown device mapped in RAM/RTC space: %04x", address);
+            core_log(CORE_LOG_WARNING, "Unknown device mapped in RAM/RTC space: %04x", address);
         }
         break;
 
     default:
-        DebugMessage(M64MSG_WARNING, "Invalid cart read (MBC3): %04x", address);
+        core_log(CORE_LOG_WARNING, "Invalid cart read (MBC3): %04x", address);
     }
 
     return 0;
@@ -428,19 +428,19 @@ static int write_gb_cart_mbc3(struct gb_cart* gb_cart, uint16_t address, const u
     case (0x2000 >> 13):
         bank = value & 0x7f;
         gb_cart->rom_bank = (bank == 0) ? 1 : bank;
-        DebugMessage(M64MSG_VERBOSE, "MBC3 set rom bank %02x", gb_cart->rom_bank);
+        core_log(CORE_LOG_VERBOSE, "MBC3 set rom bank %02x", gb_cart->rom_bank);
         break;
 
     /* 0x4000-0x5fff: RAM bank / RTC register select */
     case (0x4000 >> 13):
         gb_cart->ram_bank = value;
-        DebugMessage(M64MSG_VERBOSE, "MBC3 set ram bank %02x", gb_cart->ram_bank);
+        core_log(CORE_LOG_VERBOSE, "MBC3 set ram bank %02x", gb_cart->ram_bank);
         break;
 
     /* 0x6000-0x7fff: latch clock registers */
     case (0x6000 >> 13):
         if (!(gb_cart->extra_devices & GED_RTC)) {
-            DebugMessage(M64MSG_WARNING, "Trying to latch to absent RTC %04x", address);
+            core_log(CORE_LOG_WARNING, "Trying to latch to absent RTC %04x", address);
             break;
         }
 
@@ -471,12 +471,12 @@ static int write_gb_cart_mbc3(struct gb_cart* gb_cart, uint16_t address, const u
         case 0x0c:
             /* RAM has to be enabled before use */
             if (!gb_cart->ram_enable) {
-                DebugMessage(M64MSG_WARNING, "Trying to write to non enabled GB RAM %04x", address);
+                core_log(CORE_LOG_WARNING, "Trying to write to non enabled GB RAM %04x", address);
                 break;
             }
 
             if (!(gb_cart->extra_devices & GED_RTC)) {
-                DebugMessage(M64MSG_WARNING, "Trying to write to absent RTC %04x", address);
+                core_log(CORE_LOG_WARNING, "Trying to write to absent RTC %04x", address);
                 break;
             }
 
@@ -484,12 +484,12 @@ static int write_gb_cart_mbc3(struct gb_cart* gb_cart, uint16_t address, const u
             break;
 
         default:
-            DebugMessage(M64MSG_WARNING, "Unknwown device mapped in RAM/RTC space: %04x", address);
+            core_log(CORE_LOG_WARNING, "Unknwown device mapped in RAM/RTC space: %04x", address);
         }
         break;
 
     default:
-        DebugMessage(M64MSG_WARNING, "Invalid cart write (MBC3): %04x", address);
+        core_log(CORE_LOG_WARNING, "Invalid cart write (MBC3): %04x", address);
     }
 
     return 0;
@@ -517,7 +517,7 @@ static int read_gb_cart_mbc5(struct gb_cart* gb_cart, uint16_t address, uint8_t*
         break;
 
     default:
-        DebugMessage(M64MSG_WARNING, "Invalid cart read (MBC5): %04x", address);
+        core_log(CORE_LOG_WARNING, "Invalid cart read (MBC5): %04x", address);
     }
 
     return 0;
@@ -546,7 +546,7 @@ static int write_gb_cart_mbc5(struct gb_cart* gb_cart, uint16_t address, const u
             gb_cart->rom_bank &= 0x00ff;
             gb_cart->rom_bank |= (value & 0x01) << 8;
         }
-        DebugMessage(M64MSG_VERBOSE, "MBC5 set rom bank %04x", gb_cart->rom_bank);
+        core_log(CORE_LOG_VERBOSE, "MBC5 set rom bank %04x", gb_cart->rom_bank);
         break;
 
     /* 0x4000-0x5fff: RAM bank select */
@@ -555,7 +555,7 @@ static int write_gb_cart_mbc5(struct gb_cart* gb_cart, uint16_t address, const u
         if (gb_cart->extra_devices & GED_RUMBLE) {
             gb_cart->irumble->exec(gb_cart->rumble, ((gb_cart->ram_bank & 0x8) == 0) ? RUMBLE_STOP : RUMBLE_START);
         }
-        DebugMessage(M64MSG_VERBOSE, "MBC5 set ram bank %02x", gb_cart->ram_bank);
+        core_log(CORE_LOG_VERBOSE, "MBC5 set ram bank %02x", gb_cart->ram_bank);
         break;
 
     /* 0xa000-0xbfff: RAM bank 00-0f */
@@ -564,7 +564,7 @@ static int write_gb_cart_mbc5(struct gb_cart* gb_cart, uint16_t address, const u
         break;
 
     default:
-        DebugMessage(M64MSG_WARNING, "Invalid cart write (MBC5): %04x", address);
+        core_log(CORE_LOG_WARNING, "Invalid cart write (MBC5): %04x", address);
     }
 
     return 0;
@@ -639,7 +639,7 @@ static void grab_pocket_cam_image(struct pocket_cam* cam)
     regs[M64282FP_E_I_V] = cam->regs[4];
 
 #if 0
-    DebugMessage(M64MSG_INFO, "GB cam regs:\n"
+    core_log(CORE_LOG_INFO, "GB cam regs:\n"
         "P=%02x M=%02x X=%02x N_VH_G=%02x C=%04x E_I_V=%02x Z_O=%02x\n"
         "%02x %02x %02x  %02x %02x %02x  %02x %02x %02x  %02x %02x %02x\n"
         "%02x %02x %02x  %02x %02x %02x  %02x %02x %02x  %02x %02x %02x\n"
@@ -666,7 +666,7 @@ static void grab_pocket_cam_image(struct pocket_cam* cam)
 #endif
 
     /* grab BGR image */
-    if (cam->ivcap->grab_image(cam->vcap, bgr) != M64ERR_SUCCESS) {
+    if (cam->ivcap->grab_image(cam->vcap, bgr) != CORE_OK) {
         memset(cam->ram, UINT8_C(0xff), sizeof(tiles));
         return;
     }
@@ -734,7 +734,7 @@ static void write_pocket_cam_regs(struct pocket_cam* cam, unsigned int reg, uint
 {
     if (reg >= POCKET_CAM_REGS_COUNT) {
 #if 0 /* silence it because it happens always (2x32 bytes writes go past 0x36 registers) */
-        DebugMessage(M64MSG_WARNING, "Out of range camera register write %02x = %02x",
+        core_log(CORE_LOG_WARNING, "Out of range camera register write %02x = %02x",
             reg, value);
 #endif
         return;
@@ -783,7 +783,7 @@ static int read_gb_cart_pocket_cam(struct gb_cart* gb_cart, uint16_t address, ui
         break;
 
     default:
-        DebugMessage(M64MSG_WARNING, "Invalid cart read (cam): %04x", address);
+        core_log(CORE_LOG_WARNING, "Invalid cart read (cam): %04x", address);
     }
 
     return 0;
@@ -803,18 +803,18 @@ static int write_gb_cart_pocket_cam(struct gb_cart* gb_cart, uint16_t address, c
     /* 0x2000-0x3fff: ROM bank select */
     case (0x2000 >> 13):
         gb_cart->rom_bank = (value & 0x3f);
-        DebugMessage(M64MSG_VERBOSE, "CAM set rom bank %04x", gb_cart->rom_bank);
+        core_log(CORE_LOG_VERBOSE, "CAM set rom bank %04x", gb_cart->rom_bank);
         break;
 
     /* 0x4000-0x5fff: RAM bank select */
     case (0x4000 >> 13):
         if (value & 0x10) {
             gb_cart->ram_bank = value;
-            DebugMessage(M64MSG_VERBOSE, "CAM set register bank %02x", gb_cart->ram_bank);
+            core_log(CORE_LOG_VERBOSE, "CAM set register bank %02x", gb_cart->ram_bank);
         }
         else {
             gb_cart->ram_bank = (value & 0x0f);
-            DebugMessage(M64MSG_VERBOSE, "CAM set ram bank %02x", gb_cart->ram_bank);
+            core_log(CORE_LOG_VERBOSE, "CAM set ram bank %02x", gb_cart->ram_bank);
         }
         break;
 
@@ -832,7 +832,7 @@ static int write_gb_cart_pocket_cam(struct gb_cart* gb_cart, uint16_t address, c
         break;
 
     default:
-        DebugMessage(M64MSG_WARNING, "Invalid cart write (cam): %04x", address);
+        core_log(CORE_LOG_WARNING, "Invalid cart write (cam): %04x", address);
     }
 
     return 0;
@@ -995,7 +995,7 @@ void init_gb_cart(struct gb_cart* gb_cart,
     const uint8_t* rom_data = irom_storage->data(rom_storage);
     if (rom_data == NULL || irom_storage->size(rom_storage) < 0x8000)
     {
-        DebugMessage(M64MSG_ERROR, "Invalid GB ROM file size (< 32k)");
+        core_log(CORE_LOG_ERROR, "Invalid GB ROM file size (< 32k)");
         goto error_release_rom;
     }
 
@@ -1004,11 +1004,11 @@ void init_gb_cart(struct gb_cart* gb_cart,
     type = parse_cart_type(cart_type);
     if (type == NULL)
     {
-        DebugMessage(M64MSG_ERROR, "Invalid GB cart type (%02x)", cart_type);
+        core_log(CORE_LOG_ERROR, "Invalid GB cart type (%02x)", cart_type);
         goto error_release_rom;
     }
 
-    DebugMessage(M64MSG_INFO, "GB cart type (%02x) %s%s%s%s%s%s%s",
+    core_log(CORE_LOG_INFO, "GB cart type (%02x) %s%s%s%s%s%s%s",
             cart_type,
             type->mbc,
             (type->extra_devices & GED_RAM)            ? " RAM" : "",
@@ -1041,17 +1041,17 @@ void init_gb_cart(struct gb_cart* gb_cart,
 
             /* check that init_ram succeeded */
             if (iram_storage == NULL) {
-                DebugMessage(M64MSG_ERROR, "Failed to initialize GB RAM");
+                core_log(CORE_LOG_ERROR, "Failed to initialize GB RAM");
                 goto error_release_ram;
             }
 
             if (iram_storage->data(ram_storage) == NULL || iram_storage->size(ram_storage) != ram_size)
             {
-                DebugMessage(M64MSG_ERROR, "Cannot get GB RAM (%d bytes)", (uint32_t) ram_size);
+                core_log(CORE_LOG_ERROR, "Cannot get GB RAM (%d bytes)", (uint32_t) ram_size);
                 goto error_release_ram;
             }
 
-            DebugMessage(M64MSG_INFO, "Using a %d bytes GB RAM", (uint32_t) ram_size);
+            core_log(CORE_LOG_INFO, "Using a %d bytes GB RAM", (uint32_t) ram_size);
         }
     }
 

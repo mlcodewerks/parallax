@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
-#ifndef M64P_INTERP_PAIR_H
-#define M64P_INTERP_PAIR_H
+#ifndef PARALLAX_INTERP_PAIR_H
+#define PARALLAX_INTERP_PAIR_H
 
 /* LUI followed by a nontrapping immediate operation on its destination.
  * The caller must keep the pair within one code page and exclude interrupt

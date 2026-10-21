@@ -1,6 +1,6 @@
 /* Ari64 x64 emitter integration. GPL-2.0-or-later. */
-#ifndef M64P_ARI64_X64_H
-#define M64P_ARI64_X64_H
+#ifndef PARALLAX_ARI64_X64_H
+#define PARALLAX_ARI64_X64_H
 #include <stddef.h>
 #include <stdint.h>
 struct r4300_core;

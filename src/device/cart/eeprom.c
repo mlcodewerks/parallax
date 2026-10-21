@@ -24,8 +24,8 @@
 #include <stdint.h>
 #include <string.h>
 
-#include "api/callbacks.h"
-#include "api/m64p_types.h"
+#include "core/log.h"
+#include "core/types.h"
 #include "backends/api/storage_backend.h"
 
 #define __STDC_FORMAT_MACROS
@@ -60,7 +60,7 @@ void eeprom_read_block(struct eeprom* eeprom,
     }
     else
     {
-        DebugMessage(M64MSG_WARNING, "Invalid access to eeprom address=%04x", address);
+        core_log(CORE_LOG_WARNING, "Invalid access to eeprom address=%04x", address);
     }
 }
 
@@ -77,7 +77,7 @@ void eeprom_write_block(struct eeprom* eeprom,
     }
     else
     {
-        DebugMessage(M64MSG_WARNING, "Invalid access to eeprom address=%04x", address);
+        core_log(CORE_LOG_WARNING, "Invalid access to eeprom address=%04x", address);
     }
 }
 

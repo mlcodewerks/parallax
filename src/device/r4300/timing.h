@@ -1,5 +1,5 @@
-#ifndef M64P_DEVICE_R4300_TIMING_H
-#define M64P_DEVICE_R4300_TIMING_H
+#ifndef PARALLAX_DEVICE_R4300_TIMING_H
+#define PARALLAX_DEVICE_R4300_TIMING_H
 
 #include "cp0.h"
 #include "r4300_core.h"

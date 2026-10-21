@@ -26,7 +26,7 @@
 #include <md5.h>
 #include <stdint.h>
 
-#include "api/m64p_types.h"
+#include "core/types.h"
 
 #define BIT(bitnr) (1ULL << (bitnr))
 #ifdef __GNUC__
@@ -38,21 +38,21 @@
 
 /* ROM Loading and Saving functions */
 
-m64p_error open_rom(const unsigned char* romimage, unsigned int size);
-m64p_error close_rom(void);
+core_result open_rom(const unsigned char* romimage, unsigned int size);
+core_result close_rom(void);
 
 extern int g_rom_size;
 
 typedef struct _rom_params
 {
    char *cheats;
-   m64p_system_type systemtype;
+   core_system_type systemtype;
    char headername[21];  /* ROM Name as in the header, removing trailing whitespace */
 } rom_params;
 
-extern m64p_rom_header   ROM_HEADER;
+extern core_rom_header   ROM_HEADER;
 extern rom_params        ROM_PARAMS;
-extern m64p_rom_settings ROM_SETTINGS;
+extern core_rom_settings ROM_SETTINGS;
 
 /* Supported rom compressiontypes. */
 enum 

@@ -25,8 +25,8 @@
 #include <stdint.h>
 #include <string.h>
 
-#include "api/callbacks.h"
-#include "api/m64p_types.h"
+#include "core/log.h"
+#include "core/types.h"
 
 #define __STDC_FORMAT_MACROS
 #include <inttypes.h>
@@ -57,7 +57,7 @@ void init_cic_using_ipl3(struct cic* cic, const void* ipl3)
     switch(crc)
     {
         default:
-            DebugMessage(M64MSG_WARNING, "Unknown CIC type (%016" PRIX64 ")! using CIC 6102.", crc);
+            core_log(CORE_LOG_WARNING, "Unknown CIC type (%016" PRIX64 ")! using CIC 6102.", crc);
             /* fall through */
         case UINT64_C(0x000000D057C85244): i = 2; break; /* CIC_X102 */
         case UINT64_C(0x000000D0027FDF31):               /* CIC_X101 */
@@ -74,6 +74,6 @@ void init_cic_using_ipl3(struct cic* cic, const void* ipl3)
 
     memcpy(cic, &cics[i], sizeof(*cic));
 
-    DebugMessage(M64MSG_INFO, "Using CIC type %s", cic->name);
+    core_log(CORE_LOG_INFO, "Using CIC type %s", cic->name);
 }
 

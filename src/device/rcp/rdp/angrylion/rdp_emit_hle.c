@@ -3,7 +3,7 @@
 #include <stdlib.h>
 /* rdp_emit_hle.c -- activation glue for the angrylion HLE-graphics path.
  *
- * Called from angrylionProcessDList(). The core wires ProcessDList only when
+ * Called from renderer_process_display_list(). The core wires ProcessDList only when
  * the RSP plugin is HLE -- under cxd4/parallel the RDP is fed directly via
  * ProcessRDPList and this is never reached -- so there is no added cost to
  * the low-level configurations and no separate enable flag is needed.

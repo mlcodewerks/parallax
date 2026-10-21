@@ -1,3 +1,4 @@
+#include "core/file.h"
 /* Audio task capture for the cxd4 replay oracle.
  *
  * The HLE audio microcodes are verified by replaying captured tasks
@@ -118,15 +119,15 @@ static void audit_capture_task(struct hle_t* hle)
 
     {
         char  path[256];
-        FILE* f;
+        core_file* f;
 
         snprintf(path, sizeof(path), "/tmp/ucodes/mp3scene_%08x_%d.bin",
                  sig, nscenes[slot]);
-        f = fopen(path, "wb");
+        f = core_file_open(path, "wb");
         if (f != NULL) {
-            fwrite(hle->dram, 1, 0x800000, f);
-            fwrite(hle->dmem, 1, 0x1000, f);
-            fclose(f);
+            core_file_write_items(hle->dram, 1, 0x800000, f);
+            core_file_write_items(hle->dmem, 1, 0x1000, f);
+            core_file_close(f);
             ++nscenes[slot];
         }
     }

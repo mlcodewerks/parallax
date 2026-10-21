@@ -1,5 +1,5 @@
-#ifndef M64P_R4300_CACHE_TIMING_H
-#define M64P_R4300_CACHE_TIMING_H
+#ifndef PARALLAX_R4300_CACHE_TIMING_H
+#define PARALLAX_R4300_CACHE_TIMING_H
 #include "device/memory.h"
 
 /* Shared compatibility hit estimate, including the existing cache handoff. */

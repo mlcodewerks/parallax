@@ -19,8 +19,8 @@
  *   51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.          *
  * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
 
-#ifndef M64P_DEVICE_MEMORY_MEMORY_H
-#define M64P_DEVICE_MEMORY_MEMORY_H
+#ifndef PARALLAX_DEVICE_MEMORY_MEMORY_H
+#define PARALLAX_DEVICE_MEMORY_MEMORY_H
 
 #include <stddef.h>
 #include <stdint.h>
@@ -33,6 +33,8 @@ enum { DD_ROM_MAX_SIZE = 0x400000 };
 
 typedef void (*read32fn)(void*,uint32_t,uint32_t*);
 typedef void (*write32fn)(void*,uint32_t,uint32_t,uint32_t);
+
+enum core_memory_type { CORE_MEMORY_NOMEM, CORE_MEMORY_NOTHING, CORE_MEMORY_RDRAM, CORE_MEMORY_RDRAMREG, CORE_MEMORY_RSPMEM, CORE_MEMORY_RSPREG, CORE_MEMORY_RSP, CORE_MEMORY_DP, CORE_MEMORY_DPS, CORE_MEMORY_VI, CORE_MEMORY_AI, CORE_MEMORY_PI, CORE_MEMORY_RI, CORE_MEMORY_SI, CORE_MEMORY_FLASHRAMSTAT, CORE_MEMORY_ROM, CORE_MEMORY_PIF, CORE_MEMORY_MI, CORE_MEMORY_BREAKPOINT };
 
 struct mem_handler
 {
@@ -54,12 +56,6 @@ struct memory
     struct mem_handler handlers[0x10000];
     void* base;
 
-#ifdef DBG
-    int memtype[0x10000];
-    unsigned char bp_checks[0x10000];
-    struct mem_handler saved_handlers[0x10000];
-    struct mem_handler dbg_handler;
-#endif
 };
 
 static osal_force_inline void masked_write(uint32_t* dst, uint32_t value, uint32_t mask)
@@ -96,13 +92,6 @@ uint32_t* mem_base_u32(void* mem_base, uint32_t address);
 void read_with_bp_checks(void* opaque, uint32_t address, uint32_t* value);
 void write_with_bp_checks(void* opaque, uint32_t address, uint32_t value, uint32_t mask);
 
-#ifdef DBG
-void activate_memory_break_read(struct memory* mem, uint32_t address);
-void deactivate_memory_break_read(struct memory* mem, uint32_t address);
-void activate_memory_break_write(struct memory* mem, uint32_t address);
-void deactivate_memory_break_write(struct memory* mem, uint32_t address);
-int get_memory_type(struct memory* mem, uint32_t address);
-#endif
 
 #endif
 

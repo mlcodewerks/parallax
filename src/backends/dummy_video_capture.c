@@ -34,18 +34,18 @@ struct dummy_video_capture
     size_t size;
 };
 
-static m64p_error dummy_init(void** vcap, const char* config)
+static core_result dummy_init(void** vcap, const char* config)
 {
     struct dummy_video_capture* dummy = malloc(sizeof(*dummy));
     if (dummy == NULL) {
         *vcap = NULL;
-        return M64ERR_NO_MEMORY;
+        return CORE_NO_MEMORY;
     }
 
     memset(dummy, 0, sizeof(*dummy));
 
     *vcap = dummy;
-    return M64ERR_SUCCESS;
+    return CORE_OK;
 }
 
 static void dummy_release(void* vcap)
@@ -53,11 +53,11 @@ static void dummy_release(void* vcap)
     free(vcap);
 }
 
-static m64p_error dummy_open(void* vcap, unsigned int width, unsigned int height)
+static core_result dummy_open(void* vcap, unsigned int width, unsigned int height)
 {
     struct dummy_video_capture* dummy = (struct dummy_video_capture*)vcap;
     dummy->size = 3 * width * height;
-    return M64ERR_SUCCESS;
+    return CORE_OK;
 }
 
 static void dummy_close(void* vcap)
@@ -66,11 +66,11 @@ static void dummy_close(void* vcap)
     dummy->size = 0;
 }
 
-static m64p_error dummy_grab_image(void* vcap, void* data)
+static core_result dummy_grab_image(void* vcap, void* data)
 {
     struct dummy_video_capture* dummy = (struct dummy_video_capture*)vcap;
     memset(data, 0, dummy->size);
-    return M64ERR_SUCCESS;
+    return CORE_OK;
 }
 
 const struct video_capture_backend_interface g_idummy_video_capture_backend =

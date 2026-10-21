@@ -344,7 +344,7 @@ static void _nop(jit_state_t*,jit_int32_t);
 #  define CLST(R1,R2)			RRE_(0xB25D,R1,R2)
 /* COMPARE UNTIL SUBSTRING EQUAL */
 #  define CUSE(R1,R2)			RRE_(0xB257,R1,R2)
-/* COMPRESSION CALL */
+/* COMPRESSION CORE_CALL */
 #  define CMPSC(R1,R2)			RRE_(0xB263,R1,R2)
 /* COMPUTE INTERMEDIATE MESSAGE DIGEST (KIMD) */
 #  define KIMD(R1,R2)			RRE_(0xB93E,R1,R2)
@@ -487,7 +487,7 @@ static void _nop(jit_state_t*,jit_int32_t);
 #  define LRVH(R1,D2,X2,B2)		RXY_(0xE3,R1,X2,B2,D2,0x1F)
 #  define LRV(R1,D2,X2,B2)		RXY_(0xE3,R1,X2,B2,D2,0x1E)
 #  define LRVG(R1,D2,X2,B2)		RXY_(0xE3,R1,X2,B2,D2,0x0F)
-/* MONITOR CALL */
+/* MONITOR CORE_CALL */
 #  define MC(D1,B1,I2)			SI_(0xAF,I2,B1,D1)
 /* MOVE */
 #  define MVI(D1,B1,I2)			SI_(0x92,I2,B1,D1)
@@ -642,7 +642,7 @@ static void _nop(jit_state_t*,jit_int32_t);
 #  define SLBGR(R1,R2)			RRE_(0xB989,R1,R2)
 #  define SLB(R1,D2,X2,B2)		RXY_(0xE3,R1,X2,B2,D2,0x99)
 #  define SLBG(R1,D2,X2,B2)		RXY_(0xE3,R1,X2,B2,D2,0x89)
-/* SUPERVISOR CALL */
+/* SUPERVISOR CORE_CALL */
 #  define SVC(I)			I_(0xA,I)
 /* TEST ADDRESSING MODE */
 #  define TAM()				E_(0x10B)
@@ -727,7 +727,7 @@ static void _nop(jit_state_t*,jit_int32_t);
 #  define EREGG(R1,R2)			RRE_(0xB90E,R1,R2)
 /* EXTRACT STACKED STATE */
 #  define ESTA(R1,R2)			RRE_(0xB24A,R1,R2)
-/* INSERT ADDRESS SPACE CONTROL */
+/* INSERT ADDRESS SPACE core_controller */
 #  define IAC(R1)			RRE_(0xB224,R1,0)
 /* INSERT PSW KEY */
 #  define IPK()				S_(0xB20B,0,0)
@@ -741,7 +741,7 @@ static void _nop(jit_state_t*,jit_int32_t);
 #  define IPTE(R1,R2)			RRE_(0xB221,R1,R2)
 /* LOAD ADDRESS SPACE PARAMETER */
 #  define LASP(D1,B1,D2,B2)		SSE_(0xE500,B1,D1,B2,D2)
-/* LOAD CONTROL */
+/* LOAD core_controller */
 #  define LCTL(R1,R3,D2,B2)		RS_(0xB7,R1,R3,B2,D2)
 #  define LCTLG(R1,R3,D2,B2)		RSY_(0xEB,R1,R3,B2,D2,0x2F)
 /* LOAD PSW */
@@ -773,7 +773,7 @@ static void _nop(jit_state_t*,jit_int32_t);
 #  define PGIN(R1,R2)			RRE_(0xB22E,R1,R2)
 /* PAGE OUT */
 #  define PGOUT(R1,R2)			RRE_(0xB22F,R1,R2)
-/* PROGRAM CALL */
+/* PROGRAM CORE_CALL */
 #  define PC(D2,B2)			S_(0xB218,B2,D2)
 /* PROGRAM RETURN */
 #  define PR()				E_(0x0101)
@@ -787,9 +787,9 @@ static void _nop(jit_state_t*,jit_int32_t);
 #  define RRBE(R1,R2)			RRE_(0xB22A,R1,R2)
 /* RESUME PROGRAM */
 #  define RP(D2,B2)			S_(0xB277,B2,D2)
-/* SET ADDRESS SPACE CONTROL */
+/* SET ADDRESS SPACE core_controller */
 #  define SAC(D2,B2)			S_(0xB219,B2,D2)
-/* SET ADDRESS SPACE CONTROL FAST */
+/* SET ADDRESS SPACE core_controller FAST */
 #  define SACF(D2,B2)			S_(0xB279,B2,D2)
 /* SET CLOCK */
 #  define SCK(D2,B2)			S_(0xB204,B2,D2)
@@ -813,7 +813,7 @@ static void _nop(jit_state_t*,jit_int32_t);
 #  define SIGP(R1,R3,D2,B2)		RS_(0xAE,R1,R3,B2,D2)
 /* STORE CLOCK COMPARATOR */
 #  define STCKC(D2,B2)			S_(0xB207,B2,D2)
-/* STORE CONTROL */
+/* STORE core_controller */
 #  define STCTL(R1,R3,D2,B2)		RS_(0xB6,R1,R3,B2,D2)
 #  define STCTG(R1,R3,D2,B2)		RSY_(0xEB,R1,R3,B2,D2,0x25)
 /* STORE CPU ADDRESS */

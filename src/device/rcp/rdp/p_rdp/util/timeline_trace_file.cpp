@@ -1,3 +1,4 @@
+#include "core/file.h"
 /* Copyright (c) 2017-2023 Hans-Kristian Arntzen
  *
  * Permission is hereby granted, free of charge, to any person obtaining
@@ -100,12 +101,12 @@ void TimelineTraceFile::looper(std::string path)
 {
 	set_current_thread_name("json-trace-io");
 
-	FILE *file = fopen(path.c_str(), "w");
+	core_file *file = core_file_open(path.c_str(), "w");
 	if (!file)
 		LOGE("Failed to open file: %s.\n", path.c_str());
 
 	if (file)
-		fputs("[\n", file);
+		core_file_write_items("[\n", 1, 2, file);
 
 	uint64_t base_ts = get_current_time_nsecs();
 
@@ -129,9 +130,9 @@ void TimelineTraceFile::looper(std::string path)
 
 		if (file && start_us <= end_us)
 		{
-			fprintf(file, "{ \"name\": \"%s\", \"ph\": \"B\", \"tid\": \"%s\", \"pid\": \"%u\", \"ts\": %f },\n",
+			core_file_printf(file, "{ \"name\": \"%s\", \"ph\": \"B\", \"tid\": \"%s\", \"pid\": \"%u\", \"ts\": %f },\n",
 			        e->desc, e->tid, e->pid, start_us);
-			fprintf(file, "{ \"name\": \"%s\", \"ph\": \"E\", \"tid\": \"%s\", \"pid\": \"%u\", \"ts\": %f },\n",
+			core_file_printf(file, "{ \"name\": \"%s\", \"ph\": \"E\", \"tid\": \"%s\", \"pid\": \"%u\", \"ts\": %f },\n",
 			        e->desc, e->tid, e->pid, end_us);
 		}
 
@@ -140,7 +141,7 @@ void TimelineTraceFile::looper(std::string path)
 
 	// Intentionally truncate the JSON so that we can emit "," after the last element.
 	if (file)
-		fclose(file);
+		core_file_close(file);
 }
 
 TimelineTraceFile::~TimelineTraceFile()

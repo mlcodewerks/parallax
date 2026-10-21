@@ -19,8 +19,8 @@
  *   51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.          *
  * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
 
-#ifndef M64P_DEVICE_R4300_INTERRUPT_H
-#define M64P_DEVICE_R4300_INTERRUPT_H
+#ifndef PARALLAX_DEVICE_R4300_INTERRUPT_H
+#define PARALLAX_DEVICE_R4300_INTERRUPT_H
 
 #include <stdint.h>
 
@@ -66,4 +66,4 @@ void nmi_int_handler(void* opaque);
 #define NMI_INT     0x400
 #define RSP_DMA_EVT 0x800
 
-#endif /* M64P_DEVICE_R4300_INTERRUPT_H */
+#endif /* PARALLAX_DEVICE_R4300_INTERRUPT_H */

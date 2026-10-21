@@ -21,8 +21,8 @@
 
 #include "cart.h"
 
-#include "api/callbacks.h"
-#include "api/m64p_types.h"
+#include "core/log.h"
+#include "core/types.h"
 
 #include "main/rom.h"
 
@@ -83,7 +83,7 @@ static void process_cart_command(void* jbd,
     } break;
 
     default:
-        DebugMessage(M64MSG_WARNING, "cart: Unknown command %02x %02x %02x",
+        core_log(CORE_LOG_WARNING, "cart: Unknown command %02x %02x %02x",
             *tx, *rx, cmd);
     }
 }
@@ -158,7 +158,7 @@ void read_cart_dom2(void* opaque, uint32_t address, uint32_t* value)
     {
         if ((address & 0xffff) != 0)
         {
-            DebugMessage(M64MSG_ERROR, "unknown read in read_cart_dom2()");
+            core_log(CORE_LOG_ERROR, "unknown read in read_cart_dom2()");
             return;
         }
 
@@ -179,7 +179,7 @@ void write_cart_dom2(void* opaque, uint32_t address, uint32_t value, uint32_t ma
     {
         if ((address & 0xffff) != 0)
         {
-            DebugMessage(M64MSG_ERROR, "unknown write in write_cart_dom2()");
+            core_log(CORE_LOG_ERROR, "unknown write in write_cart_dom2()");
             return;
         }
 

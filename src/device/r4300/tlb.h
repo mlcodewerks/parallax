@@ -19,8 +19,8 @@
  *   51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.          *
  * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
 
-#ifndef M64P_DEVICE_R4300_TLB_H
-#define M64P_DEVICE_R4300_TLB_H
+#ifndef PARALLAX_DEVICE_R4300_TLB_H
+#define PARALLAX_DEVICE_R4300_TLB_H
 
 #include <stddef.h>
 #include <stdint.h>
@@ -66,4 +66,4 @@ void tlb_map(struct tlb* tlb, size_t entry);
 
 uint32_t virtual_to_physical_address(struct r4300_core* r4300, uint32_t address, int w);
 
-#endif /* M64P_DEVICE_R4300_TLB_H */
+#endif /* PARALLAX_DEVICE_R4300_TLB_H */

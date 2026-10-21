@@ -19,8 +19,8 @@
  *   51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.          *
  * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
 
-#ifndef M64P_DEVICE_R4300_CP0_H
-#define M64P_DEVICE_R4300_CP0_H
+#ifndef PARALLAX_DEVICE_R4300_CP0_H
+#define PARALLAX_DEVICE_R4300_CP0_H
 
 #include <stdint.h>
 
@@ -232,5 +232,5 @@ void cp0_update_count(struct r4300_core* r4300);
 void TLB_refill_exception(struct r4300_core* r4300, uint32_t address, int w);
 void exception_general(struct r4300_core* r4300);
 
-#endif /* M64P_DEVICE_R4300_CP0_H */
+#endif /* PARALLAX_DEVICE_R4300_CP0_H */
 

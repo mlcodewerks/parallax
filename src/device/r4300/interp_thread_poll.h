@@ -1,12 +1,12 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
-#ifndef M64P_INTERP_THREAD_POLL_H
-#define M64P_INTERP_THREAD_POLL_H
+#ifndef PARALLAX_INTERP_THREAD_POLL_H
+#define PARALLAX_INTERP_THREAD_POLL_H
 #include <string.h>
 #include "timing.h"
 #include "pure_interp.h"
 #include "device/memory.h"
 #include "device/rdram.h"
-#include "device/rcp/mi_controller.h"
+#include "device/rcp/rcp.h"
 
 /* An SDK thread-ID wait calls a getter that disables interrupts, reads the
  * running thread's ID, restores interrupts and compares a RAM flag. Recognize

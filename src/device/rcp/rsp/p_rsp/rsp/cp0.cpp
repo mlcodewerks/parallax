@@ -2,11 +2,11 @@
 #include "../dpc_bridge.h"
 
 #ifdef PARALLEL_INTEGRATION
-#include "../rsp_1.1.h"
-#include "m64p_plugin.h"
+#include "core/backend.h"
+#include "core/backend.h"
 namespace RSP
 {
-extern RSP_INFO rsp;
+extern rsp_memory rsp;
 extern short MFC0_count[32];
 extern int SP_STATUS_TIMEOUT;
 } // namespace RSP
@@ -356,7 +356,7 @@ extern "C"
 			*rsp->cp0.cr[CP0_REGISTER_CMD_END] = val & 0xfffffff8u;
 
 #ifdef PARALLEL_INTEGRATION
-			RSP::rsp.ProcessRdpList();
+			renderer_process_commands();
 #endif
 			break;
 

@@ -24,8 +24,8 @@
 
 #include <string.h>
 
-#include "api/callbacks.h"
-#include "api/m64p_types.h"
+#include "core/log.h"
+#include "core/types.h"
 #include "backends/api/storage_backend.h"
 #include "device/memory.h"
 
@@ -67,7 +67,7 @@ static void flashram_command(struct flashram* flashram, uint32_t command)
             flashram->istorage->save(flashram->storage, 0, FLASHRAM_SIZE);
         }
         else {
-            DebugMessage(M64MSG_WARNING, "Unexpected erase command (mode=%x)", flashram->mode);
+            core_log(CORE_LOG_WARNING, "Unexpected erase command (mode=%x)", flashram->mode);
         }
 
         /* clear erase busy flag, set erase success flag, transition to status mode */
@@ -115,7 +115,7 @@ static void flashram_command(struct flashram* flashram, uint32_t command)
         break;
 
     default:
-        DebugMessage(M64MSG_WARNING, "unknown flashram command: %" PRIX32, command);
+        core_log(CORE_LOG_WARNING, "unknown flashram command: %" PRIX32, command);
     }
 }
 
@@ -158,7 +158,7 @@ void read_flashram(void* opaque, uint32_t address, uint32_t* value)
     }
     else {
         /* other accesses are not implemented */
-        DebugMessage(M64MSG_WARNING, "unknown Flashram read IO (mode=%x) @%08x", flashram->mode, address);
+        core_log(CORE_LOG_WARNING, "unknown Flashram read IO (mode=%x) @%08x", flashram->mode, address);
     }
 }
 
@@ -176,7 +176,7 @@ void write_flashram(void* opaque, uint32_t address, uint32_t value, uint32_t mas
     }
     else {
         /* other accesses are not implemented */
-        DebugMessage(M64MSG_WARNING, "unknown Flashram write IO (mode=%x) @%08x <- %08x & %08x", flashram->mode, address, value, mask);
+        core_log(CORE_LOG_WARNING, "unknown Flashram write IO (mode=%x) @%08x <- %08x & %08x", flashram->mode, address, value, mask);
     }
 }
 
@@ -213,7 +213,7 @@ unsigned int flashram_dma_write(void* opaque, uint8_t* dram, uint32_t dram_addr,
     }
     else {
         /* other accesses are not implemented */
-        DebugMessage(M64MSG_WARNING, "unknown Flashram DMA Write (mode=%x) @%08x <- %08x length=%08x",
+        core_log(CORE_LOG_WARNING, "unknown Flashram DMA Write (mode=%x) @%08x <- %08x length=%08x",
             flashram->mode, dram_addr, cart_addr, length);
     }
 
@@ -233,7 +233,7 @@ unsigned int flashram_dma_read(void* opaque, const uint8_t* dram, uint32_t dram_
     }
     else {
         /* other accesses are not implemented */
-        DebugMessage(M64MSG_WARNING, "unknown Flashram DMA Read (mode=%x) @%08x <- %08x length=%08x",
+        core_log(CORE_LOG_WARNING, "unknown Flashram DMA Read (mode=%x) @%08x <- %08x length=%08x",
             flashram->mode, cart_addr, dram_addr, length);
     }
 

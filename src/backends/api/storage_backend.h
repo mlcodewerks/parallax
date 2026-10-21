@@ -19,8 +19,8 @@
  *   51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.          *
  * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
 
-#ifndef M64P_BACKENDS_API_STORAGE_BACKEND_H
-#define M64P_BACKENDS_API_STORAGE_BACKEND_H
+#ifndef PARALLAX_BACKENDS_API_STORAGE_BACKEND_H
+#define PARALLAX_BACKENDS_API_STORAGE_BACKEND_H
 
 #include <stddef.h>
 #include <stdint.h>

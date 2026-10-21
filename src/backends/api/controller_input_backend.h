@@ -19,10 +19,10 @@
  *   51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.          *
  * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
 
-#ifndef M64P_BACKENDS_API_CONTROLLER_INPUT_BACKEND_H
-#define M64P_BACKENDS_API_CONTROLLER_INPUT_BACKEND_H
+#ifndef PARALLAX_BACKENDS_API_CONTROLLER_INPUT_BACKEND_H
+#define PARALLAX_BACKENDS_API_CONTROLLER_INPUT_BACKEND_H
 
-#include "api/m64p_types.h"
+#include "core/types.h"
 
 #include <stdint.h>
 
@@ -58,9 +58,9 @@ struct controller_input_backend_interface
 {
     /* Get emulated controller input status (32-bit)
      * Encoding of the input status depends on the emulated controller flavor.
-     * Returns M64ERR_SUCCESS on success
+     * Returns CORE_OK on success
      */
-    m64p_error (*get_input)(void* cin, uint32_t* input);
+    core_result (*get_input)(void* cin, uint32_t* input);
 };
 
 #endif

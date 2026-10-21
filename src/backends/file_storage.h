@@ -19,8 +19,8 @@
  *   51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.          *
  * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
 
-#ifndef M64P_MAIN_FILE_STORAGE_H
-#define M64P_MAIN_FILE_STORAGE_H
+#ifndef PARALLAX_MAIN_FILE_STORAGE_H
+#define PARALLAX_MAIN_FILE_STORAGE_H
 
 #include <stddef.h>
 #include <stdint.h>

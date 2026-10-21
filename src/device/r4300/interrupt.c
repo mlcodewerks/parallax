@@ -19,7 +19,7 @@
  *   51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.          *
  * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
 
-#define M64P_CORE_PROTOTYPES 1
+#define PARALLAX_CORE_PROTOTYPES 1
 
 #include "interrupt.h"
 
@@ -33,13 +33,13 @@
 #include <stdint.h>
 #include <string.h>
 
-#include "api/callbacks.h"
-#include "api/m64p_types.h"
+#include "core/log.h"
+#include "core/types.h"
 #include "device/pif/bootrom_hle.h"
 #include "device/r4300/cp0.h"
 #include "device/r4300/r4300_core.h"
-#include "device/rcp/ai_controller.h"
-#include "device/rcp/rdp/vi_controller.h"
+#include "device/rcp/rcp.h"
+#include "device/rcp/rcp.h"
 #include "main/main.h"
 
 
@@ -113,13 +113,13 @@ static void insert_interrupt_event(struct cp0* cp0, int type, uint32_t count, in
     struct node* e;
 
     if (get_event(&cp0->q, type)) {
-        DebugMessage(M64MSG_WARNING, "two events of type 0x%x in interrupt queue", type);
+        core_log(CORE_LOG_WARNING, "two events of type 0x%x in interrupt queue", type);
     }
 
     event = alloc_node(&cp0->q.pool);
     if (event == NULL)
     {
-        DebugMessage(M64MSG_ERROR, "Failed to allocate node for new interrupt event");
+        core_log(CORE_LOG_ERROR, "Failed to allocate node for new interrupt event");
         return;
     }
 
@@ -348,7 +348,7 @@ void r4300_check_interrupt(struct r4300_core* r4300, uint32_t cause_ip, int set_
         event = alloc_node(&r4300->cp0.q.pool);
         if (event == NULL)
         {
-            DebugMessage(M64MSG_ERROR, "Failed to allocate node for new interrupt event");
+            core_log(CORE_LOG_ERROR, "Failed to allocate node for new interrupt event");
             return;
         }
 
@@ -550,7 +550,7 @@ void gen_interrupt(struct r4300_core* r4300)
             break;
 
         default:
-            DebugMessage(M64MSG_ERROR, "Unknown interrupt queue event type %.8X.", r4300->cp0.q.first->data.type);
+            core_log(CORE_LOG_ERROR, "Unknown interrupt queue event type %.8X.", r4300->cp0.q.first->data.type);
             remove_interrupt_event(&r4300->cp0);
             exception_general(r4300);
             break;

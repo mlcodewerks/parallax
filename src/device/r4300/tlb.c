@@ -20,9 +20,9 @@
  * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
 
 #include "tlb.h"
-#include <mupen64plus-next_common.h>
+#include <core/frontend.h>
 
-#include "api/m64p_types.h"
+#include "core/types.h"
 #include "device/r4300/r4300_core.h"
 #include "device/rdram.h"
 

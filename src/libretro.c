@@ -25,8 +25,10 @@
 
 #include "libretro.h"
 #include "libretro_private.h"
+#include "core/lifecycle.h"
+#include "core/file.h"
 
-#include "mupen64plus-next_common.h"
+#include "core/frontend.h"
 #include "device/rcp/rdp/angrylion/n64video.h"
 #include "renderer_options.h"
 #ifdef HAVE_GLRDP
@@ -41,22 +43,22 @@
 #ifdef HAVE_LIBNX
 #include <switch.h>
 #endif
-#include <pthread.h>
 
-#include "api/m64p_frontend.h"
-#include "api/m64p_types.h"
+
+
+#include "core/types.h"
 #include "device/r4300/r4300_core.h"
 #include "device/memory.h"
 #include "main/main.h"
-#include "api/callbacks.h"
-#include "main/version.h"
+#include "core/log.h"
+
 #include "main/util.h"
-#include "main/mupen64plus.ini.h"
-#include "api/m64p_config.h"
-#include "osal_files.h"
+
+
+
 #include "main/rom.h"
-#include "plugin/plugin.h"
-#include "device/rcp/pi_controller.h"
+#include "core/backend.h"
+#include "device/rcp/rcp.h"
 #include "device/pif/pif.h"
 #include "libretro_memory.h"
 
@@ -75,7 +77,9 @@
 struct retro_perf_callback perf_cb;
 retro_get_cpu_features_t perf_get_cpu_features_cb = NULL;
 
-retro_log_printf_t log_cb = NULL;
+static void quiet_log(enum retro_log_level level, const char *format, ...)
+{ (void)level; (void)format; }
+retro_log_printf_t log_cb = quiet_log;
 retro_video_refresh_t video_cb = NULL;
 retro_input_poll_t poll_cb = NULL;
 retro_input_state_t input_cb = NULL;
@@ -89,7 +93,6 @@ retro_audio_sample_batch_t audio_batch_cb = NULL;
 #define sync_end() ((void)0)
 #endif
 retro_environment_t environ_cb = NULL;
-retro_environment_t environ_clear_thread_waits_cb = NULL;
 
 struct retro_rumble_interface rumble;
 
@@ -110,7 +113,6 @@ bool libretro_swap_buffer;
 
 float retro_screen_aspect = 4.0 / 3.0;
 
-static char rdp_plugin_last[32] = {0};
 
 // 64DD globals
 char *retro_dd_path_img = NULL;
@@ -133,30 +135,22 @@ uint32_t IgnoreTLBExceptions = 0;
 extern struct device g_dev;
 extern unsigned int r4300_emumode;
 
-static bool emuThreadRunning = false;
-static pthread_t emuThread;
 
-// after the controller's CONTROL* member has been assigned we can update
+// after the controller's core_controller* member has been assigned we can update
 // them straight from here...
 extern struct
 {
-    CONTROL *control;
-    BUTTONS buttons;
+    core_controller *control;
+    core_buttons buttons;
 } controller[4];
 // ...but it won't be at least the first time we're called, in that case set
-// these instead for input_plugin to read.
+// these as the startup controller selection.
 int pad_pak_types[4];
 int pad_present[4] = {1, 1, 1, 1};
 
-static void n64DebugCallback(void *aContext, int aLevel, const char *aMessage)
-{
-    char buffer[1024];
-    snprintf(buffer, 1024, CORE_NAME ": %s\n", aMessage);
-    if (log_cb)
-        log_cb(RETRO_LOG_INFO, buffer);
-}
 
-extern m64p_rom_header ROM_HEADER;
+
+extern core_rom_header ROM_HEADER;
 void update_variables(bool startup);
 extern void deinit_audio_libretro(void);
 extern void init_audio_libretro(unsigned max_audio_frames);
@@ -205,45 +199,15 @@ static void cleanup_global_paths()
     }
 }
 
-static void n64StateCallback(void *Context, m64p_core_param param_type, int new_value)
+
+
+static bool emu_step_load_data(void)
 {
-}
-
-static bool emu_step_load_data()
-{
-    m64p_error ret = CoreStartup(FRONTEND_API_VERSION, ".", ".", NULL, n64DebugCallback, 0, n64StateCallback);
-    if (ret && log_cb)
-        log_cb(RETRO_LOG_ERROR, CORE_NAME ": failed to initialize core (err=%i)\n", ret);
-
-    log_cb(RETRO_LOG_DEBUG, CORE_NAME ": [EmuThread] M64CMD_ROM_OPEN\n");
-
-    if (CoreDoCommand(M64CMD_ROM_OPEN, game_size, (void *)game_data))
-    {
-        if (log_cb)
-            log_cb(RETRO_LOG_ERROR, CORE_NAME ": failed to load ROM\n");
-        goto load_fail;
-    }
-
+    bool loaded = core_open_content(game_data, game_size);
     free(game_data);
     game_data = NULL;
-
-    log_cb(RETRO_LOG_DEBUG, CORE_NAME ": [EmuThread] M64CMD_ROM_GET_HEADER\n");
-
-    if (CoreDoCommand(M64CMD_ROM_GET_HEADER, sizeof(ROM_HEADER), &ROM_HEADER))
-    {
-        if (log_cb)
-            log_cb(RETRO_LOG_ERROR, CORE_NAME ": failed to query ROM header information\n");
-        goto load_fail;
-    }
-
-    return true;
-
-load_fail:
-    free(game_data);
-    game_data = NULL;
-    // stop = 1;
-
-    return false;
+    if (!loaded && log_cb) log_cb(RETRO_LOG_ERROR, "Failed to load content.\n");
+    return loaded;
 }
 
 static void emu_step_initialize(void)
@@ -252,10 +216,10 @@ static void emu_step_initialize(void)
         return;
     update_variables(true);
     emu_initialized = true;
-    plugin_connect_all();
+    core_bind_backends();
 }
 
-void EmuThreadFunction()
+void run_emulation_frame()
 {
     if (initializing)
     {
@@ -268,7 +232,7 @@ void EmuThreadFunction()
 
 const char *retro_get_system_directory(void)
 {
-    const char *dir;
+    const char *dir = NULL;
     environ_cb(RETRO_ENVIRONMENT_GET_SYSTEM_DIRECTORY, &dir);
 
     return dir ? dir : ".";
@@ -395,7 +359,6 @@ void retro_set_environment(retro_environment_t cb)
         {}};
 
     environ_cb(RETRO_ENVIRONMENT_SET_SUBSYSTEM_INFO, (void *)subsystems);
-    environ_cb(RETRO_ENVIRONMENT_GET_CLEAR_ALL_THREAD_WAITS_CB, &environ_clear_thread_waits_cb);
 
     setup_variables();
 }
@@ -424,17 +387,6 @@ void retro_get_system_av_info(struct retro_system_av_info *info)
 unsigned retro_get_region(void)
 {
     return ((ROM_PARAMS.systemtype == SYSTEM_PAL) ? RETRO_REGION_PAL : RETRO_REGION_NTSC);
-}
-
-void copy_file(char *ininame, char *fileName)
-{
-    const char *filename = ConfigGetSharedDataFilepath(fileName);
-    FILE *fp = fopen(filename, "w");
-    if (fp != NULL)
-    {
-        fputs(ininame, fp);
-        fclose(fp);
-    }
 }
 
 #ifdef HAVE_PARALLEL_RDP
@@ -497,26 +449,14 @@ static bool request_gl_context(void)
 
 void retro_init(void)
 {
-    char *sys_pathname;
-    wchar_t w_pathname[PATH_SIZE];
-    environ_cb(RETRO_ENVIRONMENT_GET_SYSTEM_DIRECTORY, &sys_pathname);
-    char pathname[PATH_SIZE];
-    strncpy(pathname, sys_pathname, PATH_SIZE);
-    if (pathname[(strlen(pathname) - 1)] != '/' && pathname[(strlen(pathname) - 1)] != '\\')
-        strcat(pathname, "/");
-    strcat(pathname, "Mupen64plus/");
-    mbstowcs(w_pathname, pathname, PATH_SIZE);
-    if (!osal_path_existsW(w_pathname) || !osal_is_directory(w_pathname))
-        osal_mkdirp(w_pathname);
-    copy_file(inifile, "mupen64plus.ini");
-
+    core_file_init(environ_cb);
     struct retro_log_callback log;
     unsigned colorMode = RETRO_PIXEL_FORMAT_XRGB8888;
 
     if (environ_cb(RETRO_ENVIRONMENT_GET_LOG_INTERFACE, &log))
         log_cb = log.log;
     else
-        log_cb = NULL;
+        log_cb = quiet_log;
 
     if (environ_cb(RETRO_ENVIRONMENT_GET_PERF_INTERFACE, &perf_cb))
         perf_get_cpu_features_cb = perf_cb.get_cpu_features;
@@ -542,7 +482,6 @@ void retro_deinit(void)
     if (perf_cb.perf_log)
         perf_cb.perf_log();
 
-    rdp_plugin_last[0] = '\0';
 
 
 }
@@ -551,14 +490,26 @@ void update_controllers()
 {
     for (unsigned port = 0; port < 4; ++port) {
         enum controller_pak_option selected = controller_read_pak_option(environ_cb, port);
-        int pak = selected == CONTROLLER_PAK_MEMORY ? PLUGIN_MEMPAK :
-            selected == CONTROLLER_PAK_RUMBLE ? PLUGIN_RAW :
-            selected == CONTROLLER_PAK_TRANSFER ? PLUGIN_TRANSFER_PAK : PLUGIN_NONE;
-        /* The plugin rebuilds its controller structures on content reload.
-         * Keep startup selection current even while an old structure exists. */
+        int pak = selected == CONTROLLER_PAK_MEMORY ? ACCESSORY_MEMPAK :
+            selected == CONTROLLER_PAK_RUMBLE ? ACCESSORY_RAW :
+            selected == CONTROLLER_PAK_TRANSFER ? ACCESSORY_TRANSFER_PAK : ACCESSORY_NONE;
+        /* Keep startup selection current across content reloads. */
         pad_pak_types[port] = pak;
-        if (controller[port].control) controller[port].control->Plugin = pak;
+        if (controller[port].control) controller[port].control->accessory = pak;
     }
+}
+
+static char *find_sidecar(const char *path, const char *suffix)
+{
+    if (!path || strlen(path) > SIZE_MAX - strlen(suffix) - 1) return NULL;
+    size_t size = strlen(path) + strlen(suffix) + 1;
+    char *result = malloc(size);
+    if (!result) return NULL;
+    snprintf(result, size, "%s%s", path, suffix);
+    core_file *file = core_file_open(result, "rb");
+    if (!file) { free(result); return NULL; }
+    core_file_close(file);
+    return result;
 }
 
 static void format_saved_memory(void)
@@ -576,10 +527,9 @@ static void format_saved_memory(void)
 
 bool retro_load_game(const struct retro_game_info *game)
 {
-    char *gamePath;
-    char *newPath;
+    if (!game || load_game_successful) return false;
     renderer_read_options(environ_cb);
-#if defined(M64P_HEADLESS_BENCHMARK)
+#if defined(PARALLAX_HEADLESS_BENCHMARK)
     /* Isolated comparison builds can still force native task execution.
      * These controls are absent from production core options. */
     {
@@ -594,7 +544,6 @@ bool retro_load_game(const struct retro_game_info *game)
             renderer_settings.lle_audio = strcmp(route.value, "enabled") == 0;
     }
 #endif
-    current_rdp_type = renderer_settings.renderer == RENDERER_ANGRYLION ? RDP_PLUGIN_ANGRYLION : renderer_settings.renderer == RENDERER_GLRDP ? RDP_PLUGIN_GLRDP : RDP_PLUGIN_PARALLEL;
     if (log_cb)
         log_cb(RETRO_LOG_INFO, "Renderer: %s, upscale %ux, performance cores %s.\n",
                 renderer_settings.renderer == RENDERER_ANGRYLION ? "Angrylion" : renderer_settings.renderer == RENDERER_GLRDP ? "GLRDP" : "paraLLEl-RDP",
@@ -618,86 +567,44 @@ bool retro_load_game(const struct retro_game_info *game)
     initializing = true;
 
     // Workaround for broken subsystem on static platforms
-    // Note: game->path can be NULL if loading from a archive
-    // Current impl. uses mupen internals so that wouldn't work either way for dd/tpak
-    // So we just sanity check
-    if (!retro_dd_path_img && game->path)
-    {
-        gamePath = (char *)game->path;
-        newPath = (char *)calloc(1, strlen(gamePath) + 5);
-        strcpy(newPath, gamePath);
-        strcat(newPath, ".ndd");
-        FILE *fileTest = fopen(newPath, "r");
-        if (!fileTest)
-        {
-            free(newPath);
-        }
-        else
-        {
-            fclose(fileTest);
-            // Free'd later in Mupen Core
-            retro_dd_path_img = newPath;
-        }
-    }
-
-    if (!retro_transferpak_rom_path && game->path)
-    {
-        gamePath = (char *)game->path;
-        newPath = (char *)calloc(1, strlen(gamePath) + 4);
-        strcpy(newPath, gamePath);
-        strcat(newPath, ".gb");
-        FILE *fileTest = fopen(newPath, "r");
-        if (!fileTest)
-        {
-            free(newPath);
-        }
-        else
-        {
-            fclose(fileTest);
-            // Free'd later in Mupen Core
-            retro_transferpak_rom_path = newPath;
-
-            // We have a gb rom!
-            if (!retro_transferpak_ram_path)
-            {
-                gamePath = (char *)game->path;
-                newPath = (char *)calloc(1, strlen(gamePath) + 5);
-                strcpy(newPath, gamePath);
-                strcat(newPath, ".sav");
-                FILE *fileTest = fopen(newPath, "r");
-                if (!fileTest)
-                {
-                    free(newPath);
-                }
-                else
-                {
-                    fclose(fileTest);
-                    // Free'd later in Mupen Core
-                    retro_transferpak_ram_path = newPath;
-                }
-            }
-        }
-    }
+    if (!retro_dd_path_img) retro_dd_path_img = find_sidecar(game->path, ".ndd");
+    if (!retro_transferpak_rom_path) retro_transferpak_rom_path = find_sidecar(game->path, ".gb");
+    if (retro_transferpak_rom_path && !retro_transferpak_ram_path)
+        retro_transferpak_ram_path = find_sidecar(game->path, ".sav");
 
     // Init default vals
     load_game_successful = false;
 
+
+    if (game->size > UINT32_MAX) goto load_failed;
+    if (game->data) {
+        game_data = malloc(game->size);
+        if (!game_data) goto load_failed;
+        memcpy(game_data, game->data, game->size);
+        game_size = (uint32_t)game->size;
+    } else {
+        size_t size = 0;
+        if (!game->path || load_file(game->path, (void **)&game_data, &size) != file_ok)
+            goto load_failed;
+        if (size > UINT32_MAX) goto load_failed;
+        game_size = (uint32_t)size;
+    }
+
+    if (!emu_step_load_data()) goto load_failed;
     format_saved_memory();
+    deinit_audio_libretro();
     init_audio_libretro(audio_buffer_size);
     sync_open();
-
-    game_data = malloc(game->size);
-    memcpy(game_data, game->data, game->size);
-    game_size = game->size;
-
-    if (!emu_step_load_data())
-        return false;
     emu_step_initialize();
 
     frontend_refresh_rate = vi_expected_refresh_rate_from_tv_standard(ROM_PARAMS.systemtype);
     load_game_successful = true;
-
     return true;
+load_failed:
+    free(game_data); game_data = NULL; game_size = 0;
+    core_close_content();
+    cleanup_global_paths();
+    return false;
 }
 
 void retro_unload_game(void)
@@ -705,12 +612,10 @@ void retro_unload_game(void)
     optional_rsp_report();
     sync_close();
 
-    /* ROM_CLOSE is rejected while the emulator is running. Stop plugins
-     * first so closing content can release the decoded CPU cache too. */
-    CoreDoCommand(M64CMD_STOP, 0, NULL);
-    CoreDoCommand(M64CMD_ROM_CLOSE, 0, NULL);
+    /* Release backends and decoded CPU code before unmapping guest memory. */
+    core_close_content();
     rdp_counters_reset(&g_dev.dp.counters);
-    CoreShutdown();
+
 
     cleanup_global_paths();
 
@@ -728,9 +633,9 @@ void update_variables(bool startup)
         EnableFrameDuping = 1;
         EnableFullspeed = 0;
         CountPerScanlineOverride = 0;
-#if defined(M64P_HEADLESS_BENCH_PURE)
+#if defined(PARALLAX_HEADLESS_BENCH_PURE)
         r4300_emumode = EMUMODE_PURE_INTERPRETER;
-#elif defined(M64P_HEADLESS_BENCHMARK) && !defined(M64P_BENCH_RUNTIME_CPU)
+#elif defined(PARALLAX_HEADLESS_BENCHMARK) && !defined(M64P_BENCH_RUNTIME_CPU)
         r4300_emumode = EMUMODE_INTERPRETER;
 #else
         r4300_emumode = renderer_settings.cpu_core == CPU_CORE_PURE ? EMUMODE_PURE_INTERPRETER : EMUMODE_INTERPRETER;
@@ -750,6 +655,7 @@ void update_variables(bool startup)
 
 void retro_run(void)
 {
+    if (!load_game_successful) return;
     libretro_swap_buffer = false;
     static bool updated = false;
 
@@ -767,7 +673,7 @@ void retro_run(void)
 #endif
     const bool first_frame = initializing;
     const int64_t audio_start_clock = g_dev.r4300.cp0.count_clock;
-    EmuThreadFunction();
+    run_emulation_frame();
 #ifdef HAVE_GLRDP
     if (renderer_settings.renderer == RENDERER_GLRDP) glrdp_end_frame();
 #endif
@@ -814,11 +720,12 @@ void retro_run(void)
 }
 void retro_reset(void)
 {
-    CoreDoCommand(M64CMD_RESET, 0, (void *)0);
+    if (g_EmulatorRunning) main_reset(0);
 }
 
 void *retro_get_memory_data(unsigned type)
 {
+    if (!load_game_successful) return NULL;
     switch (type)
     {
     case RETRO_MEMORY_SYSTEM_RAM:
@@ -833,6 +740,7 @@ void *retro_get_memory_data(unsigned type)
 
 size_t retro_get_memory_size(unsigned type)
 {
+    if (!load_game_successful) return 0;
     switch (type)
     {
     case RETRO_MEMORY_SYSTEM_RAM:
@@ -853,13 +761,13 @@ size_t retro_serialize_size(void)
 
 bool retro_serialize(void *data, size_t size)
 {
-    if (!data || size < retro_serialize_size()) return false;
+    if (!g_EmulatorRunning || !data || size < retro_serialize_size()) return false;
     return main_statesave(data) != 0;
 }
 
 bool retro_unserialize(const void *data, size_t size)
 {
-    if (!data || size < 44) return false;
+    if (!g_EmulatorRunning || !data || size < 44) return false;
     const unsigned char* header = data;
     unsigned version = ((unsigned)header[8] << 24) | ((unsigned)header[9] << 16) |
                        ((unsigned)header[10] << 8) | header[11];
@@ -875,6 +783,7 @@ void retro_set_controller_port_device(unsigned in_port, unsigned device)
 {
     if (in_port < 4)
     {
+        pad_present[in_port] = device != RETRO_DEVICE_NONE;
         switch (device)
         {
         case RETRO_DEVICE_NONE:
@@ -936,52 +845,30 @@ void event_set_gameshark(int active)
     GamesharkActive = (active ? 1 : 0);
 
     // notify front-end application that gameshark button state has changed
-    StateChanged(M64CORE_INPUT_GAMESHARK, GamesharkActive);
+
 }
 
-void angrylionChangeWindow(void) {}
 
-void angrylionReadScreen2(void *dest, int *width, int *height, int front) {}
 
-void angrylionDrawScreen(void) {}
 
-typedef struct
-{
-    uint16_t Version; /* Set to 0x0103 */
-    uint16_t Type;    /* Set to PLUGIN_TYPE_GFX */
-    char Name[100];   /* Name of the DLL */
 
-    /* If DLL supports memory these memory options then set them to TRUE or FALSE
-       if it does not support it */
-    int NormalMemory;  /* a normal uint8_t array */
-    int MemoryBswaped; /* a normal uint8_t array where the memory has been pre
-                             bswap on a dword (32 bits) boundry */
-} PLUGIN_INFO;
 
-void angrylionGetDllInfo(PLUGIN_INFO *PluginInfo)
-{
-    PluginInfo->Version = 0x0103;
-    PluginInfo->Type = 2;
-    strcpy(
-        PluginInfo->Name, "angrylion's RDP");
-    PluginInfo->NormalMemory = true;
-    PluginInfo->MemoryBswaped = true;
-}
 
-void angrylionSetRenderingCallback(void (*callback)(int)) {}
 
-int angrylionInitiateGFX(GFX_INFO Gfx_Info)
-{
-    return 1;
-}
 
-void angrylionMoveScreen(int xpos, int ypos) {}
 
-void angrylionProcessDList(void)
+
+
+
+
+
+
+
+void renderer_process_display_list(void)
 {
 }
 
-void angrylionProcessRDPList(void)
+void renderer_process_commands(void)
 {
 #ifdef HAVE_PARALLEL_RDP
     if (renderer_settings.renderer == RENDERER_PARALLEL) { vk_process_commands(); return; }
@@ -992,7 +879,7 @@ void angrylionProcessRDPList(void)
     n64video_process_list();
 }
 
-void angrylionRomClosed(void)
+void renderer_close_content(void)
 {
     if (!renderer_open) return;
     renderer_open = false;
@@ -1008,7 +895,7 @@ void angrylionRomClosed(void)
     n64video_close();
 }
 
-int angrylionRomOpen(void)
+int renderer_open_content(void)
 {
 #ifdef HAVE_PARALLEL_RDP
     if (renderer_settings.renderer == RENDERER_PARALLEL)
@@ -1056,7 +943,7 @@ int angrylionRomOpen(void)
     return 1;
 }
 
-void angrylionUpdateScreen(void)
+void renderer_present(void)
 {
 #ifdef HAVE_PARALLEL_RDP
     if (renderer_settings.renderer == RENDERER_PARALLEL) { vk_rasterize(); return; }
@@ -1067,57 +954,38 @@ void angrylionUpdateScreen(void)
     n64video_update_screen();
 }
 
-void angrylionShowCFB(void)
+void renderer_show_framebuffer(void)
 {
-    angrylionUpdateScreen();
+    renderer_present();
 }
 
-void angrylionViStatusChanged(void) {}
+void renderer_vi_status_changed(void) {}
 
-void angrylionViWidthChanged(void) {}
+void renderer_vi_width_changed(void) {}
 
-void angrylionFBWrite(unsigned int addr, unsigned int size) {
+void renderer_framebuffer_write(unsigned int addr, unsigned int size) {
 #ifdef HAVE_GLRDP
     if (renderer_settings.renderer == RENDERER_GLRDP) glrdp_fb_write(addr, size);
 #endif
 }
 
-void angrylionFBRead(unsigned int addr) {
+void renderer_framebuffer_read(unsigned int addr) {
 #ifdef HAVE_GLRDP
     if (renderer_settings.renderer == RENDERER_GLRDP) glrdp_fb_read(addr);
 #endif
 }
 
-void angrylionFBGetFrameBufferInfo(void *pinfo) {
-    memset(pinfo, 0, 6 * sizeof(FrameBufferInfo));
+void renderer_framebuffer_info(void *pinfo) {
+    memset(pinfo, 0, 6 * sizeof(core_framebuffer_info));
 #ifdef HAVE_GLRDP
     if (renderer_settings.renderer == RENDERER_GLRDP) glrdp_fb_info(pinfo);
 #endif
 }
 
-m64p_error angrylionPluginGetVersion(m64p_plugin_type *PluginType, int *PluginVersion, int *APIVersion, const char **PluginNamePtr, int *Capabilities)
-{
-    /* set version info */
-    if (PluginType != NULL)
-        *PluginType = M64PLUGIN_GFX;
 
-    if (PluginVersion != NULL)
-        *PluginVersion = 0x016304;
-
-    if (APIVersion != NULL)
-        *APIVersion = 0x020100;
-
-    if (PluginNamePtr != NULL)
-        *PluginNamePtr = "MAME/Angrylion/HatCat/ata4 video Plugin";
-
-    if (Capabilities != NULL)
-        *Capabilities = 0;
-
-    return M64ERR_SUCCESS;
-}
-#if defined(M64P_HEADLESS_BENCHMARK)
+#if defined(PARALLAX_HEADLESS_BENCHMARK)
 /* Sample at the video callback, before the next field changes VI registers. */
-EXPORT void retro_debug_vi(uint32_t out[14])
+CORE_EXPORT void retro_debug_vi(uint32_t out[14])
 {
     memcpy(out, g_dev.vi.regs, sizeof(g_dev.vi.regs));
 }
@@ -1125,7 +993,7 @@ EXPORT void retro_debug_vi(uint32_t out[14])
 /* Read-only timing snapshot used by benchmarks/headless/benchmark.c. */
 /* Observe a physical RAM word through the matching cached KSEG0 line without
  * filling, flushing or charging the guest cache. NULL output probes support. */
-EXPORT bool retro_debug_peek_word(uint32_t address, uint32_t *out)
+CORE_EXPORT bool retro_debug_peek_word(uint32_t address, uint32_t *out)
 {
     struct r4300_core *r = &g_dev.r4300;
     if ((address & 3) || address >= 0x800000) return false;
@@ -1139,7 +1007,7 @@ EXPORT bool retro_debug_peek_word(uint32_t address, uint32_t *out)
     return true;
 }
 
-EXPORT void retro_debug_timing(uint32_t out[12])
+CORE_EXPORT void retro_debug_timing(uint32_t out[12])
 {
     struct r4300_core *r = &g_dev.r4300;
     struct cp0 *c = &r->cp0;

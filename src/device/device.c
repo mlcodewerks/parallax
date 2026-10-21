@@ -24,14 +24,14 @@
 #include "memory.h"
 #include "pif/pif.h"
 #include "r4300/r4300_core.h"
-#include "rcp/ai_controller.h"
-#include "rcp/mi_controller.h"
-#include "rcp/pi_controller.h"
+#include "device/rcp/rcp.h"
+#include "device/rcp/rcp.h"
+#include "device/rcp/rcp.h"
 #include "rcp/rdp/rdp_core.h"
-#include "rcp/ri_controller.h"
+#include "device/rcp/rcp.h"
 #include "rcp/rsp/rsp_core.h"
-#include "rcp/si_controller.h"
-#include "rcp/rdp/vi_controller.h"
+#include "device/rcp/rcp.h"
+#include "device/rcp/rcp.h"
 
 #define ARRAY_SIZE(x) (sizeof(x)/sizeof((x)[0]))
 
@@ -132,33 +132,33 @@ void init_device(struct device* dev,
 #define A(x,m) (x), (x) | (m)
     struct mem_mapping mappings[] = {
         /* clear mappings */
-        { 0x00000000, 0xffffffff, M64P_MEM_NOTHING, { NULL, RW(open_bus) } },
+        { 0x00000000, 0xffffffff, CORE_MEMORY_NOTHING, { NULL, RW(open_bus) } },
         /* memory map */
-        { A(MM_RDRAM_DRAM, dram_size-1), M64P_MEM_RDRAM, { &dev->rdram, RW(rdram_dram) } },
-        { A(MM_RDRAM_REGS, 0xfffff), M64P_MEM_RDRAMREG, { &dev->rdram, RW(rdram_regs) } },
-        { A(MM_RSP_MEM, 0xffff), M64P_MEM_RSPMEM, { &dev->sp, RW(rsp_mem) } },
-        { A(MM_RSP_REGS, 0xffff), M64P_MEM_RSPREG, { &dev->sp, RW(rsp_regs) } },
-        { A(MM_RSP_REGS2, 0xffff), M64P_MEM_RSP, { &dev->sp, RW(rsp_regs2) } },
-        { A(MM_DPC_REGS, 0xffff), M64P_MEM_DP, { &dev->dp, RW(dpc_regs) } },
-        { A(MM_DPS_REGS, 0xffff), M64P_MEM_DPS, { &dev->dp, RW(dps_regs) } },
-        { A(MM_MI_REGS, 0xffff), M64P_MEM_MI, { &dev->mi, RW(mi_regs) } },
-        { A(MM_VI_REGS, 0xffff), M64P_MEM_VI, { &dev->vi, RW(vi_regs) } },
-        { A(MM_AI_REGS, 0xffff), M64P_MEM_AI, { &dev->ai, RW(ai_regs) } },
-        { A(MM_PI_REGS, 0xffff), M64P_MEM_PI, { &dev->pi, RW(pi_regs) } },
-        { A(MM_RI_REGS, 0xffff), M64P_MEM_RI, { &dev->ri, RW(ri_regs) } },
-        { A(MM_SI_REGS, 0xffff), M64P_MEM_SI, { &dev->si, RW(si_regs) } },
-        { A(MM_DOM2_ADDR1, 0xffffff), M64P_MEM_NOTHING, { NULL, RW(open_bus) } },
-        { A(MM_DD_ROM, 0x1ffffff), M64P_MEM_NOTHING, { NULL, RW(open_bus) } },
-        { A(MM_DOM2_ADDR2, 0x1ffff), M64P_MEM_FLASHRAMSTAT, { &dev->cart, RW(cart_dom2)  } },
-        { A(MM_IS_VIEWER, 0xfff), M64P_MEM_NOTHING, { &dev->is, RW(is_viewer) } },
-        { A(MM_CART_ROM, rom_size-1), M64P_MEM_ROM, { &dev->cart.cart_rom, RW(cart_rom) } },
-        { A(MM_PIF_MEM, 0xffff), M64P_MEM_PIF, { &dev->pif, RW(pif_mem) } }
+        { A(MM_RDRAM_DRAM, dram_size-1), CORE_MEMORY_RDRAM, { &dev->rdram, RW(rdram_dram) } },
+        { A(MM_RDRAM_REGS, 0xfffff), CORE_MEMORY_RDRAMREG, { &dev->rdram, RW(rdram_regs) } },
+        { A(MM_RSP_MEM, 0xffff), CORE_MEMORY_RSPMEM, { &dev->sp, RW(rsp_mem) } },
+        { A(MM_RSP_REGS, 0xffff), CORE_MEMORY_RSPREG, { &dev->sp, RW(rsp_regs) } },
+        { A(MM_RSP_REGS2, 0xffff), CORE_MEMORY_RSP, { &dev->sp, RW(rsp_regs2) } },
+        { A(MM_DPC_REGS, 0xffff), CORE_MEMORY_DP, { &dev->dp, RW(dpc_regs) } },
+        { A(MM_DPS_REGS, 0xffff), CORE_MEMORY_DPS, { &dev->dp, RW(dps_regs) } },
+        { A(MM_MI_REGS, 0xffff), CORE_MEMORY_MI, { &dev->mi, RW(mi_regs) } },
+        { A(MM_VI_REGS, 0xffff), CORE_MEMORY_VI, { &dev->vi, RW(vi_regs) } },
+        { A(MM_AI_REGS, 0xffff), CORE_MEMORY_AI, { &dev->ai, RW(ai_regs) } },
+        { A(MM_PI_REGS, 0xffff), CORE_MEMORY_PI, { &dev->pi, RW(pi_regs) } },
+        { A(MM_RI_REGS, 0xffff), CORE_MEMORY_RI, { &dev->ri, RW(ri_regs) } },
+        { A(MM_SI_REGS, 0xffff), CORE_MEMORY_SI, { &dev->si, RW(si_regs) } },
+        { A(MM_DOM2_ADDR1, 0xffffff), CORE_MEMORY_NOTHING, { NULL, RW(open_bus) } },
+        { A(MM_DD_ROM, 0x1ffffff), CORE_MEMORY_NOTHING, { NULL, RW(open_bus) } },
+        { A(MM_DOM2_ADDR2, 0x1ffff), CORE_MEMORY_FLASHRAMSTAT, { &dev->cart, RW(cart_dom2)  } },
+        { A(MM_IS_VIEWER, 0xfff), CORE_MEMORY_NOTHING, { &dev->is, RW(is_viewer) } },
+        { A(MM_CART_ROM, rom_size-1), CORE_MEMORY_ROM, { &dev->cart.cart_rom, RW(cart_rom) } },
+        { A(MM_PIF_MEM, 0xffff), CORE_MEMORY_PIF, { &dev->pif, RW(pif_mem) } }
     };
 
     /* init and map DD if present */
     if (dd_rom_size > 0) {
-        mappings[14] = (struct mem_mapping){ A(MM_DOM2_ADDR1, 0xffffff), M64P_MEM_NOTHING, { &dev->dd, RW(dd_regs) } };
-        mappings[15] = (struct mem_mapping){ A(MM_DD_ROM, dd_rom_size-1), M64P_MEM_NOTHING, { &dev->dd, RW(dd_rom) } };
+        mappings[14] = (struct mem_mapping){ A(MM_DOM2_ADDR1, 0xffffff), CORE_MEMORY_NOTHING, { &dev->dd, RW(dd_regs) } };
+        mappings[15] = (struct mem_mapping){ A(MM_DD_ROM, dd_rom_size-1), CORE_MEMORY_NOTHING, { &dev->dd, RW(dd_rom) } };
 
         init_dd(&dev->dd,
                 dd_rtc_clock, dd_rtc_iclock,

@@ -9,20 +9,22 @@
 #include "device/r4300/cached_interp.h"
 #include "device/r4300/timing.h"
 #include "device/memory.h"
-#include "device/rcp/mi_controller.h"
-#include "api/callbacks.h"
+#include "device/rcp/rcp.h"
+#include "core/log.h"
 
 int g_gs_vi_counter;
 unsigned int IgnoreTLBExceptions;
 struct vi_controller;
+#ifndef PARALLAX_REAL_RCP
 void vi_schedule_vertical_interrupt(struct vi_controller* vi) { (void)vi; abort(); }
+#endif
 struct pif;
 struct device;
 void main_check_inputs(void) { }
 void reset_pif(struct pif* pif, int reset) { (void)pif; (void)reset; abort(); }
 void poweron_device(struct device* dev) { (void)dev; abort(); }
 void pif_bootrom_hle_execute(struct r4300_core* core) { (void)core; abort(); }
-void DebugMessage(int level, const char* message, ...) { (void)level; (void)message; }
+void core_log(int level, const char* message, ...) { (void)level; (void)message; }
 uint32_t* mem_base_u32(void* base, uint32_t address) { return (uint32_t*)((char*)base + address); }
 void read_rdram_dram(void* opaque, uint32_t address, uint32_t* value)
 {

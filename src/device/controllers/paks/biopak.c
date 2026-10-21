@@ -25,8 +25,8 @@
 
 #include "biopak.h"
 
-#include "api/m64p_types.h"
-#include "api/callbacks.h"
+#include "core/types.h"
+#include "core/log.h"
 
 #ifdef HAVE_LIBNX
 #include <switch.h>
@@ -61,13 +61,13 @@ static void read_biopak(void* pak, uint16_t address, uint8_t* data, size_t size)
         memset(data, (2*k < period) ? 0x00 : 0x03, size);
     }
     else {
-        DebugMessage(M64MSG_WARNING, "Unexpected bio sensor read address %04x", address);
+        core_log(CORE_LOG_WARNING, "Unexpected bio sensor read address %04x", address);
     }
 }
 
 static void write_biopak(void* pak, uint16_t address, const uint8_t* data, size_t size)
 {
-    DebugMessage(M64MSG_WARNING, "Unexpected bio sensor write address %04x", address);
+    core_log(CORE_LOG_WARNING, "Unexpected bio sensor write address %04x", address);
 }
 
 

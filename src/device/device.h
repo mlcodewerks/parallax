@@ -19,8 +19,8 @@
  *   51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.          *
  * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
 
-#ifndef M64P_DEVICE_DEVICE_H
-#define M64P_DEVICE_DEVICE_H
+#ifndef PARALLAX_DEVICE_DEVICE_H
+#define PARALLAX_DEVICE_DEVICE_H
 
 #include <stddef.h>
 #include <stdint.h>
@@ -37,14 +37,14 @@
 #include "memory.h"
 #include "pif/pif.h"
 #include "r4300/r4300_core.h"
-#include "rcp/ai_controller.h"
-#include "rcp/mi_controller.h"
-#include "rcp/pi_controller.h"
+#include "device/rcp/rcp.h"
+#include "device/rcp/rcp.h"
+#include "device/rcp/rcp.h"
 #include "rcp/rdp/rdp_core.h"
-#include "rcp/ri_controller.h"
+#include "device/rcp/rcp.h"
 #include "rcp/rsp/rsp_core.h"
-#include "rcp/si_controller.h"
-#include "rcp/rdp/vi_controller.h"
+#include "device/rcp/rcp.h"
+#include "device/rcp/rcp.h"
 #include "rdram.h"
 
 struct audio_out_backend_interface;

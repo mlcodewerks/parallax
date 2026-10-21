@@ -19,8 +19,8 @@
  *   51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.          *
  * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
 
-#ifndef M64P_R4300_INTERP_BRANCH_H
-#define M64P_R4300_INTERP_BRANCH_H
+#ifndef PARALLAX_R4300_INTERP_BRANCH_H
+#define PARALLAX_R4300_INTERP_BRANCH_H
 #include "r4300_core.h"
 #include "cp0.h"
 #include "timing.h"
@@ -51,7 +51,7 @@ static osal_force_inline void interp_branch_finish_step(struct r4300_core* r,
         cp0_update_count(r);
         r->delay_slot = 0;
         unsigned jump = (unsigned)taken & (unsigned)(r->skip_jump == 0);
-#if defined(M64P_INTERP_BRANCHLESS) && M64P_INTERP_BRANCHLESS
+#if defined(PARALLAX_INTERP_BRANCHLESS) && PARALLAX_INTERP_BRANCHLESS
         uint32_t mask = 0u - jump;
         r->interp_PC.addr = (target & mask) | (r->interp_PC.addr & ~mask);
 #else

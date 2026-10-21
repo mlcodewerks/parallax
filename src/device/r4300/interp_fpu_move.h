@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
-#ifndef M64P_INTERP_FPU_MOVE_H
-#define M64P_INTERP_FPU_MOVE_H
+#ifndef PARALLAX_INTERP_FPU_MOVE_H
+#define PARALLAX_INTERP_FPU_MOVE_H
 #include "r4300_core.h"
 
 /* MOV.S and MOV.D are raw 64-bit copies in this VR4300 model. They preserve

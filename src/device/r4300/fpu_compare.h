@@ -1,5 +1,5 @@
 /* Included by pure_interp.c. Ares/VR4300 compare predicates and legacy NaNs. */
-static M64P_FORCE_INLINE int fpu_compare_prepare(struct r4300_core* r4300, uint32_t op, uint64_t inputs[3])
+static PARALLAX_FORCE_INLINE int fpu_compare_prepare(struct r4300_core* r4300, uint32_t op, uint64_t inputs[3])
 {
     const unsigned int fmt = RS_OF(op);
     const unsigned int fs = (r4300->cp0.regs[CP0_STATUS_REG] & CP0_STATUS_FR)
@@ -46,7 +46,7 @@ int pure_interp_fpu_compare_prepare(struct r4300_core* r, uint32_t op, uint64_t 
 {
     return fpu_compare_prepare(r, op, inputs);
 }
-static M64P_FORCE_INLINE void fpu_compare_finish(struct r4300_core* r, int result)
+static PARALLAX_FORCE_INLINE void fpu_compare_finish(struct r4300_core* r, int result)
 {
     r->cp1.fcr31 = (r->cp1.fcr31 & ~FCR31_CMP_BIT) | (result ? FCR31_CMP_BIT : 0);
     r->interp_PC.addr += 4;

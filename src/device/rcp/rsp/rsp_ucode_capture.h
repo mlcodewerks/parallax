@@ -1,3 +1,4 @@
+#include "core/file.h"
 /* Opt-in complete IMEM DMA images for ROM/overlay auditing. No ROM bytes
  * are embedded in the program. Captures use host-native word order. */
 #include <stdio.h>
@@ -14,7 +15,7 @@ void rsp_capture_imem(const unsigned char *image, const unsigned char *dmem,
                          (((encoded >> 12) & 255u) + 1u);
     unsigned int i;
     char path[1024];
-    FILE *f;
+    core_file *f;
     if (!initialized) { directory = getenv("RSP_UCODE_AUDIT_DIR"); initialized = 1; }
     if (!directory) return;
     begin &= 0xff8u;
@@ -35,20 +36,20 @@ void rsp_capture_imem(const unsigned char *image, const unsigned char *dmem,
     seen[nseen++] = hash;
     snprintf(path, sizeof(path), "%s/imem-%03u-%016llx.bin", directory, nseen - 1,
              (unsigned long long)hash);
-    f = fopen(path, "wb");
+    f = core_file_open(path, "wb");
     if (!f) return;
-    fwrite(image, 4096, 1, f); fclose(f);
+    core_file_write_items(image, 4096, 1, f); core_file_close(f);
     snprintf(path, sizeof(path), "%s/imem-%03u-%016llx.dmem", directory, nseen - 1,
              (unsigned long long)hash);
-    f = fopen(path, "wb");
-    if (f) { fwrite(dmem, 4096, 1, f); fclose(f); }
+    f = core_file_open(path, "wb");
+    if (f) { core_file_write_items(dmem, 4096, 1, f); core_file_close(f); }
     snprintf(path, sizeof(path), "%s/imem.csv", directory);
-    f = fopen(path, nseen == 1 ? "w" : "a");
+    f = core_file_open(path, nseen == 1 ? "w" : "a");
     if (!f) return;
-    if (nseen == 1) fprintf(f, "image,hash,imem,rdram,bytes,encoded_length,pc,task_text,task_data\n");
-    fprintf(f, "%u,%016llx,%x,%x,%x,%x,%x,%x,%x\n", nseen - 1,
+    if (nseen == 1) core_file_printf(f, "image,hash,imem,rdram,bytes,encoded_length,pc,task_text,task_data\n");
+    core_file_printf(f, "%u,%016llx,%x,%x,%x,%x,%x,%x,%x\n", nseen - 1,
         (unsigned long long)hash, begin, source & 0x7ffff8u, bytes,
         encoded, pc & 4095u, ((const uint32_t *)dmem)[0xfd0u / 4],
         ((const uint32_t *)dmem)[0xfd8u / 4]);
-    fclose(f);
+    core_file_close(f);
 }

@@ -25,13 +25,7 @@
 #include "cp0.h"
 #include "r4300_core.h"
 
-#ifdef COMPARE_CORE
-#include "api/debugger.h"
-#endif
 
-#ifdef DBG
-#include "debugger/dbg_debugger.h"
-#endif
 
 /* global functions */
 void init_cp0(struct cp0* cp0, unsigned int count_per_op, unsigned int count_per_op_denom_pot, const struct interrupt_handler* interrupt_handlers)
@@ -194,10 +188,6 @@ void cp0_update_count(struct r4300_core* r4300)
      * Keep this synchronization hook for devices and exception handlers. */
     cp0->last_addr = *r4300_pc(r4300);
 
-#ifdef COMPARE_CORE
-   if (r4300->delay_slot)
-     CoreCompareCallback();
-#endif
 /*#ifdef DBG
    if (g_DebuggerActive && !r4300->delay_slot) update_debugger(*r4300_pc(r4300));
 #endif

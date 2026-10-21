@@ -449,7 +449,7 @@ static void _f3a(jit_state_t*,jit_int32_t,
 #  define CB012(imm)			CB(SPARC_CB012, imm)
 #  define CB012a(imm)			CBa(SPARC_CB012, imm)
 #  define CALLI(imm)			f1(1, imm)
-#  define CALL(r0)			JMPL(_O7_REGNO, r0, 0)
+#  define CORE_CALL(r0)			JMPL(_O7_REGNO, r0, 0)
 #  define RETL()			JMPLI(0, _O7_REGNO, 8)
 #  define RET()				JMPLI(0, _I7_REGNO, 8)
 #  define JMPL(rd, rs1, rs2)		f3r(2, rd, 56, rs1, rs2)
@@ -2380,7 +2380,7 @@ _jmpi_p(jit_state_t *_jit, jit_word_t i0)
 static void
 _callr(jit_state_t *_jit, jit_int32_t r0)
 {
-    CALL(r0);
+    CORE_CALL(r0);
     NOP();
 }
 

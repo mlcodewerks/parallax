@@ -30,8 +30,8 @@
 #endif
 #include "pure_interp.h"
 
-#include "api/callbacks.h"
-#include "api/m64p_types.h"
+#include "core/log.h"
+#include "core/types.h"
 #include "main/main.h"
 
 #include <stdlib.h>
@@ -188,7 +188,7 @@ int r4300_read_aligned_dword(struct r4300_core* r4300, uint32_t address, uint64_
      * but inaccurate timing of the core can lead to unaligned address on reset
      * so just emit a warning and keep going */
     if ((address & 0x7) != 0) {
-        DebugMessage(M64MSG_WARNING, "Unaligned dword read %08x", address);
+        core_log(CORE_LOG_WARNING, "Unaligned dword read %08x", address);
     }
 
     if ((address & UINT32_C(0xc0000000)) != UINT32_C(0x80000000)) {
@@ -237,7 +237,7 @@ int r4300_write_aligned_dword(struct r4300_core* r4300, uint32_t address, uint64
      * but inaccurate timing of the core can lead to unaligned address on reset
      * so just emit a warning and keep going */
     if ((address & 0x7) != 0) {
-        DebugMessage(M64MSG_WARNING, "Unaligned dword write %08x", address);
+        core_log(CORE_LOG_WARNING, "Unaligned dword write %08x", address);
     }
 
     if ((address & UINT32_C(0xc0000000)) != UINT32_C(0x80000000)) {

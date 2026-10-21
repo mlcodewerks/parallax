@@ -1,7 +1,7 @@
 /* rdp_emit_hle.h -- activation glue for the angrylion HLE-graphics path.
  *
  * Ties the F3DEX2 dispatcher + RDP FIFO to the angrylion rasterizer. This is
- * called from angrylionProcessDList(), which the core only invokes when the
+ * called from renderer_process_display_list(), which the core only invokes when the
  * RSP plugin is HLE (cxd4/parallel are low-level and feed the RDP directly
  * via ProcessRDPList instead). So no extra gating is required: if this runs,
  * the RSP is HLE and a display list is waiting. ISO C89 / MSVC-compatible.

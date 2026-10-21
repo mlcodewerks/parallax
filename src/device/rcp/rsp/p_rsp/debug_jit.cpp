@@ -1,3 +1,4 @@
+#include "core/file.h"
 #include "debug_jit.hpp"
 #include <dlfcn.h>
 #include <stdio.h>
@@ -57,12 +58,12 @@ bool DebugBlock::Impl::compile(uint64_t hash, const std::string &source)
 	name += ".c";
 	soname += ".so";
 
-	FILE *file = fopen(name.c_str(), "w");
+	core_file *file = core_file_open(name.c_str(), "w");
 	if (!file)
 		return false;
 
 	fputs(source.c_str(), file);
-	fclose(file);
+	core_file_close(file);
 
 	char command[256];
 	if (sizeof(size_t) == 8)

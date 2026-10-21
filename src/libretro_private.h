@@ -9,14 +9,12 @@
 extern "C" {
 #endif
 
-extern unsigned int FAKE_SDL_TICKS;
 
 extern retro_get_cpu_features_t perf_get_cpu_features_cb;
 extern retro_log_printf_t log_cb;
 extern bool libretro_swap_buffer;
 void retro_return();
 
-#define SDL_GetTicks() FAKE_SDL_TICKS
 
 #ifdef __cplusplus
 }

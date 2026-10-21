@@ -1,3 +1,4 @@
+#include "core/file.h"
 #include "n64video.h"
 #define RDRAM_MAX_SIZE 0x800000
 #include "common.h"
@@ -181,17 +182,17 @@ static void al_capture_flush_if_ready(void)
     if (!env || al_cap_locked >= 0 || al_cap_words == 0) return;
     if (al_cap_vi <= al_cap_capvi) return;          /* frame not finished */
     {
-        FILE *f = fopen(env, "wb");
+        core_file *f = core_file_open(env, "wb");
         if (f)
         {
             uint32_t sz = config.gfx.rdram_size, z = 0;
             uint32_t hsz = (uint32_t)sizeof(rdram_hidden);
-            fwrite("ALCAP5", 1, 6, f); fwrite(&sz, 4, 1, f); fwrite(&hsz, 4, 1, f); fwrite(al_cap_vireg, 4, 16, f);
-            if (config.gfx.rdram) fwrite(config.gfx.rdram, 1, sz, f);
-            fwrite(rdram_hidden, 1, hsz, f);
-            fwrite(al_cap_buf, 4, al_cap_words, f);
-            fwrite(&z, 4, 1, f);
-            fclose(f);
+            core_file_write_items("ALCAP5", 1, 6, f); core_file_write_items(&sz, 4, 1, f); core_file_write_items(&hsz, 4, 1, f); core_file_write_items(al_cap_vireg, 4, 16, f);
+            if (config.gfx.rdram) core_file_write_items(config.gfx.rdram, 1, sz, f);
+            core_file_write_items(rdram_hidden, 1, hsz, f);
+            core_file_write_items(al_cap_buf, 4, al_cap_words, f);
+            core_file_write_items(&z, 4, 1, f);
+            core_file_close(f);
         }
         al_cap_locked = 1;
     }

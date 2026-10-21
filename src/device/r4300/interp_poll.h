@@ -1,5 +1,5 @@
-#ifndef M64P_R4300_INTERP_POLL_H
-#define M64P_R4300_INTERP_POLL_H
+#ifndef PARALLAX_R4300_INTERP_POLL_H
+#define PARALLAX_R4300_INTERP_POLL_H
 
 #include "timing.h"
 #include "device/rdram.h"
