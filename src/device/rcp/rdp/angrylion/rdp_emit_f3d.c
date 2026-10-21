@@ -848,6 +848,29 @@ static void rdp_passthrough(GSPState *gsp, RdpFifo *fifo, int cmd,
 }
 
 /* ---- the F3D walker ------------------------------------------------------*/
+/* Early F3DEX (including 0.95) retains Fast3D's B4 perspNorm command.
+ * Later GBI1 programs use B4 as a half-word latch instead. Inspect this
+ * SDK layout's actual B4 dispatch target: j dispatch; sh t8, 2(sp).
+ * Selecting by handler keeps line/segment and raw-RDP half commands on
+ * their existing paths, independently of the vertex/index encoding. */
+static int f3d_half1_perspnorm(const RdpFifo *fifo)
+{
+    unsigned int text, handler, offset;
+    if (!fifo->dmem) return 0;
+    text = rd32(fifo->dmem, 0xfd0u) & 0x7fffffu;
+    if (text > s_rdram_size || 8u > s_rdram_size - text ||
+        rd32(s_rdram, text + 4u) != 0x201d0110u)
+        return 0;
+    /* Read the resident table: G_LOAD_UCODE can replace it mid-list. */
+    handler = rd32(fifo->dmem, 0xdcu) & 0xffffu;
+    if (handler < 0x1080u || handler > 0x1ff8u) return 0;
+    offset = handler - 0x1080u;
+    if (offset > s_rdram_size - text || 8u > s_rdram_size - text - offset)
+        return 0;
+    return (rd32(s_rdram, text + offset) & 0xfc000000u) == 0x08000000u &&
+           rd32(s_rdram, text + offset + 4u) == 0xa7b80002u;
+}
+
 static void f3d_prepare_writer(GSPState *gsp,RdpFifo *fifo)
 {
     const unsigned char *r=s_rdram;
@@ -1701,7 +1724,9 @@ void f3d_run_dl(GSPState *gsp, RdpFifo *fifo, unsigned int addr,
                 break;
             }
             case F3D_MW_PERSPNORM:
-                gsp_set_persp_norm(gsp, w1 & 0xffffu);
+                /* This slot is not perspNorm in the older B4-command ABI. */
+                if (!f3d_half1_perspnorm(fifo))
+                    gsp_set_persp_norm(gsp, w1 & 0xffffu);
                 break;
             case F3D_MW_POINTS:
             {
@@ -2027,8 +2052,11 @@ void f3d_run_dl(GSPState *gsp, RdpFifo *fifo, unsigned int addr,
              * the draws, which moves the clip lerp's reprojection of
              * generated vertices (bottom-edge clips land at 240.0 instead
              * of the microcode's 239.75). Blast Corps' Fast3D line build
-             * keeps the old-F3D bare-RDPHALF_1 perspNorm convention. */
-            if (!s_variant_d64)
+             * keeps the old-F3D bare-RDPHALF_1 perspNorm convention. Early
+             * F3DEX keeps B4 too, despite using the newer vertex indices;
+             * ignoring its factor saturates the reciprocal's input and
+             * makes coplanar track decals fail the depth comparison. */
+            if (!s_variant_d64 || f3d_half1_perspnorm(fifo))
                 gsp_set_persp_norm(gsp, w1 & 0xffffu);
             break;
 
