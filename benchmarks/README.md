@@ -1,8 +1,12 @@
 # Headless interpreter benchmarks
 
-Production RSP routing is automatic. The old HLE/LLE environment overrides in
-benchmark commands are private controls for instrumented comparison cores.
-See [automatic RSP support and validation](NATIVE_FALLBACK_COMPLETION.md).
+Accurate timing always uses native LLE RSP; Fast always uses strict HLE and
+stops with an error on unsupported tasks. Independent RSP overrides are
+ignored in production and diagnostic libretro builds. See
+[F-Zero X cadence and mode validation](FZERO_TIMING.md).
+
+[Star Wars Episode I: Racer NTSC video comparison](RACER_TIMING.md) checks race-clock
+progress and rendered-buffer cadence in both game resolution settings and timing modes.
 The [paraLLEl-RDP update](PARALLEL_RDP_UPDATE.md) records shader generation,
 GPU conformance checks and the separate limits of RDP timing validation.
 
@@ -25,6 +29,11 @@ refitting timing coefficients. [Benchmark-only task counting](HLE_TASK_CYCLES.md
 records 2,178 completed native executions and explicitly lists coverage gaps.
 
 ## Knife Edge and Beetle Adventure Racing timing
+
+For the current Knife Edge light-flight target, see
+[F-Zero timing and the preserved Knife Edge cadence](FZERO_TIMING.md).
+[The preceding calibration](KNIFE_BASELINE_CADENCE.md) introduced the
+short-span transient while retaining the 320-pixel model.
 
 [Refined combat estimates and reproduction commands](KNIFE_COMBAT_REFINED.md)
 bring a 20-second reference flight section from 15.80 to 19.81 s with native

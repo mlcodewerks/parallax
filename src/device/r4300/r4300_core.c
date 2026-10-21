@@ -82,12 +82,11 @@ void poweron_r4300(struct r4300_core* r4300)
 #ifdef __LIBRETRO__
     r4300->cache_timing = renderer_settings.per_cycle_timing ? 1 :
         renderer_settings.fast_cpu_timing ? 2 : 0;
-    /* Fast and Accurate share the same issue policy; their cache contents
-     * model differs. Native RSP uses actual instruction costs and interlocks.
+    /* Timed CPU execution uses actual instruction costs and interlocks in
+     * both RSP routes. HLE must not add an unconditional second issue clock.
      * Validated ROM compatibility profiles take precedence for both routes
      * (notably DK64's second vine), independently of the cache mode. */
-    if (r4300->cache_timing && (!renderer_settings.rsp_hle ||
-        (renderer_settings.lle_graphics && renderer_settings.lle_audio)))
+    if (r4300->cache_timing && renderer_component_timing())
         r4300->compat_issue_clock = 0;
     if (r4300->cache_timing && r4300->issue_policy != CPU_ISSUE_DEFAULT)
         r4300->compat_issue_clock = r4300->issue_policy == CPU_ISSUE_COMPATIBILITY;

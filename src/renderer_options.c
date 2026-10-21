@@ -150,7 +150,7 @@ void renderer_register_options(retro_environment_t environment)
             if (!strcmp(d->key, "wtfn64_glrdp_vi_gamma_dither"))
                 d->info = "Allow gamma dithering when requested by the game. Independent of gamma correction. Restart content to apply.";
             if (!strcmp(d->key, "wtfn64_timing"))
-                d->info = "Accurate uses full CPU cache contents and detailed per-cycle timing. Fast tracks cache tags, instruction interlocks and bus delays while accessing RAM directly. Both time RSP tasks and RDP commands by their work, including pipeline and DMA waits. Restart content to apply.";
+                d->info = "Accurate uses native RSP execution and full CPU cache contents. Fast uses HLE RSP and cache tags; unsupported RSP tasks stop with an error. Both retain instruction interlocks, bus delays and work-based RDP timing. Restart content to apply.";
             if (!strcmp(d->key, "wtfn64_cpu_core"))
                 d->info = "Select the CPU execution core. All choices use the same instruction behavior and Timing accuracy setting. Restart content to apply.";
             if (strstr(d->key, "-pak")) {
@@ -232,11 +232,12 @@ void renderer_read_options(retro_environment_t env)
     struct renderer_settings *s = &renderer_settings;
     const char *v;
     memset(s, 0, sizeof(*s));
-    /* Task detection selects HLE or native RSP automatically. Ignore old
-     * frontend overrides so stale core-option files cannot disable it. */
-    s->rsp_hle = true;
     v = value(env, "wtfn64_timing", "fast");
     s->per_cycle_timing = strcmp(v, "accurate") == 0;
+    /* The timing mode owns RSP routing. Stale frontend overrides cannot
+     * mix native RSP with Fast or HLE RSP with Accurate. */
+    s->rsp_hle = !s->per_cycle_timing;
+    s->lle_graphics = s->lle_audio = s->per_cycle_timing;
     s->component_timing = true;
     s->fast_cpu_timing = true;
     v = value(env, "wtfn64_cpu_core", "cached");

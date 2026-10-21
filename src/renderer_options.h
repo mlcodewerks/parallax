@@ -10,6 +10,7 @@ enum cpu_core_type { CPU_CORE_CACHED, CPU_CORE_PURE, CPU_CORE_DYNAREC };
 enum controller_pak_option { CONTROLLER_PAK_NONE, CONTROLLER_PAK_MEMORY,
     CONTROLLER_PAK_RUMBLE, CONTROLLER_PAK_TRANSFER };
 struct renderer_settings {
+    /* Accurate always uses native RSP; Fast is strict HLE with no fallback. */
     bool rsp_hle, lle_graphics, lle_audio;
     /* Derived from the single Fast/Accurate setting. Component clocks and
      * tags-only CPU timing are always available; Accurate selects full caches. */

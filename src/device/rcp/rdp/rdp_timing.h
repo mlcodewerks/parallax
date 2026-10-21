@@ -216,6 +216,15 @@ static uint64_t rdp_timing_span(const struct rdp_timing* t, int y, int left, int
      * charge for response time already covered by memory work. */
     uint64_t occupied = bus > raster ? bus : raster;
     uint64_t uncovered = response > occupied ? response - occupied : 0;
+    /* The wide-rectangle floor describes steady buffered throughput. Short
+     * spans also expose pipeline fill before that throughput is reached.
+     * Use the larger of the two uncovered estimates, not their sum. Raster
+     * work hides this transient completely for the calibrated 320-pixel
+     * rectangles. The 38/57-clock budgets are aggregate estimates calibrated
+     * against light Knife Edge flight, not measured RDRAM request latencies. */
+    uint64_t transient = reads * (38u + 19u * t->cycle_type);
+    transient = transient > raster ? transient - raster : 0;
+    if (transient > uncovered) uncovered = transient;
     RDP_TIMING_OBSERVE_RESPONSE(t, uncovered);
     unsigned startup = t->reject ? 4u + 2u * t->cycle_type : 15u;
     return startup + occupied + uncovered;

@@ -529,21 +529,6 @@ bool retro_load_game(const struct retro_game_info *game)
 {
     if (!game || load_game_successful) return false;
     renderer_read_options(environ_cb);
-#if defined(PARALLAX_HEADLESS_BENCHMARK)
-    /* Isolated comparison builds can still force native task execution.
-     * These controls are absent from production core options. */
-    {
-        struct retro_variable route = {"wtfn64_rsp_hle", NULL};
-        if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &route) && route.value)
-            renderer_settings.rsp_hle = strcmp(route.value, "disabled") != 0;
-        route.key = "wtfn64_lle_graphics"; route.value = NULL;
-        if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &route) && route.value)
-            renderer_settings.lle_graphics = strcmp(route.value, "enabled") == 0;
-        route.key = "wtfn64_lle_audio"; route.value = NULL;
-        if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &route) && route.value)
-            renderer_settings.lle_audio = strcmp(route.value, "enabled") == 0;
-    }
-#endif
     if (log_cb)
         log_cb(RETRO_LOG_INFO, "Renderer: %s, upscale %ux, performance cores %s.\n",
                 renderer_settings.renderer == RENDERER_ANGRYLION ? "Angrylion" : renderer_settings.renderer == RENDERER_GLRDP ? "GLRDP" : "paraLLEl-RDP",

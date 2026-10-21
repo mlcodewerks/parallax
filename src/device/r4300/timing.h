@@ -57,8 +57,8 @@ static osal_force_inline unsigned int r4300_issue_reservation(unsigned int compa
 {
     /* The native per-cycle model already includes issue in its base cost.
      * Cache storage does not determine the issue rate: tags-only timing can
-     * use the same interlocks. HLE and untimed components retain their
-     * compatibility envelope until their estimates support the native rate. */
+     * use the same interlocks. Only explicit compatibility profiles or
+     * untimed CPU execution retain the compatibility issue envelope. */
     return compatibility != 0;
 }
 
@@ -75,7 +75,7 @@ static osal_force_inline int r4300_begin_instruction_cycles(struct r4300_core* r
     if (cache_timing) r4300_fetch_access_cycles(r4300, pc);
     /* Compatibility timing absorbs interlocks in its reserved clock. Native
      * timing charges the actual interlock, with no unconditional second issue.
-     * Keep the HLE/untimed envelope used by DK64's vine sequence. */
+     * Keep explicit compatibility profiles, including DK64's vine sequence. */
     unsigned int issue = r4300_issue_reservation(r4300->compat_issue_clock);
     uint32_t status = r4300->cp0.regs[CP0_STATUS_REG];
     if ((status & CP0_STATUS_MODE_MASK) && !(status & (CP0_STATUS_EXL | CP0_STATUS_ERL))) {

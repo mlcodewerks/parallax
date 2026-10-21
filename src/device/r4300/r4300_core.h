@@ -135,7 +135,7 @@ struct r4300_core
     uint32_t dcache_tags[512];
     unsigned int cache_timing; /* 0: off, 1: write-back contents, 2: tags/latency only */
     unsigned int issue_policy; /* ROM configuration, retained across resets and states. */
-    /* Compatibility issue envelope; timed native RSP clears it with full or fast CPU timing. */
+    /* Compatibility issue envelope; timed CPU modes use native issue unless a ROM profile overrides it. */
     unsigned int compat_issue_clock;
     /* Instruction-boundary approximation of the VR4300 pipeline hazards.
      * The interpreter commits architecturally one instruction at a time, so

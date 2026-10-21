@@ -1,11 +1,12 @@
 #include "core/file.h"
-/* Automatic task HLE and streaming graphics walkers. The native RSP remains
- * connected for undetected programs and their instruction continuations. */
+/* Accurate executes native RSP instructions. Fast uses task HLE and streaming
+ * walkers exclusively, stopping on unsupported programs or continuations. */
 #include "optional_rsp.h"
 #include "renderer_options.h"
 #include "device/device.h"
 #include "main/main.h"
 #include "core/log.h"
+#include "core/frontend.h"
 #include "device/rcp/rdp/rdp_core.h"
 #include "device/rcp/rdp/angrylion/rdp_emit_backend.h"
 #include "device/rcp/rdp/angrylion/rdp_emit_hle.h"
@@ -48,9 +49,7 @@ static void capture_cp0(uint32_t words[16])
     };
     memcpy(words, values, sizeof(values));
 }
-static unsigned int forwarded_cycles;
-static unsigned int start_status;
-static int forwarded;
+static int strict_hle_failed;
 static unsigned int graphics_checksum;
 static const char *graphics_capture_prefix;
 static unsigned int graphics_capture_started, graphics_capture_count;
@@ -151,6 +150,7 @@ void optional_rsp_init(rsp_memory rsp_info)
     graphics_capture_started = graphics_capture_count = 0;
     memset(&hle, 0, sizeof(hle));
     graphics_tasks = audio_tasks = other_tasks = boot_tasks = lle_tasks = 0;
+    strict_hle_failed = 0;
     memset(graphics_resumes, 0, sizeof(graphics_resumes));
     hle_init(&hle, info.RDRAM, info.DMEM, info.IMEM, info.MI_INTR_REG,
         info.SP_MEM_ADDR_REG, info.SP_DRAM_ADDR_REG, info.SP_RD_LEN_REG,
@@ -281,6 +281,23 @@ static void graphics_capture_begin(const uint32_t *task)
     core_file_close(file);
 }
 
+static unsigned int unsupported_hle_task(void)
+{
+    static const char message[] = "Fast RSP: unsupported task. Select Accurate timing and restart content.";
+    if (!strict_hle_failed) {
+        strict_hle_failed = 1;
+        core_log(CORE_LOG_ERROR, "%s (task=%u, PC=%03x)", message,
+            ((const uint32_t *)(info.DMEM + 0xfc0))[0], *info.SP_PC_REG & 0xfff);
+        if (environ_cb) {
+            struct retro_message notification = {message, 600};
+            environ_cb(RETRO_ENVIRONMENT_SET_MESSAGE, &notification);
+        }
+    }
+    *info.SP_STATUS_REG |= 3u; /* HALT/BROKE; never execute a native fallback. */
+    stop_device(&g_dev);
+    return 0;
+}
+
 unsigned int optional_rsp_execute(unsigned int cycles)
 {
     const uint32_t *task = (const uint32_t *)(info.DMEM + 0xfc0);
@@ -289,8 +306,10 @@ unsigned int optional_rsp_execute(unsigned int cycles)
      * Only the unfinished task that already owns the SP may reuse it. */
     enum hle_graphics_resume resume = g_dev.sp.rsp_task_locked
         ? hle_graphics_resume_pending(&hle) : HLE_RESUME_NONE;
-    if (!renderer_settings.rsp_hle || (*info.SP_PC_REG & 0xfff) != 0)
+    if (!renderer_settings.rsp_hle)
         goto native;
+    if (strict_hle_failed || (*info.SP_PC_REG & 0xfff) != 0)
+        return unsupported_hle_task();
     /* Upstream identifies direct programs by boot size. Their DMEM tail is
      * not an OSTask and must not be subjected to guest-pointer checks.
      * Graphics streams terminate with commands; their unused data_size
@@ -300,22 +319,20 @@ unsigned int optional_rsp_execute(unsigned int cycles)
         (task[6] & 3) || task[6] > 0x7ff000 || task[7] > 0x1000 ||
         (task[12] & 3) || task[12] >= 0x800000 ||
         (task[0] != 1u && task[13] > 0x800000 - task[12])))
-        goto native;
+        return unsupported_hle_task();
     kind = resume ? HLE_TASK_GRAPHICS : hle_get_task_kind(&hle);
     if (kind == HLE_TASK_UNKNOWN ||
         (kind == HLE_TASK_GRAPHICS && (renderer_settings.lle_graphics ||
             (!resume && !graphics_supported(task)))) ||
         (kind == HLE_TASK_AUDIO && ((task[12] & 7) ||
             renderer_settings.lle_audio || !audio_supported(task))))
-        goto native;
+        return unsupported_hle_task();
     if(kind==HLE_TASK_GRAPHICS && !(task[1]&1u) && !hle_stream_can_resume(graphics_checksum) &&
         (graphics_checksum==0x2095bu || graphics_checksum==0x25c16u || graphics_checksum==0x25c53u) &&
         task[10]<task[11] && task[11]<=0x800000u){
         *info.DPC_START_REG=*info.DPC_CURRENT_REG=*info.DPC_END_REG=task[11];
     }
-    forwarded = 0;
     hle_timing_set_slice_limit(renderer_component_timing()?32768u:0u);
-    start_status = *info.SP_STATUS_REG;
     parallelRSPResetExecutedCycles();
     hle.rsp_vco=parallelRSPGetVCO();hle.rsp_vco_written=0;
     rsp_graphics_entry_carry(hle.rsp_vco);
@@ -336,8 +353,9 @@ unsigned int optional_rsp_execute(unsigned int cycles)
         hle_resume_graphics(&hle, resume, graphics_checksum);
     }
     else hle_execute(&hle);
-    if(!forwarded && hle.rsp_vco_written)parallelRSPSetVCO(hle.rsp_vco);
-    if(!forwarded){
+    if (strict_hle_failed) return 0;
+    if(hle.rsp_vco_written)parallelRSPSetVCO(hle.rsp_vco);
+    {
         if(kind==HLE_TASK_GRAPHICS)hle.rsp_t6_written=naboo_get_phase(&hle.rsp_t6);
         if(hle.rsp_t6_written)parallelRSPSetT6(hle.rsp_t6);
         if(kind==HLE_TASK_GRAPHICS)hle.rsp_f5_written=naboo_get_context(hle.rsp_f5);
@@ -352,12 +370,11 @@ unsigned int optional_rsp_execute(unsigned int cycles)
         }
         if(hle.rsp_f5_written)parallelRSPSetF5Context(hle.rsp_f5,hle.rsp_f5_written);
     }
-    if (forwarded) lle_tasks++;
-    else if (kind == HLE_TASK_GRAPHICS) graphics_tasks++;
+    if (kind == HLE_TASK_GRAPHICS) graphics_tasks++;
     else if (kind == HLE_TASK_AUDIO) audio_tasks++;
     else if (kind == HLE_TASK_BOOT) boot_tasks++;
     else other_tasks++;
-    return forwarded ? forwarded_cycles : hle_timing_cycles();
+    return hle_timing_cycles();
 native:
     if ((*info.SP_PC_REG & 0xfff) == 0 && task[0] == 1 && task[3] <= 0x1000 &&
         task[4] <= 0x7ff000 && task[6] <= 0x7ff000)
@@ -387,10 +404,8 @@ int HleForwardTask(void *u)
 {
     (void)u;
     if (timing_probe_active) { timing_probe_failed = 1; return 1; }
-    *info.SP_STATUS_REG = start_status;
-    forwarded_cycles = native_rsp_execute(~0u);
-    forwarded = 1;
-    return 0;
+    unsupported_hle_task();
+    return 1;
 }
 void optional_rsp_shutdown(void)
 {
