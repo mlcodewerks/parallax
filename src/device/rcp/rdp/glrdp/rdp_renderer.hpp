@@ -11,6 +11,7 @@
 #include "rdp_types.hpp"
 #include "rdp_vertex.hpp"
 #include "gpu_depth.hpp"
+#include "gpu_tmem.hpp"
 #include "rdp_accuracy.h"
 #include "vi_field.hpp"
 #include <array>
@@ -40,6 +41,8 @@ class RDPRenderer {
         std::uint64_t primitives = 0, draws = 0, batches = 0, batched_primitives = 0;
         std::uint64_t atlas_hits = 0, atlas_uploads = 0, atlas_resets = 0, standalone_uploads = 0;
         std::uint64_t framebuffer_tiles = 0, framebuffer_readbacks = 0, decode_cache_hits = 0;
+        std::uint64_t decoded_tiles = 0, decoded_pixels = 0;
+        std::uint64_t gpu_texture_loads = 0, gpu_texture_tiles = 0, gpu_texture_cache_hits = 0, tmem_cpu_reads = 0;
         std::uint64_t queues = 0, queue_flushes = 0, state_flushes = 0;
         std::uint64_t immediate_raw_z = 0, immediate_alias = 0, immediate_depth = 0, immediate_texture = 0;
         std::uint64_t metadata_writes = 0, write_flushes = 0;
@@ -59,6 +62,9 @@ class RDPRenderer {
                  std::uint32_t xscale, std::uint32_t yscale, std::uint32_t vsync = 525,
                  std::uint32_t current = UINT32_MAX);
     void fb_read(std::uint32_t);
+    void texture_read(const RDPState &, RDPOpcode, std::uint64_t);
+    bool load_texture(RDPState &, RDPOpcode, std::uint64_t);
+    void materialize_tmem(RDPState &);
     void fb_write(std::uint32_t, std::uint32_t);
     void read_screen(void *, int *, int *);
     void capture_bmp(const char *);
@@ -77,6 +83,8 @@ class RDPRenderer {
     std::size_t ubo_offset_ = 0, ubo_slot_bytes_ = 0;
     TextureAtlas atlas_;
     TextureDecodeCache texture_decode_cache_;
+    GPUTMEM gpu_tmem_;
+    std::uint64_t atlas_epoch_ = 1;
     std::array<TextureAtlas::Region, 8> tile_regions_{};
     bool standalone_tiles_ = false, atlas_full_ = false;
     unsigned current_tile_count_ = 1;
@@ -96,6 +104,7 @@ class RDPRenderer {
     void bind_tiles();
     void flush_batch(const std::vector<PrimitiveUniforms::Slot> &, const std::vector<PrimitiveBounds> &);
     bool pending_batch_overlaps(std::uint32_t address, std::uint32_t size) const;
+    void texture_read_range(std::uint32_t address, std::uint32_t size);
     void uniform_1i(GLint l, GLint x) { if (!primitive_uniforms_.store(l, &x, 4)) glUniform1i(l, x); }
     void uniform_1ui(GLint l, GLuint x) { if (!primitive_uniforms_.store(l, &x, 4)) glUniform1ui(l, x); }
     void uniform_1f(GLint l, GLfloat x) { if (!primitive_uniforms_.store(l, &x, 4)) glUniform1f(l, x); }

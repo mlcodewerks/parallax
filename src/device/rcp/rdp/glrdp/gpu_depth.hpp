@@ -35,7 +35,7 @@ class GPUDepthBuffer {
                     bool import_rdram);
     Surface *find(std::uint32_t address);
     const Surface *find(std::uint32_t address) const;
-    bool has_pending_read(std::uint32_t address) const;
+    bool has_pending_read(std::uint32_t address, std::uint32_t size = 1) const;
     bool has_surface_range(std::uint32_t address, std::uint32_t size) const;
     bool flush_range(std::uint32_t address, std::uint32_t size, N64Memory &memory);
 

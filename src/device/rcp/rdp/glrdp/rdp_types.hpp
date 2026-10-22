@@ -2,6 +2,8 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
+#include "gpu_tmem_state.hpp"
 
 enum class RDPOpcode : std::uint8_t {
     NoOp = 0x00,
@@ -140,6 +142,7 @@ struct RDPKey {
 };
 struct RDPState {
     std::array<std::uint8_t, 4096> tmem{};
+    std::shared_ptr<RDPTMEMBacking> gpu_tmem;
     std::array<RDPTile, 8> tiles{};
     RDPImage texture_image{}, color_image{};
     std::uint32_t z_image_address = 0;

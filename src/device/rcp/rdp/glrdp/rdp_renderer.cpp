@@ -84,6 +84,7 @@ std::uint64_t tile_sig(const RDPState &s, std::uint8_t i) {
     const auto &t = s.tiles[i & 7];
     std::uint64_t h = 0xcbf29ce484222325ull;
     h = hash_mix(h, s.tmem_generation);
+    h = hash_mix(h, s.gpu_tmem ? s.gpu_tmem->serial : 0);
     h = hash_mix(h, std::uint64_t(t.format));
     h = hash_mix(h, std::uint64_t(t.size));
     h = hash_mix(h, t.line);
@@ -293,11 +294,20 @@ int tile_axis(int p, int size, int mask, int mirror) {
 ivec2 tile_address(ivec2 p, ivec2 size, ivec4 wrap) {
     return ivec2(tile_axis(p.x, size.x, wrap.x, wrap.z), tile_axis(p.y, size.y, wrap.y, wrap.w));
 }
-vec4 tile_fetch(sampler2D tex, ivec2 p, ivec4 region) {
+vec4 tile_fetch(sampler2D tex, ivec2 p, ivec4 region, ivec4 wrap) {
+    if ((wrap.z & 32) != 0) {
+        int index = p.x + p.y * (wrap.w >> 2);
+        if ((p.y & 1) != 0) index ^= 1 << ((wrap.z >> 6) - 1);
+        index &= region.z * region.w - 1;
+        p = ivec2(index & 511, index >> 9);
+    }
+    // Compact tiles retain logical addressing above; TMEM storage repeats
+    // independently of clamp/mirror boundaries. Ordinary tiles need no wrap.
+    if (p.x >= region.z) p.x %= region.z;
+    if (p.y >= region.w) p.y %= region.w;
     return texelFetch(tex, p + region.xy, 0);
 }
-vec4 sample_texture(sampler2D tex, vec2 uv, ivec4 wrap, int texture_cycle, ivec4 region) {
-    ivec2 size = region.zw;
+vec4 sample_texture(sampler2D tex, vec2 uv, ivec4 wrap, int texture_cycle, ivec4 region, ivec2 size) {
     // RDP coordinates address texels directly; filtering starts at the texel,
     // without the normalized GL sampling half-texel subtraction.
     vec2 p = uv;
@@ -319,24 +329,24 @@ vec4 sample_texture(sampler2D tex, vec2 uv, ivec4 wrap, int texture_cycle, ivec4
         int index = (coordinate.x + coordinate.y * (wrap.w >> 2) * 4) & 2047;
         if ((coordinate.y & 1) != 0)
             index ^= 2;
-        return tile_fetch(tex, ivec2(index & 511, index >> 9), region);
+        return tile_fetch(tex, ivec2(index & 511, index >> 9), region, wrap);
     }
     if (texture_filter_mode < 2 || cycle_type == 2)
-        return tile_fetch(tex, tile_address(base, size, wrap), region);
+        return tile_fetch(tex, tile_address(base, size, wrap), region, wrap);
     vec2 f = floor(fract(p) * 32.0) / 32.0;
     if ((wrap.z & 8) != 0 && texture_convert_modes[texture_cycle] == 0) {
-        vec4 a = tile_fetch(tex, tile_address(base, size, wrap), region);
-        vec4 d = tile_fetch(tex, tile_address(base + ivec2(2, 1), size, wrap), region);
+        vec4 a = tile_fetch(tex, tile_address(base, size, wrap), region, wrap);
+        vec4 d = tile_fetch(tex, tile_address(base + ivec2(2, 1), size, wrap), region, wrap);
         vec2 rg = vec2(floor(f.x * 16.0) / 32.0 + float(base.x & 1) * 0.5, f.y);
         return vec4(rg.x + rg.y >= 1.0 ? d.rg : a.rg, f.x + f.y >= 1.0 ? d.ba : a.ba);
     }
     if ((wrap.z & 12) != 0) {
         // YUV TLUT descriptors fetch the next column two byte indices away.
         // Red/green use the half-rate horizontal interpolation phase.
-        vec4 a = tile_fetch(tex, tile_address(base, size, wrap), region);
-        vec4 b = tile_fetch(tex, tile_address(base + ivec2(2, 0), size, wrap), region);
-        vec4 c = tile_fetch(tex, tile_address(base + ivec2(0, 1), size, wrap), region);
-        vec4 d = tile_fetch(tex, tile_address(base + ivec2(2, 1), size, wrap), region);
+        vec4 a = tile_fetch(tex, tile_address(base, size, wrap), region, wrap);
+        vec4 b = tile_fetch(tex, tile_address(base + ivec2(2, 0), size, wrap), region, wrap);
+        vec4 c = tile_fetch(tex, tile_address(base + ivec2(0, 1), size, wrap), region, wrap);
+        vec4 d = tile_fetch(tex, tile_address(base + ivec2(2, 1), size, wrap), region, wrap);
         vec2 rg = vec2(floor(f.x * 16.0) / 32.0 + float(base.x & 1) * 0.5, f.y);
         vec4 low = a + (b - a) * f.x + (c - a) * f.y;
         vec4 high = d + (c - d) * (1.0 - f.x) + (b - d) * (1.0 - f.y);
@@ -353,10 +363,10 @@ vec4 sample_texture(sampler2D tex, vec2 uv, ivec4 wrap, int texture_cycle, ivec4
         return result;
     }
     if (texture_filter_mode == 3 && all(equal(f, vec2(0.5)))) {
-        return (tile_fetch(tex, tile_address(base, size, wrap), region) +
-                tile_fetch(tex, tile_address(base + ivec2(1, 0), size, wrap), region) +
-                tile_fetch(tex, tile_address(base + ivec2(0, 1), size, wrap), region) +
-                tile_fetch(tex, tile_address(base + ivec2(1, 1), size, wrap), region)) *
+        return (tile_fetch(tex, tile_address(base, size, wrap), region, wrap) +
+                tile_fetch(tex, tile_address(base + ivec2(1, 0), size, wrap), region, wrap) +
+                tile_fetch(tex, tile_address(base + ivec2(0, 1), size, wrap), region, wrap) +
+                tile_fetch(tex, tile_address(base + ivec2(1, 1), size, wrap), region, wrap)) *
                0.25;
     }
     ivec2 p0 = base, p1 = base + ivec2(1, 0), p2 = base + ivec2(0, 1);
@@ -366,9 +376,9 @@ vec4 sample_texture(sampler2D tex, vec2 uv, ivec4 wrap, int texture_cycle, ivec4
         p2 = base + ivec2(1, 0);
         f = vec2(1.0) - f;
     }
-    vec4 a = tile_fetch(tex, tile_address(p0, size, wrap), region);
-    vec4 b = tile_fetch(tex, tile_address(p1, size, wrap), region);
-    vec4 c = tile_fetch(tex, tile_address(p2, size, wrap), region);
+    vec4 a = tile_fetch(tex, tile_address(p0, size, wrap), region, wrap);
+    vec4 b = tile_fetch(tex, tile_address(p1, size, wrap), region, wrap);
+    vec4 c = tile_fetch(tex, tile_address(p2, size, wrap), region, wrap);
     return a + (b - a) * f.x + (c - a) * f.y;
 }
 
@@ -389,6 +399,11 @@ vec4 sample_mip_tile(int level, vec2 st, int texture_cycle) {
     if (cycle_type == 2)
         uv.x = floor(uv.x) + copy_lane;
     ivec4 wrap = tile_wrap[level];
+    ivec2 logical_size = ivec2(tile_clamp[level].zw) + ivec2(1);
+    if (tile_clamp[level].x < 0.0 && wrap.x > 0 && (wrap.z & 1) == 0)
+        logical_size.x = 1 << min(wrap.x, 10);
+    if (tile_clamp[level].y < 0.0 && wrap.y > 0 && (wrap.w & 1) == 0)
+        logical_size.y = 1 << min(wrap.y, 10);
     // RDP maximum tests use absolute tile endpoints before subtracting SL/TL.
     // For inverted bounds, the unsigned clamp difference wraps to 10 bits;
     // clamping relative coordinates to an ordinary host rectangle is wrong.
@@ -400,24 +415,24 @@ vec4 sample_mip_tile(int level, vec2 st, int texture_cycle) {
             uv.y = limits.w;
     }
     if (tile_region[level].z > 0)
-        return sample_texture(tile_atlas, uv, wrap, texture_cycle, tile_region[level]);
+        return sample_texture(tile_atlas, uv, wrap, texture_cycle, tile_region[level], logical_size);
     switch (level) {
     case 0:
-        return sample_texture(mip_tiles[0], uv, wrap, texture_cycle, ivec4(0, 0, textureSize(mip_tiles[0], 0)));
+        return sample_texture(mip_tiles[0], uv, wrap, texture_cycle, ivec4(0, 0, textureSize(mip_tiles[0], 0)), logical_size);
     case 1:
-        return sample_texture(mip_tiles[1], uv, wrap, texture_cycle, ivec4(0, 0, textureSize(mip_tiles[1], 0)));
+        return sample_texture(mip_tiles[1], uv, wrap, texture_cycle, ivec4(0, 0, textureSize(mip_tiles[1], 0)), logical_size);
     case 2:
-        return sample_texture(mip_tiles[2], uv, wrap, texture_cycle, ivec4(0, 0, textureSize(mip_tiles[2], 0)));
+        return sample_texture(mip_tiles[2], uv, wrap, texture_cycle, ivec4(0, 0, textureSize(mip_tiles[2], 0)), logical_size);
     case 3:
-        return sample_texture(mip_tiles[3], uv, wrap, texture_cycle, ivec4(0, 0, textureSize(mip_tiles[3], 0)));
+        return sample_texture(mip_tiles[3], uv, wrap, texture_cycle, ivec4(0, 0, textureSize(mip_tiles[3], 0)), logical_size);
     case 4:
-        return sample_texture(mip_tiles[4], uv, wrap, texture_cycle, ivec4(0, 0, textureSize(mip_tiles[4], 0)));
+        return sample_texture(mip_tiles[4], uv, wrap, texture_cycle, ivec4(0, 0, textureSize(mip_tiles[4], 0)), logical_size);
     case 5:
-        return sample_texture(mip_tiles[5], uv, wrap, texture_cycle, ivec4(0, 0, textureSize(mip_tiles[5], 0)));
+        return sample_texture(mip_tiles[5], uv, wrap, texture_cycle, ivec4(0, 0, textureSize(mip_tiles[5], 0)), logical_size);
     case 6:
-        return sample_texture(mip_tiles[6], uv, wrap, texture_cycle, ivec4(0, 0, textureSize(mip_tiles[6], 0)));
+        return sample_texture(mip_tiles[6], uv, wrap, texture_cycle, ivec4(0, 0, textureSize(mip_tiles[6], 0)), logical_size);
     default:
-        return sample_texture(mip_tiles[7], uv, wrap, texture_cycle, ivec4(0, 0, textureSize(mip_tiles[7], 0)));
+        return sample_texture(mip_tiles[7], uv, wrap, texture_cycle, ivec4(0, 0, textureSize(mip_tiles[7], 0)), logical_size);
     }
 }
 
@@ -1907,6 +1922,7 @@ void main() {
     glVertexAttribPointer(3, 1, GL_FLOAT, GL_FALSE, sizeof(GLVertex),
                           (void *)offsetof(GLVertex, inverse_w));
     glBindVertexArray(0);
+    gpu_tmem_.initialize();
     return true;
 }
 GLint RDPRenderer::uniform(GLuint program, const char *name) {
@@ -1936,6 +1952,11 @@ void RDPRenderer::initialize_samplers(GLuint program) {
 }
 void RDPRenderer::shutdown() {
     flush();
+    gpu_tmem_.clear();
+    if (stats_.gpu_texture_loads || stats_.tmem_cpu_reads)
+        std::fprintf(stderr, "GLRDP GPU textures = loads=%llu tiles=%llu cache_hits=%llu tmem_cpu_reads=%llu\n",
+            (unsigned long long)stats_.gpu_texture_loads, (unsigned long long)stats_.gpu_texture_tiles,
+            (unsigned long long)stats_.gpu_texture_cache_hits, (unsigned long long)stats_.tmem_cpu_reads);
     if (stats_.primitives)
         std::fprintf(stderr, "GLRDP CPU writes = metadata=%llu batch_flushes=%llu\n",
             (unsigned long long)stats_.metadata_writes, (unsigned long long)stats_.write_flushes);
@@ -1950,6 +1971,9 @@ void RDPRenderer::shutdown() {
     if (stats_.decode_cache_hits)
         std::fprintf(stderr, "GLRDP texture decode cache = hits=%llu\n",
                      (unsigned long long)stats_.decode_cache_hits);
+    if (stats_.decoded_tiles)
+        std::fprintf(stderr, "GLRDP decoded textures = tiles=%llu pixels=%llu\n",
+            (unsigned long long)stats_.decoded_tiles, (unsigned long long)stats_.decoded_pixels);
     if (primitive_ubo_ && stats_.primitives)
         std::fprintf(stderr, "GLRDP submission = primitives=%llu draws=%llu batches=%llu batched=%llu atlas_hits=%llu atlas_uploads=%llu atlas_resets=%llu standalone=%llu framebuffer_tiles=%llu framebuffer_readbacks=%llu\n",
             (unsigned long long)stats_.primitives, (unsigned long long)stats_.draws,
@@ -1960,7 +1984,7 @@ void RDPRenderer::shutdown() {
     if (primitive_ubo_) glDeleteBuffers(1, &primitive_ubo_);
     if (atlas_texture_) glDeleteTextures(1, &atlas_texture_);
     primitive_ubo_ = atlas_texture_ = 0;
-    atlas_.clear(); texture_decode_cache_.clear(); tile_regions_ = {};
+    atlas_.clear(); ++atlas_epoch_; texture_decode_cache_.clear(); tile_regions_ = {};
     field_history_.reset();
     uniforms_.clear();
     combiner_values_.clear();
@@ -2008,7 +2032,7 @@ void RDPRenderer::shutdown() {
     gpu_depth_.clear();
 }
 void RDPRenderer::reset() {
-    flush(); atlas_.clear(); texture_decode_cache_.clear(); tile_regions_ = {};
+    flush(); atlas_.clear(); ++atlas_epoch_; texture_decode_cache_.clear(); tile_regions_ = {};
     field_history_.reset();
     gpu_depth_.clear();
     fb_.clear();
@@ -2170,6 +2194,41 @@ void RDPRenderer::upload_tile(const RDPState &s, std::uint8_t ti, unsigned unit)
         return;
     }
     const auto decode_key = TextureDecodeCache::key(s, ti);
+    if (rdp_tile_uses_gpu(s, ti)) {
+        auto &snapshot = *s.gpu_tmem;
+        if (snapshot.atlas_epoch != atlas_epoch_) {
+            snapshot.tiles.clear(); snapshot.atlas_epoch = atlas_epoch_;
+        }
+        for (const auto &cached : snapshot.tiles)
+            if (cached.parameters == decode_key.parameters) {
+                tile_regions_[unit] = cached.region; tile_signature_[unit] = sig;
+                ++stats_.atlas_hits; ++stats_.gpu_texture_cache_hits;
+                return;
+            }
+        const auto storage = rdp_tile_storage(s, ti, true);
+        auto region = atlas_.allocate(storage.width, storage.height);
+        if (region[2]) {
+            gpu_tmem_.decode(s, ti, atlas_texture_, region);
+            if (snapshot.tiles.size() == 64) snapshot.tiles.erase(snapshot.tiles.begin());
+            snapshot.tiles.push_back({decode_key.parameters, region});
+            tile_regions_[unit] = region;
+        } else {
+            atlas_full_ = true;
+            flush(); tile_regions_[unit] = {}; standalone_tiles_ = true;
+            glActiveTexture(GL_TEXTURE0 + (unit < 2 ? unit : unit + 4));
+            glBindTexture(GL_TEXTURE_2D, tile_texture_[unit]);
+            if (tile_width_[unit] != int(storage.width) || tile_height_[unit] != int(storage.height))
+                glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, storage.width, storage.height, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+            tile_width_[unit] = storage.width; tile_height_[unit] = storage.height;
+            tile_pixels_[unit].clear();
+            gpu_tmem_.decode(s, ti, tile_texture_[unit], {0, 0, int(storage.width), int(storage.height)});
+            ++stats_.standalone_uploads;
+        }
+        tile_signature_[unit] = sig; ++stats_.gpu_texture_tiles;
+        return;
+    }
     if (const auto *region = texture_decode_cache_.find(decode_key, s.tmem)) {
         tile_regions_[unit] = *region;
         tile_signature_[unit] = sig;
@@ -2177,9 +2236,11 @@ void RDPRenderer::upload_tile(const RDPState &s, std::uint8_t ti, unsigned unit)
         ++stats_.decode_cache_hits;
         return;
     }
-    auto d = rdp_decode_tile(s, ti);
+    auto d = rdp_decode_tile(s, ti, true);
     if (d.rgba.empty())
         return;
+    ++stats_.decoded_tiles;
+    stats_.decoded_pixels += std::uint64_t(d.width) * d.height;
     // The load pipe already copied the source into TMEM. These pixels are
     // immutable even when the source address belongs to a framebuffer;
     // later framebuffer writes do not change the loaded TMEM snapshot.
@@ -2612,7 +2673,7 @@ void RDPRenderer::draw_vertices(const std::vector<GLVertex> &v, bool textured, c
     if (v.empty())
         return;
     if (atlas_full_) {
-        flush(); atlas_.clear(); texture_decode_cache_.clear(); tile_signature_.fill(~0ull);
+        flush(); atlas_.clear(); ++atlas_epoch_; texture_decode_cache_.clear(); tile_signature_.fill(~0ull);
         atlas_full_ = false; ++stats_.atlas_resets;
     }
     standalone_tiles_ = false;
@@ -2708,14 +2769,17 @@ void RDPRenderer::draw_vertices(const std::vector<GLVertex> &v, bool textured, c
                     texture_shift(1.0f, tile.shift_s), texture_shift(1.0f, tile.shift_t),
                     -float(tile.sl) / 4.0f, -float(tile.tl) / 4.0f};
                 const bool linear = rdp_linear_copy_tile(s, ti + selected);
+                const auto storage = rdp_tile_storage(s, ti + selected, true);
                 const std::array<int, 4> wrap = {tile.mask_s, tile.mask_t,
                                                  int(tile.clamp_s) | (int(tile.mirror_s) << 1) |
                                                      (tile.format == RDPImageFormat::YUV
                                                           ? (((s.other_modes >> 47) & 1) ? 4 : 8)
                                                           : 0) |
-                                                     (linear ? 16 : 0),
+                                                     (linear ? 16 : 0) |
+                                                     (storage.texel_shift ? 32 | int(storage.texel_shift << 6) : 0),
                                                  int(tile.clamp_t) | (int(tile.mirror_t) << 1) |
-                                                     (linear ? int(tile.line) << 2 : 0)};
+                                                     (linear ? int(tile.line) << 2 :
+                                                      storage.texel_shift ? int(tile.line) << (storage.texel_shift + 2) : 0)};
                 const std::array<float, 4> clamp = {
                     float(int(tile.sh) - int(tile.sl)) / 4.0f,
                     float(int(tile.th) - int(tile.tl)) / 4.0f,
@@ -2811,7 +2875,8 @@ void RDPRenderer::draw_vertices(const std::vector<GLVertex> &v, bool textured, c
         batch_footprints_.push_back(footprint);
         batch_program_ = program_; batch_writes_z_ |= (s.other_modes & 0x20u) != 0;
         batch_reads_color_ |= rdp_reads_color_memory(s);
-        target.raw_z = false; target.gpu_dirty = true;
+        target.raw_z = false;
+        target.mark_gpu_written(bounds_x_, bounds_y_, bounds_w_, bounds_h_);
         if (target.address == target.z_address) {
             const auto bytes = std::uint64_t(target.native_width) * target.native_height *
                                (4u << unsigned(target.size)) / 8u;
@@ -2866,7 +2931,7 @@ void RDPRenderer::draw_vertices(const std::vector<GLVertex> &v, bool textured, c
                            (4u << unsigned(target.size)) / 8u;
         gpu_depth_.invalidate_range(target.address, std::uint32_t(bytes));
     }
-    target.gpu_dirty = true;
+    target.mark_gpu_written(bounds_x_, bounds_y_, bounds_w_, bounds_h_);
 }
 void RDPRenderer::draw_triangle(const RDPTriangle &t, const RDPState &s) {
     const auto &e = t.edge;
@@ -3227,6 +3292,163 @@ bool RDPRenderer::pending_batch_overlaps(std::uint32_t address, std::uint32_t si
         return color || depth;
     }
     return false;
+}
+
+namespace {
+std::pair<std::uint64_t, std::uint64_t> texture_source_range(const RDPState &s, RDPOpcode opcode, std::uint64_t command) {
+    const unsigned sl = (command >> 44) & 0xfff, tl = (command >> 32) & 0xfff;
+    const unsigned sh = (command >> 12) & 0xfff, th = command & 0xfff;
+    const unsigned bits = 4u << unsigned(s.texture_image.size);
+    std::uint64_t begin, bytes;
+    if (opcode == RDPOpcode::LoadBlock) {
+        if (sh < sl) return {0, 0};
+        const auto source_texel = std::uint64_t(tl) * s.texture_image.width + sl;
+        begin = std::uint64_t(s.texture_image.address) +
+                source_texel * bits / 8;
+        bytes = bits >= 8 ? ((std::uint64_t(sh - sl + 1) * bits + 63) / 64) * 8
+                          : ((source_texel & 1u) + sh - sl + 2) / 2;
+    } else if (opcode == RDPOpcode::LoadTLUT) {
+        if ((sh >> 2) < (sl >> 2)) return {0, 0};
+        begin = std::uint64_t(s.texture_image.address) +
+                (std::uint64_t(tl >> 2) * s.texture_image.width + (sl >> 2)) * 2;
+        bytes = ((sh >> 2) - (sl >> 2) + 1) * 2;
+    } else {
+        if (bits < 8 || (sh >> 2) < (sl >> 2) || (th >> 2) < (tl >> 2)) return {0, 0};
+        begin = std::uint64_t(s.texture_image.address) +
+                (std::uint64_t(tl >> 2) * s.texture_image.width + (sl >> 2)) * (bits / 8);
+        // Include the complete final 64-bit load word, even when the logical
+        // tile ends partway through it. Intermediate row gaps are conservative.
+        bytes = std::uint64_t((th >> 2) - (tl >> 2)) * s.texture_image.width * (bits / 8) +
+                ((std::uint64_t((sh >> 2) - (sl >> 2) + 1) * bits + 63) / 64) * 8;
+    }
+    return {begin, bytes};
+}
+}
+
+void RDPRenderer::materialize_tmem(RDPState &state) {
+    if (!state.gpu_tmem) return;
+    GLStateGuard guard;
+    if (gpu_tmem_.materialize(state)) ++stats_.tmem_cpu_reads;
+}
+
+bool RDPRenderer::load_texture(RDPState &state, RDPOpcode opcode, std::uint64_t command) {
+    if (!memory_) return false;
+    const auto [begin, bytes] = texture_source_range(state, opcode, command);
+    if (!bytes) return bool(state.gpu_tmem);
+    constexpr std::uint32_t bus_size = 0x1000000;
+    const auto address = std::uint32_t(begin) & (bus_size - 1);
+    const auto first = std::min<std::uint64_t>(bytes, bus_size - address);
+    const std::array<std::pair<std::uint32_t, std::uint32_t>, 2> ranges = bytes >= bus_size
+        ? std::array{std::pair{0u, bus_size}, std::pair{0u, 0u}}
+        : std::array{std::pair{address, std::uint32_t(first)}, std::pair{0u, std::uint32_t(bytes - first)}};
+    std::vector<const GLFramebuffer *> candidates;
+    bool depth_pending = false, unsupported_color = false;
+    for (const auto &[start, count] : ranges) {
+        if (!count) continue;
+        depth_pending |= gpu_depth_.has_pending_read(start, count);
+        depth_pending |= batch_depth_ && batch_writes_z_ &&
+            std::uint64_t(start) < std::uint64_t(batch_depth_->address) +
+                std::uint64_t(batch_depth_->width) * batch_depth_->height * 2 &&
+            batch_depth_->address < std::uint64_t(start) + count;
+        for (const auto &[_, f] : fb_.buffers())
+            if (f.fbo && f.color && f.gpu_pending_range(start, count)) {
+                if (f.size == RDPImageSize::Bits4) unsupported_color = true;
+                else if (std::uint64_t(f.address) + std::uint64_t(f.native_width) * f.native_height *
+                         (1u << (unsigned(f.size) - 1u)) <= memory_->size() &&
+                         std::find(candidates.begin(), candidates.end(), &f) == candidates.end())
+                    candidates.push_back(&f);
+            }
+    }
+    if (candidates.empty() && !state.gpu_tmem) return false;
+    std::array<std::uint32_t, 4096> sources;
+    if (depth_pending || unsupported_color || !rdp_texture_load_map(state, opcode, command, sources)) {
+        materialize_tmem(state);
+        return false;
+    }
+    std::sort(candidates.begin(), candidates.end(), [](auto a, auto b) { return a->serial > b->serial; });
+    struct Pass { const GLFramebuffer *source; std::array<std::uint32_t, 4096> map; };
+    std::vector<Pass> passes;
+    std::array<std::uint32_t, 4096> cpu_map;
+    cpu_map.fill(UINT32_MAX);
+    bool touched = false, cpu_bytes = false;
+    const GLFramebuffer *last_source = nullptr;
+    std::uint32_t last_pixel = UINT32_MAX;
+    bool last_cpu_changed = false;
+    for (unsigned i = 0; i < sources.size(); ++i) {
+        const auto source_address = sources[i];
+        if (source_address == UINT32_MAX) continue;
+        touched = true;
+        const GLFramebuffer *owner = nullptr;
+        for (const auto *f : candidates)
+            if (f->gpu_pending_range(source_address, 1)) { owner = f; break; }
+        if (owner) {
+            const unsigned pixel_bytes = 1u << (unsigned(owner->size) - 1u);
+            const auto pixel = (source_address - owner->address) / pixel_bytes;
+            if (owner != last_source || pixel != last_pixel) {
+                last_source = owner; last_pixel = pixel;
+                const auto at = std::size_t(pixel) * pixel_bytes;
+                last_cpu_changed = owner->rdram_snapshot.size() < at + pixel_bytes;
+                for (unsigned b = 0; !last_cpu_changed && b < pixel_bytes; ++b)
+                    last_cpu_changed = (at + b < owner->cpu_written.size() && owner->cpu_written[at + b]) ||
+                        memory_->read8(owner->address + std::uint32_t(at + b)) != owner->rdram_snapshot[at + b];
+            }
+            if (last_cpu_changed) owner = nullptr;
+        }
+        if (!owner) {
+            cpu_map[i] = source_address < memory_->size() ? memory_->read8(source_address) : 0;
+            cpu_bytes = true;
+        } else {
+            auto pass = std::find_if(passes.begin(), passes.end(), [&](const auto &p) { return p.source == owner; });
+            if (pass == passes.end()) {
+                passes.push_back({owner, {}}); pass = std::prev(passes.end()); pass->map.fill(UINT32_MAX);
+            }
+            pass->map[i] = 0x80000000u | (source_address - owner->address);
+        }
+    }
+    if (!touched) return true;
+    GLStateGuard guard;
+    if (std::any_of(passes.begin(), passes.end(), [&](const auto &p) { return p.source == batch_target_; }))
+        flush();
+    if (cpu_bytes) gpu_tmem_.write(state, cpu_map, nullptr);
+    for (const auto &pass : passes) gpu_tmem_.write(state, pass.map, pass.source);
+    ++state.tmem_generation;
+    if (!passes.empty()) ++stats_.gpu_texture_loads;
+    return true;
+}
+
+void RDPRenderer::texture_read(const RDPState &s, RDPOpcode opcode, std::uint64_t command) {
+    const auto [begin, bytes] = texture_source_range(s, opcode, command);
+    if (!bytes) return;
+    constexpr std::uint32_t bus_size = 0x1000000;
+    if (bytes >= bus_size) {
+        texture_read_range(0, bus_size);
+        return;
+    }
+    const auto address = std::uint32_t(begin) & (bus_size - 1);
+    const auto first = std::min<std::uint64_t>(bytes, bus_size - address);
+    texture_read_range(address, std::uint32_t(first));
+    if (first < bytes)
+        texture_read_range(0, std::uint32_t(bytes - first));
+}
+
+void RDPRenderer::texture_read_range(std::uint32_t address, std::uint32_t size) {
+    if (!memory_ || !size) return;
+    bool color_pending = false;
+    for (const auto &[_, f] : fb_.buffers())
+        color_pending |= f.gpu_pending_range(address, size);
+    const bool queued_depth = batch_depth_ && batch_writes_z_ &&
+        std::uint64_t(address) < std::uint64_t(batch_depth_->address) +
+                                     std::uint64_t(batch_depth_->width) * batch_depth_->height * 2 &&
+        batch_depth_->address < std::uint64_t(address) + size;
+    if (!color_pending && !queued_depth && !gpu_depth_.has_pending_read(address, size))
+        return;
+    GLStateGuard guard;
+    if ((batch_target_ && batch_target_->gpu_pending_range(address, size)) || queued_depth)
+        flush();
+    if (color_pending)
+        fb_.commit_color_range(address, size, true);
+    gpu_depth_.flush_range(address, size, *memory_);
+    ++stats_.framebuffer_readbacks;
 }
 
 void RDPRenderer::fb_read(std::uint32_t address) {

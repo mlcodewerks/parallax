@@ -14,7 +14,8 @@ struct RDPCallbacks {
     std::function<void()> sync_pipe;
     std::function<void()> sync_tile;
     std::function<void()> sync_full;
-    std::function<void(const RDPState &)> before_texture_load;
+    std::function<void(const RDPState &, RDPOpcode, std::uint64_t)> before_texture_load;
+    std::function<bool(RDPState &, RDPOpcode, std::uint64_t)> load_texture;
     std::function<void(const RDPState &)> before_z_image_change;
 };
 

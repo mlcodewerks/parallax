@@ -88,6 +88,9 @@ bool glrdp_context_reset(const retro_hw_render_callback *callback) {
 void glrdp_context_destroy() {
     frame_guard.reset();
     if (renderer) {
+        // Parser/TMEM state survives a frontend context recreation. Preserve
+        // GPU-only bytes while the old context is still current and readable.
+        if (parser) renderer->materialize_tmem(parser->state());
         renderer->shutdown();
         renderer.reset();
     }
@@ -111,8 +114,11 @@ bool glrdp_open() {
         parser->callbacks().draw_fill_rectangle = [](const auto &t, const auto &s) {
             renderer->draw_fill_rectangle(t, s);
         };
-        parser->callbacks().before_texture_load = [](const auto &state) {
-            renderer->fb_read(state.texture_image.address);
+        parser->callbacks().before_texture_load = [](const auto &state, auto opcode, auto command) {
+            renderer->texture_read(state, opcode, command);
+        };
+        parser->callbacks().load_texture = [](auto &state, auto opcode, auto command) {
+            return renderer->load_texture(state, opcode, command);
         };
         // A retired depth allocation is no longer reported in FBInfo. Commit
         // it before CPU/DMA can reuse that RAM without write notifications.

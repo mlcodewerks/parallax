@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <cmath>
 #include <stdexcept>
+#include <type_traits>
 namespace {
 std::uint32_t bpp(RDPImageSize s) {
     return 4u << std::uint32_t(s);
@@ -12,10 +13,12 @@ std::size_t swizzle(std::size_t a, std::uint32_t row, RDPImageSize size) {
         a ^= 4;
     return a & 4095;
 }
-void wb(RDPState &s, std::size_t a, std::uint32_t row, RDPImageSize z, std::uint8_t v) {
+template<class State, class Value>
+void wb(State &s, std::size_t a, std::uint32_t row, RDPImageSize z, Value v) {
     s.tmem[swizzle(a, row, z)] = v;
 }
-std::uint8_t rb(const RDPState &s, std::size_t a, std::uint32_t row, RDPImageSize z) {
+template<class State>
+std::uint8_t rb(const State &s, std::size_t a, std::uint32_t row, RDPImageSize z) {
     return s.tmem[swizzle(a, row, z)];
 }
 std::uint8_t e3(unsigned x) {
@@ -43,7 +46,8 @@ C yuv(std::uint8_t y, std::uint8_t u, std::uint8_t v) {
     auto q = [](double x) { return std::uint8_t(std::clamp<int>(int(std::lround(x)), 0, 255)); };
     return {q(Y + 1.402 * V), q(Y - .344136 * U - .714136 * V), q(Y + 1.772 * U), 255};
 }
-C tlut(const RDPState &s, std::uint8_t i) {
+template<class State>
+C tlut(const State &s, std::uint8_t i) {
     std::size_t a = (0x800 + std::size_t(i) * 8) & 0xfff;
     auto v = std::uint16_t((s.tmem[a] << 8) | s.tmem[(a + 1) & 0xfff]);
     return ((s.other_modes >> 46) & 1) ? ia16(v) : rgba16(v);
@@ -82,7 +86,8 @@ int coord(int c, std::uint16_t lo, std::uint16_t hi, std::uint8_t sh, std::uint8
         t = std::clamp(t, 0, std::max(0, (int(hi) - int(lo)) >> 2));
     return t;
 }
-C sample(const RDPState &s, const RDPTile &t, unsigned x, unsigned y) {
+template<class State>
+C sample(const State &s, const RDPTile &t, unsigned x, unsigned y) {
     std::size_t base = std::size_t(t.tmem) * 8 + std::size_t(y) * std::size_t(t.line) * 8;
     // TLUT index fetches always use the low TMEM half. YUV descriptors use
     // the byte index path independently of their declared texel size.
@@ -161,7 +166,8 @@ C sample(const RDPState &s, const RDPTile &t, unsigned x, unsigned y) {
 }
 // LoadTile and LoadBlock share the 64-bit load pipe. Source size controls
 // burst stepping; the load tile controls bank addressing and split packing.
-void load_word(RDPState &s, const RDPTile &t, RDPMemoryView r, std::uint64_t source, unsigned texel,
+template<class State, class Memory>
+void load_word(State &s, const RDPTile &t, Memory r, std::uint64_t source, unsigned texel,
                unsigned row) {
     const unsigned shorts = (t.size == RDPImageSize::Bits8 || t.format == RDPImageFormat::YUV)
                                 ? texel >> 1
@@ -171,14 +177,14 @@ void load_word(RDPState &s, const RDPTile &t, RDPMemoryView r, std::uint64_t sou
     // uncommon split/YUV/misaligned bank mappings on the scalar path.
     if (!(start & 3u) && t.format != RDPImageFormat::YUV &&
         !(t.format == RDPImageFormat::RGBA && t.size == RDPImageSize::Bits32)) {
-        std::uint8_t word[8];
+        std::remove_reference_t<decltype(s.tmem[0])> word[8];
         r.read_word(source, word);
         auto *destination = s.tmem.data() + start * 2;
         if (row & 1u) {
-            std::memcpy(destination, word + 4, 4);
-            std::memcpy(destination + 4, word, 4);
+            std::copy_n(word + 4, 4, destination);
+            std::copy_n(word, 4, destination + 4);
         } else {
-            std::memcpy(destination, word, 8);
+            std::copy_n(word, 8, destination);
         }
         return;
     }
@@ -212,7 +218,8 @@ void load_word(RDPState &s, const RDPTile &t, RDPMemoryView r, std::uint64_t sou
     }
 }
 } // namespace
-void rdp_load_tile(RDPState &s, std::uint64_t cmd, RDPMemoryView r) {
+template<class State, class Memory>
+void load_tile_impl(State &s, std::uint64_t cmd, Memory r) {
     auto ti = std::uint8_t((cmd >> 24) & 7);
     auto &t = s.tiles[ti];
     unsigned sl = ((cmd >> 44) & 0xfff) >> 2, tl = ((cmd >> 32) & 0xfff) >> 2,
@@ -233,7 +240,8 @@ void rdp_load_tile(RDPState &s, std::uint64_t cmd, RDPMemoryView r) {
     }
     ++s.tmem_generation;
 }
-void rdp_load_block(RDPState &s, std::uint64_t cmd, RDPMemoryView r) {
+template<class State, class Memory>
+void load_block_impl(State &s, std::uint64_t cmd, Memory r) {
     auto ti = std::uint8_t((cmd >> 24) & 7);
     auto &t = s.tiles[ti];
     unsigned sl = ((cmd >> 44) & 0xfff), tl = ((cmd >> 32) & 0xfff), sh = ((cmd >> 12) & 0xfff),
@@ -294,7 +302,8 @@ void rdp_load_block(RDPState &s, std::uint64_t cmd, RDPMemoryView r) {
     }
     ++s.tmem_generation;
 }
-void rdp_load_tlut(RDPState &s, std::uint64_t cmd, RDPMemoryView r) {
+template<class State, class Memory>
+void load_tlut_impl(State &s, std::uint64_t cmd, Memory r) {
     auto ti = std::uint8_t((cmd >> 24) & 7);
     auto &t = s.tiles[ti];
     unsigned sl = ((cmd >> 44) & 0xfff) >> 2, tl = ((cmd >> 32) & 0xfff) >> 2,
@@ -340,7 +349,72 @@ void rdp_load_tlut(RDPState &s, std::uint64_t cmd, RDPMemoryView r) {
     }
     ++s.tmem_generation;
 }
-DecodedTexture rdp_decode_tile(const RDPState &s, std::uint8_t ti) {
+void rdp_load_tile(RDPState &s, std::uint64_t cmd, RDPMemoryView r) {
+    if (s.gpu_tmem) throw std::runtime_error("CPU texture load requires resolved TMEM");
+    load_tile_impl(s, cmd, r);
+}
+void rdp_load_block(RDPState &s, std::uint64_t cmd, RDPMemoryView r) {
+    if (s.gpu_tmem) throw std::runtime_error("CPU texture load requires resolved TMEM");
+    load_block_impl(s, cmd, r);
+}
+void rdp_load_tlut(RDPState &s, std::uint64_t cmd, RDPMemoryView r) {
+    if (s.gpu_tmem) throw std::runtime_error("CPU texture load requires resolved TMEM");
+    load_tlut_impl(s, cmd, r);
+}
+bool rdp_texture_load_map(const RDPState &s, RDPOpcode opcode, std::uint64_t cmd,
+                          std::array<std::uint32_t, 4096> &map) {
+    if (opcode == RDPOpcode::LoadBlock && s.texture_image.size == RDPImageSize::Bits4)
+        return false; // A nibble load needs a byte merge, rather than a byte source.
+    struct MapState {
+        std::array<std::uint32_t, 4096> tmem;
+        std::array<RDPTile, 8> tiles;
+        RDPImage texture_image;
+        std::uint64_t tmem_generation = 0;
+    } mapped{{}, s.tiles, s.texture_image};
+    struct MapMemory {
+        std::uint32_t operator[](std::uint64_t address) const { return address & 0xffffffu; }
+        void read_word(std::uint64_t address, std::uint32_t (&word)[8]) const {
+            for (unsigned i = 0; i < 8; ++i) word[i] = (*this)[address + i];
+        }
+    } memory;
+    mapped.tmem.fill(UINT32_MAX);
+    if (opcode == RDPOpcode::LoadTile) load_tile_impl(mapped, cmd, memory);
+    else if (opcode == RDPOpcode::LoadBlock) load_block_impl(mapped, cmd, memory);
+    else if (opcode == RDPOpcode::LoadTLUT) load_tlut_impl(mapped, cmd, memory);
+    else return false;
+    map = mapped.tmem;
+    return true;
+}
+
+bool rdp_tile_uses_gpu(const RDPState &s, std::uint8_t ti) {
+    if (!s.gpu_tmem) return false;
+    bool dependent = false;
+    struct Trace {
+        const RDPState &state;
+        bool &dependent;
+        std::uint8_t operator[](std::size_t address) const {
+            dependent |= state.gpu_tmem->gpu_bytes[address] != 0;
+            return state.tmem[address];
+        }
+    } trace{s, dependent};
+    struct View { const Trace &tmem; std::uint64_t other_modes; } view{trace, s.other_modes};
+    const auto storage = rdp_tile_storage(s, ti, true);
+    const auto &t = s.tiles[ti & 7];
+    const bool copy = rdp_linear_copy_tile(s, ti);
+    for (unsigned y = 0; y < storage.height; ++y)
+        for (unsigned x = 0; x < storage.width; ++x) {
+            if (copy) {
+                const auto a = (unsigned(t.tmem) * 8 + (y * storage.width + x) * 2) & 4095;
+                (void)trace[a]; (void)trace[(a + 1) & 4095];
+            } else if (storage.texel_shift) sample(view, t, y * storage.width + x, 0);
+            else sample(view, t, x, y);
+            if (dependent) return true;
+        }
+    return false;
+}
+
+DecodedTexture rdp_decode_tile(const RDPState &s, std::uint8_t ti, bool compact) {
+    if (rdp_tile_uses_gpu(s, ti)) throw std::runtime_error("CPU texture decode requires resolved TMEM");
     const auto &t = s.tiles[ti & 7];
     if (rdp_linear_copy_tile(s, ti)) {
         // Copy fetches wrap in TMEM and ignore tile clamp bounds. Store all
@@ -358,24 +432,16 @@ DecodedTexture rdp_decode_tile(const RDPState &s, std::uint8_t ti) {
         }
         return d;
     }
-    DecodedTexture d{};
-    // SetTileSize is not an ordered host rectangle. The RDP subtracts
-    // integer tile endpoints in a 10-bit datapath, including wrapped bounds.
-    // Rejecting these tiles left draws sampling a previous GL binding.
-    d.width = (((t.sh >> 2) - (t.sl >> 2)) & 0x3ff) + 1;
-    d.height = (((t.th >> 2) - (t.tl >> 2)) & 0x3ff) + 1;
-    // Unclamped wrapped tiles only address their mask period. Sin and
-    // Punishment uses this for scrolling 128x64 tiles with inverted bounds.
-    if (t.sh < t.sl && t.mask_s && !t.clamp_s)
-        d.width = 1u << std::min(unsigned(t.mask_s), 10u);
-    if (t.th < t.tl && t.mask_t && !t.clamp_t)
-        d.height = 1u << std::min(unsigned(t.mask_t), 10u);
+    const auto storage = rdp_tile_storage(s, ti, compact);
+    DecodedTexture d{storage.width, storage.height, {}};
+    // Storage can be smaller than the logical clamp/mirror bounds. Decode
+    // each independently addressable texel once; the shader maps repetitions.
     if (!d.width || !d.height || d.width > 2048 || d.height > 2048)
         throw std::runtime_error("invalid TMEM tile dimensions");
     d.rgba.resize(std::size_t(d.width) * d.height * 4);
     for (unsigned y = 0; y < d.height; ++y)
         for (unsigned x = 0; x < d.width; ++x) {
-            auto c = sample(s, t, x, y);
+            auto c = storage.texel_shift ? sample(s, t, y * d.width + x, 0) : sample(s, t, x, y);
             auto o = (std::size_t(y) * d.width + x) * 4;
             d.rgba[o] = c.r;
             d.rgba[o + 1] = c.g;

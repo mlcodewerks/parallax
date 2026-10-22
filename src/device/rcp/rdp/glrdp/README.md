@@ -16,8 +16,8 @@ At native resolution with coverage disabled, integer row footprints distinguish
 adjacent triangles whose bounding boxes overlap but whose surviving pixels do
 not. Other coverage levels and upscaled draws retain conservative box checks.
 The shader evaluates the N64 edge mask, shade, texture and depth planes. A
-bounded 2048x2048 atlas caches immutable decoded TMEM tiles; framebuffer tiles
-retain standalone textures. Tile wrapping, mirroring and filtering happen before
+bounded 2048x2048 atlas caches immutable decoded TMEM tiles, including loaded
+framebuffer pixels. Tile wrapping, mirroring and filtering happen before
 the atlas offset, preserving tile boundaries. Neither optimization has a user
 toggle. GLES3 uses core uniform buffers and instanced drawing with GLSL ES 3.00
 high-precision integer/float arithmetic. It replaces the former GLES2 renderer.
@@ -36,6 +36,21 @@ bounds, including Sin and Punishment's scrolling intensity tiles, remain valid
 texture sources. Maximum-coordinate clamping precedes masking and mirroring.
 See [batching validation](../../../../../benchmarks/GLRDP_BATCHING.md) for the
 baseline comparisons, Angrylion reference checks and performance measurements.
+
+Large texture descriptors store their addressable TMEM footprint once. Logical
+tile bounds still control clamping and mirroring; the shader maps the resulting
+coordinates through the native row stride and odd-row bank swizzle. Texture
+loads synchronize their actual source byte ranges, including load-word padding
+and bus wrap, so disjoint framebuffer draws can remain queued. Color readbacks
+transfer only pending GPU write bounds and preserve later CPU/DMA stores.
+See [Mario Tennis framebuffer validation](../../../../../benchmarks/TENNIS_FRAMEBUFFER.md).
+
+Color framebuffer texture loads now retain GPU TMEM snapshots and decode into
+the atlas directly on the GPU. CPU overlays and partial texture loads preserve
+byte ownership; explicit reads and compatibility fallbacks materialize data
+when required. Loaded snapshots survive later framebuffer changes. Both APIs
+share this path. See [GPU framebuffer textures](../../../../../benchmarks/GPU_FRAMEBUFFER_TEXTURES.md)
+for correctness checks, readback counts and performance measurements.
 
 | Option (`wtfn64_glrdp_` prefix) | Values; default first | Effect |
 | --- | --- | --- |

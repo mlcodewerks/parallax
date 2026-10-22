@@ -364,9 +364,9 @@ void GPUDepthBuffer::flush_cpu_write(std::uint32_t address, std::uint32_t size, 
             store_to_rdram(base, memory, address, std::max(size, 1u), protect_hidden);
 }
 
-bool GPUDepthBuffer::has_pending_read(std::uint32_t address) const {
+bool GPUDepthBuffer::has_pending_read(std::uint32_t address, std::uint32_t size) const {
     for (const auto &[base, surface] : surfaces_)
-        if (surface.initialized && surface.gpu_dirty && std::uint64_t(address) >= base &&
+        if (surface.initialized && surface.gpu_dirty && base < std::uint64_t(address) + size &&
             std::uint64_t(address) < std::uint64_t(base) + surface_bytes(surface))
             return true;
     return false;

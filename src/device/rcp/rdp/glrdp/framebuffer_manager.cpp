@@ -39,6 +39,30 @@ void destroy_color_target(GLFramebuffer &framebuffer) {
 }
 } // namespace
 
+bool GLFramebuffer::gpu_pending_range(std::uint32_t query, std::uint32_t bytes) const {
+    if (!gpu_dirty || raw_z || native_width <= 0 || native_height <= 0 || !bytes)
+        return false;
+    const auto end = std::uint64_t(query) + bytes;
+    if (end <= address || query >= std::uint64_t(address) +
+                                   framebuffer_byte_count(native_width, native_height, size))
+        return false;
+    if (size == RDPImageSize::Bits4 || dirty_x1 <= dirty_x0 || dirty_y1 <= dirty_y0)
+        return true;
+    const unsigned pixel_bytes = (4u << unsigned(size)) / 8u;
+    const auto first = (std::max<std::uint64_t>(query, address) - address) / pixel_bytes;
+    const auto last = (end - 1 - address) / pixel_bytes;
+    const auto y0 = std::max<std::uint64_t>(dirty_y0, first / native_width);
+    const auto y1 = std::min<std::uint64_t>(dirty_y1 - 1, last / native_width);
+    if (y0 > y1)
+        return false;
+    const auto row_overlaps = [&](std::uint64_t y) {
+        const auto begin = std::uint64_t(address) + (y * native_width + dirty_x0) * pixel_bytes;
+        const auto row_end = std::uint64_t(address) + (y * native_width + dirty_x1) * pixel_bytes;
+        return query < row_end && begin < end;
+    };
+    return y1 > y0 + 1 || row_overlaps(y0) || row_overlaps(y1);
+}
+
 FramebufferManager::~FramebufferManager() {
     clear();
 }
@@ -48,6 +72,7 @@ void FramebufferManager::clear() {
         destroy_color_target(framebuffer);
 
     buffers_.clear();
+    readback_pixels_.clear();
     last_bound_ = nullptr;
     max_texture_size_ = 0;
 }
@@ -135,7 +160,7 @@ void FramebufferManager::allocate_color(GLFramebuffer &framebuffer, int width, i
     // partial draws start from the emulated memory contents rather than
     // undefined texture storage.
     framebuffer.cpu_dirty = true;
-    framebuffer.gpu_dirty = false;
+    framebuffer.clear_gpu_written();
 }
 
 int FramebufferManager::drawing_height(const RDPImage &image, int scissor_height) const {
@@ -371,40 +396,59 @@ void FramebufferManager::upload_from_rdram(GLFramebuffer &framebuffer, const N64
                     GL_UNSIGNED_BYTE, rgba.data());
     framebuffer.cpu_written.assign(framebuffer.rdram_snapshot.size(), 0);
     framebuffer.cpu_dirty = false;
-    framebuffer.gpu_dirty = false;
+    framebuffer.clear_gpu_written();
 }
 
 void FramebufferManager::download_to_rdram(GLFramebuffer &framebuffer, N64Memory &memory) {
     if (!framebuffer.fbo || framebuffer.width <= 0 || framebuffer.height <= 0)
         return;
 
-    std::vector<std::uint8_t> rgba(std::size_t(framebuffer.width) * framebuffer.height * 4);
-    glBindFramebuffer(GL_FRAMEBUFFER, framebuffer.fbo);
-    glPixelStorei(GL_PACK_ALIGNMENT, 1);
-    glReadPixels(0, 0, framebuffer.width, framebuffer.height, GL_RGBA, GL_UNSIGNED_BYTE, rgba.data());
     const int native_width = std::max(framebuffer.native_width, 1);
     const int native_height = std::max(framebuffer.native_height, 1);
     const int scale = std::max(framebuffer.internal_scale, 1);
+    const bool bounded = framebuffer.gpu_dirty && framebuffer.size != RDPImageSize::Bits4 &&
+                         framebuffer.dirty_x1 > framebuffer.dirty_x0 &&
+                         framebuffer.dirty_y1 > framebuffer.dirty_y0;
+    const int x0 = bounded ? std::clamp(framebuffer.dirty_x0, 0, native_width) : 0;
+    const int y0 = bounded ? std::clamp(framebuffer.dirty_y0, 0, native_height) : 0;
+    const int x1 = bounded ? std::clamp(framebuffer.dirty_x1, x0, native_width) : native_width;
+    const int y1 = bounded ? std::clamp(framebuffer.dirty_y1, y0, native_height) : native_height;
+    const int read_x = std::min(x0 * scale + scale / 2, framebuffer.width - 1);
+    const int read_y = framebuffer.height - 1 -
+                       std::min((y1 - 1) * scale + scale / 2, framebuffer.height - 1);
+    const int read_width = std::min((x1 - 1) * scale + scale / 2, framebuffer.width - 1) + 1 - read_x;
+    const int read_height = framebuffer.height -
+                            std::min(y0 * scale + scale / 2, framebuffer.height - 1) - read_y;
+    if (read_width <= 0 || read_height <= 0)
+        return;
+    // Retain capacity across the many small framebuffer copies in Tennis/Golf.
+    readback_pixels_.resize(std::size_t(read_width) * read_height * 4);
+    auto &rgba = readback_pixels_;
+    glBindFramebuffer(GL_FRAMEBUFFER, framebuffer.fbo);
+    glPixelStorei(GL_PACK_ALIGNMENT, 1);
+    glReadPixels(read_x, read_y, read_width, read_height, GL_RGBA, GL_UNSIGNED_BYTE, rgba.data());
 
-    const bool unchanged = framebuffer.size == RDPImageSize::Bits16 && scale == 1 &&
-        !(framebuffer.address & 1u) && framebuffer.width == native_width &&
-        framebuffer.height == native_height &&
-        framebuffer.rdram_snapshot.size() == std::size_t(native_width) * native_height * 2 &&
+    const bool unchanged =
         std::none_of(framebuffer.cpu_written.begin(), framebuffer.cpu_written.end(),
                      [](std::uint8_t written) { return written != 0; }) &&
         memory.matches_be(framebuffer.address, framebuffer.rdram_snapshot.data(),
                           framebuffer.rdram_snapshot.size());
-    if (unchanged) {
-        for (int y = 0; y < native_height; ++y)
-            memory.write_rgba16(framebuffer.address + std::uint32_t(y * native_width * 2),
-                rgba.data() + std::size_t(native_height - 1 - y) * native_width * 4, native_width);
+    if (!unchanged)
+        framebuffer.cpu_dirty = true;
+    if (unchanged && framebuffer.size == RDPImageSize::Bits16 && scale == 1 &&
+        !(framebuffer.address & 1u) && framebuffer.width == native_width &&
+        framebuffer.height == native_height &&
+        framebuffer.rdram_snapshot.size() == std::size_t(native_width) * native_height * 2) {
+        for (int y = y0; y < y1; ++y)
+            memory.write_rgba16(framebuffer.address + std::uint32_t((y * native_width + x0) * 2),
+                rgba.data() + std::size_t(y1 - 1 - y) * read_width * 4, x1 - x0);
     } else {
-        for (int y = 0; y < native_height; ++y) {
-            for (int x = 0; x < native_width; ++x) {
+        for (int y = y0; y < y1; ++y) {
+            for (int x = x0; x < x1; ++x) {
                 const int render_x = std::min(x * scale + scale / 2, framebuffer.width - 1);
                 const int render_y = std::min(y * scale + scale / 2, framebuffer.height - 1);
                 const int texture_y = framebuffer.height - 1 - render_y;
-                const auto input = (std::size_t(texture_y) * framebuffer.width + render_x) * 4;
+                const auto input = (std::size_t(texture_y - read_y) * read_width + render_x - read_x) * 4;
                 const std::size_t destination_index = std::size_t(y) * native_width + x;
                 const unsigned bits = 4u << unsigned(framebuffer.size);
                 const std::size_t byte_offset = destination_index * bits / 8;
@@ -465,21 +509,23 @@ void FramebufferManager::download_to_rdram(GLFramebuffer &framebuffer, N64Memory
 
     memory.copy_be(framebuffer.address, framebuffer.rdram_snapshot.data(),
                    framebuffer.rdram_snapshot.size());
-    framebuffer.gpu_dirty = false;
+    framebuffer.clear_gpu_written();
     if (readback_callback_)
         readback_callback_(framebuffer.address, std::uint32_t(framebuffer.rdram_snapshot.size()));
 }
 
-void FramebufferManager::commit_color_range(std::uint32_t address, std::uint32_t size) {
+void FramebufferManager::commit_color_range(std::uint32_t address, std::uint32_t size, bool texture_read) {
     if (!memory_ || !size)
         return;
-    const std::uint64_t end = std::uint64_t(address) + size;
     std::vector<GLFramebuffer *> pending;
     for (auto &[_, f] : buffers_) {
         const auto image_end = std::uint64_t(f.address) +
                                framebuffer_byte_count(f.native_width, f.native_height, f.size);
-        if (f.gpu_dirty && !f.raw_z && cpu_eligible(f) && std::uint64_t(f.address) < end &&
-            address < image_end)
+        // Depth ownership changes invalidate complete color views. Commit even
+        // their disjoint pending pixels before that view can be discarded.
+        const bool overlaps = texture_read ? f.gpu_pending_range(address, size) :
+            f.gpu_dirty && !f.raw_z && address < image_end && f.address < std::uint64_t(address) + size;
+        if (overlaps && f.fbo && f.color && image_end <= memory_->size())
             pending.push_back(&f);
     }
     std::sort(pending.begin(), pending.end(),
@@ -497,7 +543,7 @@ void FramebufferManager::depth_written_to_ram(std::uint32_t address, std::uint32
             // Z activation synchronized earlier color writes. The committed depth
             // is now the newer physical view, including changes to hidden bits.
             f.cpu_dirty = true;
-            f.gpu_dirty = false;
+            f.clear_gpu_written();
         }
 }
 

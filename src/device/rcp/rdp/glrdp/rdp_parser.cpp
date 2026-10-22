@@ -236,8 +236,12 @@ void RDPCommandParser::dispatch(RDPOpcode op, std::span<const std::uint64_t> w) 
         state_.other_modes = x;
         break;
     case RDPOpcode::LoadTLUT:
+        if (callbacks_.load_texture && callbacks_.load_texture(state_, op, x)) {
+            decode_bounds(state_, x);
+            break;
+        }
         if (callbacks_.before_texture_load)
-            callbacks_.before_texture_load(state_);
+            callbacks_.before_texture_load(state_, op, x);
         decode_bounds(state_, x);
         rdp_load_tlut(state_, x, rdram_);
         break;
@@ -245,14 +249,22 @@ void RDPCommandParser::dispatch(RDPOpcode op, std::span<const std::uint64_t> w) 
         decode_bounds(state_, x);
         break;
     case RDPOpcode::LoadBlock:
+        if (callbacks_.load_texture && callbacks_.load_texture(state_, op, x)) {
+            decode_bounds(state_, x);
+            break;
+        }
         if (callbacks_.before_texture_load)
-            callbacks_.before_texture_load(state_);
+            callbacks_.before_texture_load(state_, op, x);
         decode_bounds(state_, x);
         rdp_load_block(state_, x, rdram_);
         break;
     case RDPOpcode::LoadTile:
+        if (callbacks_.load_texture && callbacks_.load_texture(state_, op, x)) {
+            decode_bounds(state_, x);
+            break;
+        }
         if (callbacks_.before_texture_load)
-            callbacks_.before_texture_load(state_);
+            callbacks_.before_texture_load(state_, op, x);
         decode_bounds(state_, x);
         rdp_load_tile(state_, x, rdram_);
         break;

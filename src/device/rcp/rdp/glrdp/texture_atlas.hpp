@@ -1,6 +1,7 @@
 #pragma once
 #include <array>
 #include <cstdint>
+#include <cstring>
 #include <unordered_map>
 #include <vector>
 
@@ -15,7 +16,16 @@ class TextureAtlas {
     void clear() { entries_.clear(); shelves_.clear(); used_height_ = 0; }
     static std::uint64_t key(unsigned w, unsigned h, const std::vector<std::uint8_t> &pixels) {
         std::uint64_t hash = (std::uint64_t(w) << 32) | h;
-        for (auto byte : pixels) hash = (hash ^ byte) * UINT64_C(1099511628211);
+        // Entries are verified byte-for-byte below. Hash words instead of
+        // serially multiplying for every RGBA channel of framebuffer tiles.
+        std::size_t at = 0;
+        for (; at + sizeof(std::uint64_t) <= pixels.size(); at += sizeof(std::uint64_t)) {
+            std::uint64_t word;
+            std::memcpy(&word, pixels.data() + at, sizeof(word));
+            hash = (hash ^ word) * UINT64_C(1099511628211);
+        }
+        for (; at < pixels.size(); ++at)
+            hash = (hash ^ pixels[at]) * UINT64_C(1099511628211);
         return hash;
     }
     const Entry *find(std::uint64_t key, unsigned w, unsigned h,
