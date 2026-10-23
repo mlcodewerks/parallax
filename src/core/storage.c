@@ -19,17 +19,13 @@
  *   51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.          *
  * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
 
-#include "file_storage.h"
+#include "core/storage.h"
 
 #include <stdlib.h>
 
 #include "core/log.h"
-#include "core/types.h"
-#include "backends/api/storage_backend.h"
-#include "device/dd_controller.h"
 #include "main/util.h"
 
-#include <core/frontend.h>
 
 int open_file_storage(struct file_storage* fstorage, size_t size, const char* filename)
 {
@@ -82,17 +78,16 @@ void close_file_storage(struct file_storage* fstorage)
 
 static uint8_t* file_storage_data(const void* storage)
 {
-    struct file_storage* fstorage = (struct file_storage*)storage;
+    const struct file_storage* fstorage = (const struct file_storage*)storage;
     return fstorage->data;
 }
 
 static size_t file_storage_size(const void* storage)
 {
-    struct file_storage* fstorage = (struct file_storage*)storage;
+    const struct file_storage* fstorage = (const struct file_storage*)storage;
     return fstorage->size;
 }
 
-extern retro_log_printf_t log_cb;
 static void file_storage_save(void* storage, size_t start, size_t size)
 {
     
@@ -113,10 +108,10 @@ static void file_storage_save(void* storage, size_t start, size_t size)
     switch(err)
     {
     case file_open_error:
-        log_cb(RETRO_LOG_WARN, "Couldn't open storage file '%s' for writing\n", fstorage->filename);
+        core_log(CORE_LOG_WARNING, "Couldn't open storage file '%s' for writing", fstorage->filename);
         break;
     case file_write_error:
-        log_cb(RETRO_LOG_WARN, "Failed to write storage file '%s'\n", fstorage->filename);
+        core_log(CORE_LOG_WARNING, "Failed to write storage file '%s'", fstorage->filename);
         break;
     default:
         break;

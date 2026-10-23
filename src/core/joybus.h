@@ -19,8 +19,10 @@
  *   51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.          *
  * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
 
-#ifndef PARALLAX_BACKENDS_API_JOYBUS_H
-#define PARALLAX_BACKENDS_API_JOYBUS_H
+#ifndef PARALLAX_JOYBUS_H
+#define PARALLAX_JOYBUS_H
+
+#include "core/log.h"
 
 #include <stdint.h>
 
@@ -63,7 +65,7 @@ enum joybus_device_types
 struct joybus_device_interface
 {
     /* Optional. Called at device poweron.
-     * Allow the joybus device to initialze itself.
+     * Allow the joybus device to initialize itself.
      */
     void (*poweron)(void* jbd);
 

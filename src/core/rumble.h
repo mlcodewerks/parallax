@@ -1,5 +1,5 @@
 /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * *
- *   Mupen64plus - file_storage.h                                          *
+ *   Mupen64plus - rumble_backend.h                                        *
  *   Mupen64Plus homepage: https://mupen64plus.org/                        *
  *   Copyright (C) 2016 Bobby Smiles                                       *
  *                                                                         *
@@ -19,27 +19,20 @@
  *   51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.          *
  * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
 
-#ifndef PARALLAX_MAIN_FILE_STORAGE_H
-#define PARALLAX_MAIN_FILE_STORAGE_H
+#ifndef PARALLAX_RUMBLE_H
+#define PARALLAX_RUMBLE_H
 
-#include <stddef.h>
-#include <stdint.h>
-
-struct file_storage
+enum rumble_action
 {
-    uint8_t* data;
-    size_t size;
-    const char* filename;
-    int first_access;
+    RUMBLE_STOP,
+    RUMBLE_START
 };
 
-
-int open_file_storage(struct file_storage* storage, size_t size, const char* filename);
-int open_rom_file_storage(struct file_storage* storage, const char* filename);
-void close_file_storage(struct file_storage* storage);
-
-extern const struct storage_backend_interface g_ifile_storage;
-extern const struct storage_backend_interface g_ifile_storage_ro;
-extern const struct storage_backend_interface g_isubfile_storage;
+struct rumble_backend_interface
+{
+    /* Start or stop rumbling
+     */
+    void (*exec)(void* rumble, enum rumble_action action);
+};
 
 #endif

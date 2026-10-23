@@ -25,7 +25,7 @@
 #define PARALLAX_CORE_PROTOTYPES 1
 #include "core/types.h"
 #include "core/log.h"
-#include "backends/api/storage_backend.h"
+#include "core/storage.h"
 #include "main/util.h"
 
 static uint8_t* storage_disk_data(const void* storage)

@@ -1,7 +1,7 @@
 /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * *
- *   Mupen64plus - biopak.c                                             *
+ *   Mupen64plus - get_time_using_time_plus_delta.c                        *
  *   Mupen64Plus homepage: https://mupen64plus.org/                        *
- *   Copyright (C) 2017 Bobby Smiles                                       *
+ *   Copyright (C) 2014 Bobby Smiles                                       *
  *                                                                         *
  *   This program is free software; you can redistribute it and/or modify  *
  *   it under the terms of the GNU General Public License as published by  *
@@ -19,64 +19,21 @@
  *   51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.          *
  * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
 
-/* Implementation based on notes from raphnet
- * See http://www.raphnet.net/divers/n64_bio_sensor/index_en.php
- */
-
-#include "biopak.h"
-
-#include "core/types.h"
-#include "core/log.h"
-
-#ifdef HAVE_LIBNX
-#include <switch.h>
-#endif
+#include "core/clock.h"
 
 #include <time.h>
-#include <string.h>
 
-void init_biopak(struct biopak* bpk,
-    unsigned int bpm)
+
+static time_t ctime_plus_delta_get_time(void* clock)
 {
-    bpk->bpm = bpm;
+    time_t user_delta = (clock == NULL)
+        ? 0
+        : *(time_t*)clock;
+
+    return user_delta + time(NULL);
 }
 
-static void plug_biopak(void* pak)
+const struct clock_backend_interface g_iclock_ctime_plus_delta =
 {
-}
-
-static void unplug_biopak(void* pak)
-{
-}
-
-static void read_biopak(void* pak, uint16_t address, uint8_t* data, size_t size)
-{
-    struct biopak* bpk = (struct biopak*)pak;
-
-    if (address == 0xc000) {
-        time_t now = time(NULL) * 1000;
-        uint32_t period = UINT32_C(60*1000) / bpk->bpm;
-        uint32_t k = now % period;
-
-        memset(data, (2*k < period) ? 0x00 : 0x03, size);
-    }
-    else {
-        core_log(CORE_LOG_WARNING, "Unexpected bio sensor read address %04x", address);
-    }
-}
-
-static void write_biopak(void* pak, uint16_t address, const uint8_t* data, size_t size)
-{
-    core_log(CORE_LOG_WARNING, "Unexpected bio sensor write address %04x", address);
-}
-
-
-/* bio pak definition */
-const struct pak_interface g_ibiopak =
-{
-    "Bio pak",
-    plug_biopak,
-    unplug_biopak,
-    read_biopak,
-    write_biopak
+    ctime_plus_delta_get_time
 };

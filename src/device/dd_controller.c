@@ -28,8 +28,8 @@
 #define PARALLAX_CORE_PROTOTYPES 1
 #include "core/types.h"
 #include "core/log.h"
-#include "backends/api/clock_backend.h"
-#include "backends/api/storage_backend.h"
+#include "core/clock.h"
+#include "core/storage.h"
 #include "device/disk.h"
 #include "device/device.h"
 #include "device/memory.h"

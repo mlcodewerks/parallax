@@ -19,8 +19,8 @@
  *   51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.          *
  * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
 
-#ifndef PARALLAX_BACKENDS_API_VIDEO_CAPTURE_BACKEND_H
-#define PARALLAX_BACKENDS_API_VIDEO_CAPTURE_BACKEND_H
+#ifndef PARALLAX_VIDEO_CAPTURE_H
+#define PARALLAX_VIDEO_CAPTURE_H
 
 #include "core/types.h"
 
@@ -52,7 +52,7 @@ struct video_capture_backend_interface
      */
     core_result (*init)(void** vin, const char* section);
 
-    /* Release backend instance and any associated resouces.
+    /* Release backend instance and any associated resources.
      */
     void (*release)(void* vin);
 
@@ -61,7 +61,7 @@ struct video_capture_backend_interface
      */
     core_result (*open)(void* vin, unsigned int width, unsigned int height);
 
-    /* Close a previsouly opened video stream.
+    /* Close a previously opened video stream.
      */
     void (*close)(void* vin);
 
@@ -71,10 +71,15 @@ struct video_capture_backend_interface
     core_result (*grab_image)(void* vin, void* data);
 };
 
-/* collection of available video capture backends */
-extern const struct video_capture_backend_interface* g_video_capture_backend_interfaces[];
+#ifdef __cplusplus
+extern "C" {
+#endif
 
-/* helper function which find backend by name (or dummy when NULL/empty) */
+/* Returns the named backend, the dummy for NULL/empty, or NULL if unknown. */
 const struct video_capture_backend_interface* get_video_capture_backend(const char* name);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

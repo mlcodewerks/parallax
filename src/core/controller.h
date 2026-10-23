@@ -22,18 +22,11 @@
 #ifndef PARALLAX_CONTROLLER_H
 #define PARALLAX_CONTROLLER_H
 
-#include "backends/api/audio_out_backend.h"
-#include "backends/api/controller_input_backend.h"
-#include "backends/api/rumble_backend.h"
-#include "backends/api/joybus.h"
+#include "core/controller_input.h"
+#include "core/rumble.h"
+#include "core/joybus.h"
 
 #include <stdint.h>
-
-/* Audio Out backend interface */
-
-
-
-/* Controller Input backend interface */
 
 struct frontend_controller
 {

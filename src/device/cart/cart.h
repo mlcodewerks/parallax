@@ -22,7 +22,7 @@
 #ifndef PARALLAX_DEVICE_CART_CART_H
 #define PARALLAX_DEVICE_CART_CART_H
 
-#include "backends/api/joybus.h"
+#include "core/joybus.h"
 
 #include "af_rtc.h"
 #include "cart_rom.h"

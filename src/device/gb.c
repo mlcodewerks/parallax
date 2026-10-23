@@ -1,3 +1,21 @@
+/* Consolidated gb device implementation.
+ * Component copyright and license notices are retained below.
+ */
+
+#include "device/gb/gb_cart.h"
+#include "core/types.h"
+#include "core/log.h"
+#include "core/rumble.h"
+#include "core/storage.h"
+#include "core/video_capture.h"
+#include <assert.h>
+#include <string.h>
+#include "device/gb/mbc3_rtc.h"
+#include "core/clock.h"
+#include "device/gb/m64282fp.h"
+
+/* ---- gb/gb_cart.c ---- */
+
 /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * *
  *   Mupen64plus - gb_cart.c                                               *
  *   Mupen64Plus homepage: https://mupen64plus.org/                        *
@@ -23,22 +41,11 @@
  * "The Cycle-Accurate Game Boy Docs" by AntonioND
  */
 
-#include "gb_cart.h"
-
-#include "core/types.h"
-#include "core/log.h"
-#include "backends/api/rumble_backend.h"
-#include "backends/api/storage_backend.h"
-#include "backends/api/video_capture_backend.h"
 #if 0
 void cv_imshow(const char* name, unsigned int width, unsigned int height, int channels, void* data);
 #else
 #define cv_imshow(...)
 #endif
-
-#include <assert.h>
-#include <string.h>
-
 
 enum gbcart_extra_devices
 {
@@ -53,7 +60,6 @@ enum gbcart_extra_devices
 
 /* various helper functions for ram, rom, or MBC uses */
 
-
 static void read_rom(const void* rom_storage, const struct storage_backend_interface* irom_storage, uint16_t address, uint8_t* data, size_t size)
 {
     assert(size > 0);
@@ -66,7 +72,6 @@ static void read_rom(const void* rom_storage, const struct storage_backend_inter
 
     memcpy(data, irom_storage->data(rom_storage) + address, size);
 }
-
 
 static void read_ram(const void* ram_storage, const struct storage_backend_interface* iram_storage, unsigned int enabled, uint16_t address, uint8_t* data, size_t size, uint8_t mask)
 {
@@ -138,15 +143,11 @@ static void write_ram(void* ram_storage, const struct storage_backend_interface*
     iram_storage->save(ram_storage, address, size);
 }
 
-
 static void set_ram_enable(struct gb_cart* gb_cart, uint8_t value)
 {
     gb_cart->ram_enable = ((value & 0x0f) == 0x0a) ? 1 : 0;
     core_log(CORE_LOG_VERBOSE, "RAM enable = %02x", gb_cart->ram_enable);
 }
-
-
-
 
 static int read_gb_cart_nombc(struct gb_cart* gb_cart, uint16_t address, uint8_t* data, size_t size)
 {
@@ -195,7 +196,6 @@ static int write_gb_cart_nombc(struct gb_cart* gb_cart, uint16_t address, const 
 
     return 0;
 }
-
 
 static int read_gb_cart_mbc1(struct gb_cart* gb_cart, uint16_t address, uint8_t* data, size_t size)
 {
@@ -344,7 +344,6 @@ static int write_gb_cart_mbc2(struct gb_cart* gb_cart, uint16_t address, const u
 
     return 0;
 }
-
 
 static int read_gb_cart_mbc3(struct gb_cart* gb_cart, uint16_t address, uint8_t* data, size_t size)
 {
@@ -600,7 +599,6 @@ static int write_gb_cart_mmm01(struct gb_cart* gb_cart, uint16_t address, const 
     return 0;
 }
 
-
 /* TODO: extract each mbc into its own module, store in gb_cart a union of them */
 static uint8_t apply_dithering_matrix(const uint8_t* d, uint8_t value, unsigned int x, unsigned int y)
 {
@@ -752,7 +750,6 @@ static void write_pocket_cam_regs(struct pocket_cam* cam, unsigned int reg, uint
     }
 }
 
-
 static int read_gb_cart_pocket_cam(struct gb_cart* gb_cart, uint16_t address, uint8_t* data, size_t size)
 {
     switch(address >> 13)
@@ -868,8 +865,6 @@ static int write_gb_cart_huc3(struct gb_cart* gb_cart, uint16_t address, const u
     return 0;
 }
 
-
-
 struct parsed_cart_type
 {
     const char* mbc;
@@ -963,7 +958,6 @@ static const struct parsed_cart_type* parse_cart_type(uint8_t cart_type)
     default:   return NULL;
     }
 }
-
 
 void init_gb_cart(struct gb_cart* gb_cart,
         void* rom_opaque, void (*init_rom)(void* user_data, void** rom_storage, const struct storage_backend_interface** irom_storage), void (*release_rom)(void* user_data),
@@ -1117,3 +1111,310 @@ int write_gb_cart(struct gb_cart* gb_cart, uint16_t address, const uint8_t* data
     return gb_cart->write_gb_cart(gb_cart, address, data, size);
 }
 
+/* ---- gb/mbc3_rtc.c ---- */
+
+/* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * *
+ *   Mupen64plus - mbc3_rtc.c                                              *
+ *   Mupen64Plus homepage: https://mupen64plus.org/                        *
+ *   Copyright (C) 2016 Bobby Smiles                                       *
+ *                                                                         *
+ *   This program is free software; you can redistribute it and/or modify  *
+ *   it under the terms of the GNU General Public License as published by  *
+ *   the Free Software Foundation; either version 2 of the License, or     *
+ *   (at your option) any later version.                                   *
+ *                                                                         *
+ *   This program is distributed in the hope that it will be useful,       *
+ *   but WITHOUT ANY WARRANTY; without even the implied warranty of        *
+ *   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the         *
+ *   GNU General Public License for more details.                          *
+ *                                                                         *
+ *   You should have received a copy of the GNU General Public License     *
+ *   along with this program; if not, write to the                         *
+ *   Free Software Foundation, Inc.,                                       *
+ *   51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.          *
+ * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
+
+/* TODO: halt bit is not implemented */
+
+static void update_rtc_regs(struct mbc3_rtc* rtc)
+{
+    /* compute elapsed time since last update */
+    time_t now = rtc->iclock->get_time(rtc->clock);
+    time_t diff = now - rtc->last_time;
+    rtc->last_time = now;
+
+    /* increment regs */
+    if (diff > 0) {
+        rtc->regs[MBC3_RTC_SECONDS] += (int)(diff % 60);
+        if (rtc->regs[MBC3_RTC_SECONDS] >= 60) {
+            rtc->regs[MBC3_RTC_SECONDS] -= 60;
+            ++rtc->regs[MBC3_RTC_MINUTES];
+        }
+        diff /= 60;
+
+        rtc->regs[MBC3_RTC_MINUTES] += (int)(diff % 60);
+        if (rtc->regs[MBC3_RTC_MINUTES] >= 60) {
+            rtc->regs[MBC3_RTC_MINUTES] -= 60;
+            ++rtc->regs[MBC3_RTC_HOURS];
+        }
+        diff /= 60;
+
+        rtc->regs[MBC3_RTC_HOURS] += (int)(diff % 24);
+        if (rtc->regs[MBC3_RTC_HOURS] >= 24) {
+            rtc->regs[MBC3_RTC_HOURS] -= 24;
+            ++rtc->regs[MBC3_RTC_DAYS_L];
+        }
+        diff /= 24;
+
+        /* update days counter */
+        unsigned int days = (((rtc->regs[MBC3_RTC_DAYS_H] & 0x01) << 8) | rtc->regs[MBC3_RTC_DAYS_L])
+            + (int)diff;
+
+        rtc->regs[MBC3_RTC_DAYS_L] = days & 0xff;
+        rtc->regs[MBC3_RTC_DAYS_H] = (rtc->regs[MBC3_RTC_DAYS_H] & ~0x01) | (days & 0x100);
+
+        /* set carry bit if days overflow */
+        if (days > 511) { rtc->regs[MBC3_RTC_DAYS_H] |= 0x80; }
+    }
+}
+
+void init_mbc3_rtc(struct mbc3_rtc* rtc,
+                   void* clock,
+                   const struct clock_backend_interface* iclock)
+{
+    rtc->clock = clock;
+    rtc->iclock = iclock;
+}
+
+void poweron_mbc3_rtc(struct mbc3_rtc* rtc)
+{
+    memset(rtc->regs, 0, MBC3_RTC_REGS_COUNT);
+    memset(rtc->latched_regs, 0, MBC3_RTC_REGS_COUNT);
+    rtc->latch = 0;
+    rtc->last_time = 0;
+}
+
+uint8_t read_mbc3_rtc_regs(struct mbc3_rtc* rtc, unsigned int reg)
+{
+    if (rtc->latch) {
+        return rtc->latched_regs[reg];
+    }
+
+    update_rtc_regs(rtc);
+    return rtc->regs[reg];
+}
+
+void write_mbc3_rtc_regs(struct mbc3_rtc* rtc, unsigned int reg, uint8_t value)
+{
+    rtc->regs[reg] = value;
+}
+
+void latch_mbc3_rtc_regs(struct mbc3_rtc* rtc, uint8_t data)
+{
+    if (rtc->latch == 0 && data == 1) {
+        update_rtc_regs(rtc);
+        memcpy(rtc->latched_regs, rtc->regs, MBC3_RTC_REGS_COUNT);
+    }
+
+    rtc->latch = data & 0x1;
+}
+
+/* ---- gb/m64282fp.c ---- */
+
+/* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * *
+ *   Mupen64plus - m64282fp.c                                              *
+ *   Mupen64Plus homepage: https://mupen64plus.org/                        *
+ *   Copyright (C) 2017 Bobby Smiles                                       *
+ *                                                                         *
+ *   This program is free software; you can redistribute it and/or modify  *
+ *   it under the terms of the GNU General Public License as published by  *
+ *   the Free Software Foundation; either version 2 of the License, or     *
+ *   (at your option) any later version.                                   *
+ *                                                                         *
+ *   This program is distributed in the hope that it will be useful,       *
+ *   but WITHOUT ANY WARRANTY; without even the implied warranty of        *
+ *   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the         *
+ *   GNU General Public License for more details.                          *
+ *                                                                         *
+ *   You should have received a copy of the GNU General Public License     *
+ *   along with this program; if not, write to the                         *
+ *   Free Software Foundation, Inc.,                                       *
+ *   51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.          *
+ * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
+
+/* Most of the mappers information comes from
+ * "Game Boy Camera Technical Information v1.1.1" by AntonioND
+ */
+
+int min(int a, int b) { return (a < b) ? a : b; }
+int max(int a, int b) { return (a < b) ? b : a; }
+
+int clamp(int v, int low, int high)
+{
+    return min(high, max(low, v));
+}
+
+static void do_kernel_filtering(int img[M64282FP_SENSOR_H][M64282FP_SENSOR_W], int a, const int k[6])
+{
+    unsigned int x, y;
+    /* north line and last west pixel previous values */
+    int tmp[1+M64282FP_SENSOR_W];
+
+    memcpy(tmp, &img[0][0], M64282FP_SENSOR_W*sizeof(img[0][0]));
+
+    for (y = 0; y < M64282FP_SENSOR_H; ++y) {
+
+        tmp[M64282FP_SENSOR_W] = img[y][0];
+
+        for (x = 0; x < M64282FP_SENSOR_W; ++x) {
+
+            int px = img[y][x];
+            int ms = img[min(y+1, M64282FP_SENSOR_H-1)][x];
+            int me = img[y][min(x+1, M64282FP_SENSOR_W-1)];
+            int mn = tmp[x];
+            int mw = tmp[M64282FP_SENSOR_W];
+
+            img[y][x] = k[0]*px+((a*(k[1]*px+k[2]*mn+k[3]*mw+k[4]*me+k[5]*ms))/4);
+
+            tmp[x] = px;
+            tmp[M64282FP_SENSOR_W] = px;
+        }
+    }
+}
+
+static void do_1d_filtering(int img[M64282FP_SENSOR_H][M64282FP_SENSOR_W], uint8_t P, uint8_t M)
+{
+    unsigned int x, y;
+
+    for (y = 0; y < M64282FP_SENSOR_H; ++y) {
+        for (x = 0; x < M64282FP_SENSOR_W; ++x) {
+
+            int px = img[y][x];
+            int s1 = img[min(y+1, M64282FP_SENSOR_H-1)][x];
+            int s2 = img[min(y+2, M64282FP_SENSOR_H-1)][x];
+            int s3 = img[min(y+3, M64282FP_SENSOR_H-1)][x];
+
+            int value = 0;
+            if (P & 0x01) { value += px; }
+            if (P & 0x02) { value += s1; }
+            if (P & 0x04) { value += s2; }
+            if (P & 0x08) { value += s3; }
+
+            if (M & 0x01) { value -= px; }
+            if (M & 0x02) { value -= s1; }
+            if (M & 0x04) { value -= s2; }
+            if (M & 0x08) { value -= s3; }
+
+            img[y][x] = value;
+        }
+    }
+}
+
+void process_m64282fp_image(
+    uint8_t img[M64282FP_SENSOR_H][M64282FP_SENSOR_W],
+    const uint8_t regs[M64282FP_REGS_COUNT])
+{
+    unsigned int x, y;
+    int tmp[M64282FP_SENSOR_H][M64282FP_SENSOR_W];
+
+    static const int kernels[6][6] = {
+        /* px +a*(px +mn +mw +me +ms) */
+        {   1,     2,  0, -1, -1,  0 }, /* horiz enhancement */
+        {   0,     2,  0, -1, -1,  0 }, /* horiz extraction  */
+        {   1,     2, -1,  0,  0, -1 }, /* vert  enhancement */
+        {   0,     2, -1,  0,  0, -1 }, /* vert  extraction  */
+        {   1,     4, -1, -1, -1, -1 }, /* 2d    enhancement */
+        {   0,     4, -1, -1, -1, -1 }, /* 2d    extraction  */
+    };
+
+    /* edge ratio (alpha) Q.2 format */
+#define Q2(x) (4*x)
+    static const int alpha_lut[8] = {
+        Q2(2/4), Q2(3/4), Q2(1), Q2(5/4),
+        Q2(2), Q2(3), Q2(4), Q2(5)
+    };
+#undef Q2
+
+    /* apply exposure effect */
+    uint16_t ext_exposure = 0x0300; /* 0x0300: could be other value */
+    uint16_t exposure = (regs[M64282FP_C_HI] << 8) | regs[M64282FP_C_LO];
+
+    /* TODO: handle the zero-exposure case */
+
+    for (y = 0; y < M64282FP_SENSOR_H; ++y) {
+        for (x = 0; x < M64282FP_SENSOR_W; ++x) {
+            int v = img[y][x];
+            v = ((v * exposure) / ext_exposure);
+            v = ((v - 128) / 8) + 128; /* adapt to 3.1V / 5V */
+            img[y][x] = clamp(v, 0, 255);
+        }
+    }
+
+    /* invert image when I bit is set */
+    if (regs[M64282FP_E_I_V] & 0x8) {
+        for (y = 0; y < M64282FP_SENSOR_H; ++y) {
+            for (x = 0; x < M64282FP_SENSOR_W; ++x) {
+                img[y][x] = 255 - img[y][x];
+            }
+        }
+    }
+
+    /* make signed */
+    for (y = 0; y < M64282FP_SENSOR_H; ++y) {
+        for (x = 0; x < M64282FP_SENSOR_W; ++x) {
+            tmp[y][x] = img[y][x] - 128;
+        }
+    }
+
+    unsigned int mode
+        = (((regs[M64282FP_N_VH_G] & 0x80) >> 7) << 3)  /* N  */
+        | (((regs[M64282FP_N_VH_G] & 0x60) >> 5) << 1)  /* VH */
+        | (((regs[M64282FP_E_I_V]  & 0x80) >> 7) << 0); /* E3 */
+
+    int alpha = alpha_lut[(regs[M64282FP_E_I_V] & 0x70) >> 4];
+
+    switch(mode)
+    {
+    case 0x0: /* 0000: positive image */
+        do_1d_filtering(tmp, regs[M64282FP_P], regs[M64282FP_M]);
+        break;
+    case 0x1: /* 0001: undocumented - bug ??? */
+        memset(tmp, 0, sizeof(tmp));
+        break;
+
+    case 0x2: /* 0010: horiz enhancement */
+        do_kernel_filtering(tmp, alpha, kernels[0]);
+        do_1d_filtering(tmp, regs[M64282FP_P], regs[M64282FP_M]);
+        break;
+    case 0x3: /* 0011: horiz extraction */
+        do_kernel_filtering(tmp, alpha, kernels[1]);
+        do_1d_filtering(tmp, regs[M64282FP_P], regs[M64282FP_M]);
+        break;
+
+    case 0xc: /* 1100: vert enhancement */
+        do_kernel_filtering(tmp, alpha, kernels[2]);
+        break;
+    case 0xd: /* 1101: vert extraction */
+        do_kernel_filtering(tmp, alpha, kernels[3]);
+        break;
+
+    case 0xe: /* 1110: 2D enhancement */
+        do_kernel_filtering(tmp, alpha, kernels[4]);
+        break;
+    case 0xf: /* 1111: 2D extraction */
+        do_kernel_filtering(tmp, alpha, kernels[5]);
+        break;
+
+    default:
+        break;
+    }
+
+    /* back to 0..255 range */
+    for (y = 0; y < M64282FP_SENSOR_H; ++y) {
+        for (x = 0; x < M64282FP_SENSOR_W; ++x) {
+            img[y][x] = clamp(128 + tmp[y][x], 0, 255);
+        }
+    }
+
+    /* gain and level control are not emulated */
+}

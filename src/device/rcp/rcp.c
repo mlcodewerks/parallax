@@ -25,7 +25,7 @@
 
 #include <string.h>
 
-#include "backends/api/audio_out_backend.h"
+#include "core/audio.h"
 #include "device/memory.h"
 #include "device/r4300/r4300_core.h"
 #include "device/rcp/rcp.h"

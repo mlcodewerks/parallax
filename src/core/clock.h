@@ -1,5 +1,5 @@
 /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * *
- *   Mupen64plus - audio_out_backend.h                                     *
+ *   Mupen64plus - clock_backend.h                                         *
  *   Mupen64Plus homepage: https://mupen64plus.org/                        *
  *   Copyright (C) 2016 Bobby Smiles                                       *
  *                                                                         *
@@ -19,22 +19,27 @@
  *   51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.          *
  * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
 
-#ifndef PARALLAX_BACKENDS_API_AUDIO_OUT_BACKEND_H
-#define PARALLAX_BACKENDS_API_AUDIO_OUT_BACKEND_H
+#ifndef PARALLAX_CLOCK_H
+#define PARALLAX_CLOCK_H
 
-#include <stddef.h>
+#include <time.h>
 
-struct audio_out_backend_interface
+struct clock_backend_interface
 {
-    /* Allow the backend to be notified of sample frequency.
+    /* Returns the current time
      */
-    void (*set_frequency)(void* aout, unsigned int frequency);
-
-    /* Push samples to be played by the backend
-     */
-    void (*push_samples)(void* aout, const void* samples, size_t size);
-    /* Advance the DAC while the FIFO is empty, in source stereo frames. */
-    void (*push_idle_samples)(void* aout, size_t frames);
+    time_t (*get_time)(void* clock);
 };
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/* Uses host time plus an optional time_t offset supplied as the context. */
+extern const struct clock_backend_interface g_iclock_ctime_plus_delta;
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

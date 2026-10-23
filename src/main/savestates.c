@@ -39,7 +39,7 @@
 #define PARALLAX_CORE_PROTOTYPES 1
 #include "core/log.h"
 #include "core/types.h"
-#include "backends/api/storage_backend.h"
+#include "core/storage.h"
 #include "device/device.h"
 #include "main/list.h"
 #include "main/main.h"

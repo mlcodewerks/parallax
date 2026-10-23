@@ -19,6 +19,7 @@
  *   51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.          *
  * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
 
+#include "core/audio.h"
 #include "core/types.h"
 #include <libretro.h>
 #include "device/rcp/rcp.h"
@@ -109,7 +110,7 @@ void init_audio_libretro(unsigned max_audio_frames)
 /* A fully compliant implementation is not really possible with just the zilmar spec.
  * We assume bits == 16 (assumption compatible with audio-sdl plugin implementation)
  */
-void set_audio_format_via_libretro(void* user_data,
+static void set_audio_format_via_libretro(void* user_data,
       unsigned int frequency)
 {
    const struct ai_controller* ai = user_data;
@@ -156,7 +157,7 @@ static void resample_audio(size_t frames)
    queue_audio(audio_out_buffer_s16, data.output_frames);
 }
 
-void push_audio_idle_samples_via_libretro(void *user_data, size_t frames)
+static void push_audio_idle_samples_via_libretro(void *user_data, size_t frames)
 {
    (void)user_data;
    /* The initial boot can span many guest fields before its first video
@@ -212,7 +213,7 @@ void audio_end_frame_libretro(double seconds)
 }
 
 /* Abuse core & audio plugin implementation details to obtain the desired effect. */
-void push_audio_samples_via_libretro(void* user_data, const void* buffer, size_t size)
+static void push_audio_samples_via_libretro(void* user_data, const void* buffer, size_t size)
 {
    (void)user_data;
    const int16_t *samples = buffer;
@@ -238,4 +239,9 @@ void push_audio_samples_via_libretro(void* user_data, const void* buffer, size_t
    }
 }
 
-
+const struct audio_out_backend_interface g_libretro_audio_backend =
+{
+   set_audio_format_via_libretro,
+   push_audio_samples_via_libretro,
+   push_audio_idle_samples_via_libretro
+};

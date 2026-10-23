@@ -34,16 +34,14 @@
 
 #include "core/log.h"
 #include "core/types.h"
-#include "backends/api/audio_out_backend.h"
-#include "backends/api/clock_backend.h"
-#include "backends/api/controller_input_backend.h"
-#include "backends/api/joybus.h"
-#include "backends/api/rumble_backend.h"
-#include "backends/api/storage_backend.h"
-#include "backends/api/video_capture_backend.h"
+#include "core/audio.h"
+#include "core/clock.h"
+#include "core/controller_input.h"
+#include "core/joybus.h"
+#include "core/rumble.h"
+#include "core/storage.h"
+#include "core/video_capture.h"
 #include "core/controller.h"
-#include "backends/clock_ctime_plus_delta.h"
-#include "backends/file_storage.h"
 #include "device/device.h"
 #include "device/disk.h"
 #include "device/controllers/paks/biopak.h"
@@ -55,7 +53,6 @@
 
 #include "main.h"
 #include "savestates.h"
-#include "core/log.h"
 #include "core/backend.h"
 #if defined(PROFILE)
 #include "profile.h"
@@ -712,7 +709,6 @@ struct file_storage eep;
     struct file_storage sra;
     size_t dd_rom_size;
     struct dd_disk dd_disk;
-    struct audio_out_backend_interface audio_out_backend_libretro;
 
     int control_ids[GAME_CONTROLLERS_COUNT];
     struct frontend_controller cin_compats[GAME_CONTROLLERS_COUNT];
@@ -775,12 +771,6 @@ void main_prerun(void)
     }
 #endif
 
-    /* setup backends */
-    extern void set_audio_format_via_libretro(void* user_data, unsigned int frequency);
-    extern void push_audio_idle_samples_via_libretro(void* user_data, size_t frames);
-    extern void push_audio_samples_via_libretro(void* user_data, const void* buffer, size_t size);
-    audio_out_backend_libretro = (struct audio_out_backend_interface){ set_audio_format_via_libretro, push_audio_samples_via_libretro, push_audio_idle_samples_via_libretro };
-    
     /* Fill-in l_pak_type_idx and l_ipaks according to game compatibility */
     k = 0;
     if (ROM_SETTINGS.biopak) {
@@ -979,7 +969,7 @@ void main_prerun(void)
                 no_compiled_jump,
                 randomize_interrupt,
                 g_start_address,
-                &g_dev.ai, &audio_out_backend_libretro,
+                &g_dev.ai, &g_libretro_audio_backend,
                 si_dma_duration,
                 0x800000,
                 joybus_devices, ijoybus_devices,

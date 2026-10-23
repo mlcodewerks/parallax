@@ -1,5 +1,5 @@
 /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * *
- *   Mupen64plus - rumble_backend.h                                        *
+ *   Mupen64plus - storage_backend.h                                       *
  *   Mupen64Plus homepage: https://mupen64plus.org/                        *
  *   Copyright (C) 2016 Bobby Smiles                                       *
  *                                                                         *
@@ -19,22 +19,54 @@
  *   51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.          *
  * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
 
-#ifndef PARALLAX_BACKENDS_API_RUMBLE_BACKEND_H
-#define PARALLAX_BACKENDS_API_RUMBLE_BACKEND_H
+#ifndef PARALLAX_STORAGE_H
+#define PARALLAX_STORAGE_H
 
+#include <stddef.h>
 #include <stdint.h>
 
-enum rumble_action
+struct storage_backend_interface
 {
-    RUMBLE_STOP,
-    RUMBLE_START
+    /* Returns a pointer to storage data
+     */
+    uint8_t* (*data)(const void* storage);
+
+    /* Returns the size of the storage
+     */
+    size_t (*size)(const void* storage);
+
+    /* Notify the storage backend that data should be persisted
+     */
+    void (*save)(void* storage, size_t start, size_t size);
 };
 
-struct rumble_backend_interface
+struct file_storage
 {
-    /* Start or stop rumbling
-     */
-    void (*exec)(void* rumble, enum rumble_action action);
+    uint8_t* data;
+    size_t size;
+    const char* filename;
+    int first_access;
 };
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/* open_file_storage takes ownership of filename even if reading fails.
+ * The data buffer remains available for formatting a new save.
+ * open_rom_file_storage takes ownership only on success.
+ * close_file_storage releases both data and filename.
+ */
+int open_file_storage(struct file_storage* storage, size_t size, const char* filename);
+int open_rom_file_storage(struct file_storage* storage, const char* filename);
+void close_file_storage(struct file_storage* storage);
+
+extern const struct storage_backend_interface g_ifile_storage;
+extern const struct storage_backend_interface g_ifile_storage_ro;
+extern const struct storage_backend_interface g_isubfile_storage;
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

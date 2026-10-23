@@ -22,7 +22,7 @@
 #ifndef PARALLAX_DEVICE_SI_GAME_CONTROLLER_H
 #define PARALLAX_DEVICE_SI_GAME_CONTROLLER_H
 
-#include "backends/api/joybus.h"
+#include "core/joybus.h"
 
 #include <stddef.h>
 #include <stdint.h>

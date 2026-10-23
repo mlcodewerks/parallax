@@ -22,15 +22,11 @@
 #include "core/controller.h"
 
 #include "core/backend.h"
-#include "backends/api/controller_input_backend.h"
-#include "backends/api/rumble_backend.h"
-#include "core/backend.h"
 
 #include "main/main.h"
 
 #include <stdint.h>
 #include <string.h>
-#include <core/backend.h>
 #include <core/log.h>
 #include <core/frontend.h>
 
