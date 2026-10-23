@@ -135,7 +135,15 @@ static void get_dpc_state(unsigned int state[3])
 }
 static void publish_fifo(unsigned int base,unsigned int bytes,int xbus)
 { rdp_publish_hle_fifo(&g_dev.dp,base,bytes,xbus); }
-static const RdpEmitBackend backend = {get_rdram, get_rdram_size, get_dmem, submit, time_packet, get_dpc_state, publish_fifo};
+static unsigned int unsupported_hle_task(void);
+static void graphics_diagnostic(const char *family, unsigned int pc,
+                                unsigned int w0, unsigned int w1, int fatal)
+{
+    core_log(2, "Fast RSP %s: unsupported command at %08x: %08x %08x%s",
+             family, pc, w0, w1, fatal ? " (task rejected)" : " (reserved or unimplemented)");
+    if (fatal) unsupported_hle_task();
+}
+static const RdpEmitBackend backend = {get_rdram, get_rdram_size, get_dmem, submit, time_packet, get_dpc_state, publish_fifo, graphics_diagnostic};
 
 void optional_rsp_init(rsp_memory rsp_info)
 {
@@ -179,7 +187,9 @@ static int graphics_supported_memory(const uint32_t *task, unsigned char *ram, u
      * Only resident layouts with a recognized restore entry may import it;
      * rdp_emit_hle_yield_supported keeps uncertified layouts disabled. */
     if ((task[1] & 1u) && !hle_stream_can_resume(sum)) {
-        if (!rdp_emit_hle_yield_supported(ram,0x800000u,task[4],task[14],task[15]))
+        int naboo_restore = (sum == 0x25c16 || sum == 0x25c53) &&
+            naboo_yield_supported(ram,0x800000u,dmem);
+        if (!naboo_restore && !rdp_emit_hle_yield_supported(ram,0x800000u,task[4],task[14],task[15]))
             return 0;
     }
 
@@ -206,6 +216,8 @@ static int graphics_supported_memory(const uint32_t *task, unsigned char *ram, u
         return zsort_validate(ram, 0x800000, dmem, task[12] & 0xffffff);
     }
 
+    if ((sum == 0x25c16 || sum == 0x25c53) && (task[1]&1))
+        return hle_stream_can_resume(sum) || naboo_yield_supported(ram,0x800000,dmem);
     if (sum == 0x28b9e || sum == 0x2095b || sum == 0x1f7bb ||
         sum == 0x25c16 || sum == 0x25c53)
         return !(task[1] & 1) || hle_stream_can_resume(sum);

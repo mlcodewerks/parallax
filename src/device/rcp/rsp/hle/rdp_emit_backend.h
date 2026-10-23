@@ -51,6 +51,8 @@ typedef struct RdpEmitBackend
     void           (*get_dpc_state)(unsigned int state[3]);
     /* Publish already stored guest RAM/DMEM commands while DP is frozen. */
     void           (*publish_fifo)(unsigned int base, unsigned int bytes, int xbus);
+    void           (*diagnostic)(const char *family, unsigned int pc,
+                                unsigned int w0, unsigned int w1, int fatal);
 
 } RdpEmitBackend;
 

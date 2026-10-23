@@ -559,6 +559,10 @@ void rdp_fifo_init(RdpFifo *f, unsigned char *storage,
                    unsigned int base, unsigned int cap)
 {
     f->storage = storage;
+    f->diagnostics = 0;
+    f->diagnostic = 0;
+    f->moveword_table = 0;
+    memset(f->native_noops, 0, sizeof(f->native_noops));
     f->base    = base;
     f->used    = 0;
     f->cap     = cap;
@@ -995,11 +999,13 @@ void f3dex2_run_dl(GSPState *gsp, RdpFifo *fifo, unsigned int addr,
                 s_half1=w1;
                 break;
             case 0xb0:                          /* G_SELECT_DL handled with HALF_0 above */
-            case 0xb2:                          /* G_OBJ_RECTANGLE_R (rotated; TODO) */
             case 0xbb:                          /* G_TEXTURE (sprite tile sets scale) */
             case 0xb3:                          /* G_RDPHALF_2 (texrect tail) */
             case 0xb6:                          /* G_(CLEAR)GEOMETRYMODE (unused 2D) */
             case 0xb7:
+                break;
+            case 0xb2:                          /* G_OBJ_RECTANGLE_R */
+                s2dex_obj_rectangle_r(gsp, r, s_rdram_size, seg_addr(w1), fifo);
                 break;
             case 0xe4:                          /* G_TEXRECT */
             case 0xe5:                          /* G_TEXRECTFLIP */
@@ -1103,6 +1109,7 @@ void f3dex2_run_dl(GSPState *gsp, RdpFifo *fifo, unsigned int addr,
                         two[1] = (int32_t)w1;
                     rdp_fifo_append(fifo, two, 2);
                 }
+                else rdp_fifo_diagnostic(fifo, "S2DEX1", pc-8u, w0, w1, 0);
                 break;
             }
             continue;
@@ -1442,6 +1449,10 @@ void f3dex2_run_dl(GSPState *gsp, RdpFifo *fifo, unsigned int addr,
              * MOVEWORD indices (numlight, fog, clip, ...) don't affect address
              * resolution here, so ignore them. */
             int index = (int)((w0 >> 16) & 0xff);
+            if (index != 0 && index != 2 && index != 4 && index != 6 &&
+                index != 8 && index != 10 && index != 12 && index != 14 &&
+                !(index == 16 && s_variant_cbfd))
+                rdp_fifo_diagnostic(fifo, "F3DEX2 MOVEWORD", pc-8u, w0, w1, 0);
             if (s_variant_cbfd && fifo->dmem && index<=0x10 && !(index&1)) {
                 unsigned int table=0x560u+(unsigned int)index;
                 unsigned int destination;
@@ -1742,6 +1753,8 @@ void f3dex2_run_dl(GSPState *gsp, RdpFifo *fifo, unsigned int addr,
                     }
                 }
             }
+            if (index != G_MV_VIEWPORT && index != G_MV_LIGHT && index != 0x0e)
+                rdp_fifo_diagnostic(fifo, "F3DEX2 MOVEMEM", pc-8u, w0, w1, 0);
             break;
         }
 
@@ -2015,6 +2028,7 @@ void f3dex2_run_dl(GSPState *gsp, RdpFifo *fifo, unsigned int addr,
         }
 
         default:
+            if (fifo->native_noops[cmd>>5] & (1u<<(cmd&31))) break;
             /* RDP render-state commands embedded in the display list
              * (G_SETxIMG, G_SETSCISSOR, G_SETCOMBINE, G_RDPSETOTHERMODE,
              * G_SETTILE/SIZE, G_LOADBLOCK/TILE/TLUT, the SET_*_COLOR commands,
@@ -2029,7 +2043,8 @@ void f3dex2_run_dl(GSPState *gsp, RdpFifo *fifo, unsigned int addr,
              * actually computes; everything else the RSP passes to the RDP
              * unchanged, and so do we. Commands outside the RDP range are
              * RSP-only (matrix/vertex/etc, already handled) or unknown and
-             * are skipped. */
+             * are reported before being skipped. Reserved slots are not
+             * treated as fatal without a native handler to establish them. */
             if (cmd >= 0xc8 && cmd != F3DEX2_DL && cmd != F3DEX2_ENDDL)
             {
                 int rdp_id = cmd & 0x3f;
@@ -2068,6 +2083,8 @@ void f3dex2_run_dl(GSPState *gsp, RdpFifo *fifo, unsigned int addr,
                  * ignored payload is still observable in the guest FIFO. */
                 if (rdp_id == 0x29)
                     rdp_fifo_fullsync_append(fifo, w0, w1);
+                if (rdp_id < 0x24 && cmd != 0xe0)
+                    rdp_fifo_diagnostic(fifo, "F3DEX2 reserved/ucode command", pc-8u, w0, w1, 0);
                 if (rdp_id >= 0x24 && rdp_id <= 0x3f &&
                     rdp_id != 0x31 && rdp_id != 0x29)
                 {
@@ -2087,6 +2104,7 @@ void f3dex2_run_dl(GSPState *gsp, RdpFifo *fifo, unsigned int addr,
                     rdp_fifo_append(fifo, two, 2);
                 }
             }
+            else rdp_fifo_diagnostic(fifo, "F3DEX2/S2DEX2", pc-8u, w0, w1, 0);
             break;
         }
     }

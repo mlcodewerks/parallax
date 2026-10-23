@@ -410,6 +410,8 @@ static void naboo_gfx_task(struct hle_t* hle)
 
     resume = l_naboo_gfx_running
           || ((*dmem_u32(hle, TASK_FLAGS) & 1) != 0);
+    if (!l_naboo_gfx_running && (*dmem_u32(hle, TASK_FLAGS) & 1))
+        resume = 2; /* NABOO_RESUME_NATIVE: import the overlay-06 yield image. */
 
     if (!l_naboo_gfx_running || (*dmem_u32(hle, TASK_FLAGS) & 1))
         *hle->sp_status &= ~(SP_STATUS_SIG1 | SP_STATUS_TASKDONE);

@@ -1779,6 +1779,8 @@ void f3d_run_dl(GSPState *gsp, RdpFifo *fifo, unsigned int addr,
                 break;
             }
             default:
+                if (!rdp_fifo_moveword(fifo, index, (w0>>8)&0xffffu, w1))
+                    rdp_fifo_diagnostic(fifo, "F3D MOVEWORD", pc-8u, w0, w1, 0);
                 break;
             }
             break;
@@ -1994,9 +1996,10 @@ void f3d_run_dl(GSPState *gsp, RdpFifo *fifo, unsigned int addr,
              * 0xB0 byte then never takes a branch off a stale slot. */
             if (((pw >> 24) & 0xffu) == F3D_RDPHALF_1
                 && bv >= 0 && bv < GSP_MAX_VERTICES && in_range(ba, 8u)
-                && gsp->vtx[bv].scr_z < (int32_t)w1)
+                && gsp->vtx[bv].scr_z < (int32_t)w1) {
                 s_yield_prefetch_bytes=0;
                 pc = ba;
+            }
             break;
         }
 
@@ -2101,6 +2104,7 @@ void f3d_run_dl(GSPState *gsp, RdpFifo *fifo, unsigned int addr,
             }
             else if (cmd >= 0xc8)
                 rdp_passthrough(gsp, fifo, cmd, w0, w1);
+            else if (cmd != 0x00) rdp_fifo_diagnostic(fifo, "F3D/F3DEX", pc-8u, w0, w1, 0);
             break;
         }
     }

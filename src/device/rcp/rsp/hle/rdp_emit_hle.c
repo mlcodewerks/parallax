@@ -436,6 +436,7 @@ static void guest_ring_config(RdpFifo *fifo, unsigned int text, int resume,
     fifo->store_indices = 0;
     fifo->fetch_dl = 0;
     fifo->matrix_dma_table=0;
+    fifo->moveword_table=0;
     fifo->drain = 0;
     fifo->read_staging = 0;
     fifo->group = 0;
@@ -756,6 +757,7 @@ static void guest_ring_config(RdpFifo *fifo, unsigned int text, int resume,
         if(mode==RING_GBI2 && (read_dmem_u32(dm,0xfc4u)&1u))
             s_zb_ring_pos=read_dmem_u32(dm,0xf0u)&0x7fffffu;
     }
+    rdp_fifo_decode_commands(fifo,ram,size,text);
     if (((unsigned int)s_zb_ring_live & RING_KIND) == mode) {
         s_output_only=((unsigned int)s_zb_ring_live&RING_OUTPUT_ONLY)!=0;
         fifo->write = guest_ring_write;
@@ -1640,6 +1642,7 @@ void rdp_emit_hle_process_dlist(void)
         return;
     fifo_base = rdram_size - HLE_FIFO_CAP;
     rdp_fifo_init(&s_fifo, s_fifo_storage, fifo_base, HLE_FIFO_CAP);
+    s_fifo.diagnostic = s_backend ? s_backend->diagnostic : 0;
     s_fifo.flush = fifo_flush_to_rdp;
     s_fifo.time = s_backend->time;
 
@@ -1721,7 +1724,11 @@ void rdp_emit_hle_process_dlist(void)
         }
         else if (zsort_ucode_match(rdram, rdram_size, ud, read_dmem_u32(dmem, 0xfdc)))
         {
-            zsort_run_dl(&s_gsp, &s_fifo, rdram, rdram_size, dmem, dl_addr);
+            if (!zsort_run_dl(&s_gsp, &s_fifo, rdram, rdram_size, dmem, dl_addr)) {
+                rdp_fifo_diagnostic(&s_fifo, "ZSort", dl_addr, 0, 0, 1);
+                s_fifo.used = 0;
+                return;
+            }
         }
         else if (turbo3d_ucode_match(rdram, rdram_size, ut))
         {
@@ -2044,6 +2051,7 @@ int angrylion_rs_dlist(int resume)
 
     fifo_base = rdram_size - HLE_FIFO_CAP;
     rdp_fifo_init(&s_fifo, s_fifo_storage, fifo_base, HLE_FIFO_CAP);
+    s_fifo.diagnostic = s_backend ? s_backend->diagnostic : 0;
     s_fifo.flush = fifo_flush_to_rdp;
     dl_addr = read_dmem_u32(dmem, 0xff0u) & 0x00ffffffu;
     if (dl_addr == 0 || dl_addr >= rdram_size)
@@ -2104,6 +2112,7 @@ int angrylion_naboo_dlist(int resume, int emit)
 
     fifo_base = rdram_size - HLE_FIFO_CAP;
     rdp_fifo_init(&s_fifo, s_fifo_storage, fifo_base, HLE_FIFO_CAP);
+    s_fifo.diagnostic = s_backend ? s_backend->diagnostic : 0;
     s_fifo.flush = fifo_flush_to_rdp;
 
     dl_addr = read_dmem_u32(dmem, 0xff0u) & 0x00ffffffu;
@@ -2116,6 +2125,7 @@ int angrylion_naboo_dlist(int resume, int emit)
     naboo_set_rdram(rdram);
     naboo_set_rdram_size(rdram_size);
     naboo_set_emit(emit);
+    if (resume == NABOO_RESUME_NATIVE && !naboo_restore_yield(dmem)) return -1;
     if (!resume) {
         naboo_seed_dmem(dmem);
         if (!(read_dmem_u32(dmem, 0xfc4u) & 1u) && s_backend->get_dpc_state) {
@@ -2195,6 +2205,7 @@ int angrylion_streaming_dlist(int resume)
     /* the FIFO submit machinery is per-slice */
     fifo_base = rdram_size - HLE_FIFO_CAP;
     rdp_fifo_init(&s_fifo, s_fifo_storage, fifo_base, HLE_FIFO_CAP);
+    s_fifo.diagnostic = s_backend ? s_backend->diagnostic : 0;
     s_fifo.flush = fifo_flush_to_rdp;
     if (!resume)
     {
@@ -2369,6 +2380,7 @@ int angrylion_zboss_dlist(int resume, unsigned int *sp_status)
 
     fifo_base = rdram_size - HLE_FIFO_CAP;
     rdp_fifo_init(&s_fifo, s_fifo_storage, fifo_base, HLE_FIFO_CAP);
+    s_fifo.diagnostic = s_backend ? s_backend->diagnostic : 0;
     s_fifo.flush = zb_ring_flush_to_rdp;
 
     if (!resume)

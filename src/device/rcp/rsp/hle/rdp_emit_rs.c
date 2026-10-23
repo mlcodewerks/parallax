@@ -1427,6 +1427,9 @@ void rs_run_dl(GSPState *gsp, RdpFifo *fifo, unsigned int dl_addr)
         case 0x0bu: case 0xbcu:        /* moveword */
         {
             unsigned int index = w0 & 0xffu;
+            int stored=rdp_fifo_moveword(fifo,index,(w0>>8)&0xffffu,w1);
+            if (!stored && index != 8 && index != 10 && index != 14)
+                rdp_fifo_diagnostic(fifo, "Rogue Squadron MOVEWORD", pc, w0, w1, 0);
             if (index == 0x08u || index == 0x0au)
             {
                 /* Rogue's table maps 08 to DMEM 160 and 0a to 164:
@@ -1529,6 +1532,7 @@ void rs_run_dl(GSPState *gsp, RdpFifo *fifo, unsigned int dl_addr)
                 s_rs_stream_result = 1;
                 return;
             }
+            if (op != 0) rdp_fifo_diagnostic(fifo, "Rogue Squadron", pc, w0, w1, 0);
             break;
         }
 

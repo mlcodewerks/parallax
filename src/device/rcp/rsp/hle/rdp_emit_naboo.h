@@ -5,11 +5,16 @@
 
 #define NABOO_R_DONE       0
 #define NABOO_R_FALLBACK  (-1)
+/* Distinguish a native DMEM yield image from a private HLE continuation. */
+#define NABOO_RESUME_NATIVE 2
 
 void naboo_set_rdram(unsigned char *rdram);
 void naboo_set_rdram_size(unsigned int size);
 void naboo_task_reset(unsigned int dl);
 void naboo_seed_dmem(const unsigned char *dmem);
+int naboo_yield_supported(const unsigned char *ram, unsigned int size,
+                          const unsigned char *dmem);
+int naboo_restore_yield(const unsigned char *dmem);
 void naboo_seed_output(unsigned int end, unsigned int current);
 void naboo_set_emit(int on);
 void naboo_set_clock(unsigned int clock);

@@ -27,9 +27,9 @@
  *     masked 0x7070, the Rogue Squadron outcode model.
  *
  * This walker is intentionally incremental: commands it does not yet
- * implement return NABOO_R_FALLBACK and the caller reruns the slice on
- * the LLE fallback, so titles stay fully playable while the command
- * set is filled in against cxd4 A/B references. */
+ * implement return NABOO_R_FALLBACK. Accurate timing uses native RSP;
+ * production Fast timing reports unsupported work and stops the task.
+ * Unknown overlay IDs must not be skipped or guessed. */
 
 #include <stdint.h>
 #include <stdio.h>
@@ -284,6 +284,51 @@ void naboo_seed_dmem(const unsigned char *dmem)
         nb_dmem_w32(0x118u, nb_dmem_r32(0xfecu));
         nb.geom = 0;
     }
+}
+
+/* Native overlays 06/00 save and reload the complete 4 KiB DMEM image.
+ * Stack cursors are DMEM addresses; the walker uses chunk-relative offsets. */
+int naboo_yield_supported(const unsigned char *ram, unsigned int size,
+                          const unsigned char *dm)
+{
+    unsigned int address, cursor, depth, chunk, i;
+    const unsigned char *saved;
+    if (!ram || !dm) return 0;
+    memcpy(&address, dm+0xff8u, 4); address &= 0x7ffff8u;
+    if (address > size || size-address < 4096u) return 0;
+    saved=ram+address;
+    cursor=((unsigned int)saved[0x37cu^3u]<<8)|saved[0x37du^3u];
+    depth=saved[0x142u^3u];
+    if (cursor<0x278u || cursor>0x378u || (cursor&7u) ||
+        (depth&7u) || depth/8u>NB_DL_STACK) return 0;
+    memcpy(&chunk,saved+0x5a4u,4);chunk&=0x7ffff8u;
+    if (chunk>=size || cursor-0x270u>size-chunk) return 0;
+    for(i=0;i<depth/8u;i++) {
+        memcpy(&chunk,saved+((0xfe0u+i*8u)&0xfffu),4);chunk&=0x7ffff8u;
+        memcpy(&cursor,saved+((0xfe4u+i*8u)&0xfffu),4);cursor&=0xfffu;
+        if(cursor<0x278u || cursor>0x378u || (cursor&7u) ||
+           chunk>=size || cursor-0x270u>size-chunk) return 0;
+    }
+    return 1;
+}
+int naboo_restore_yield(const unsigned char *dm)
+{
+    unsigned int address, i;
+    if (!naboo_yield_supported(s_rdram,s_rdram_size,dm)) return 0;
+    memcpy(&address,dm+0xff8u,4); address &= 0x7ffff8u;
+    memset(&nb,0,sizeof(nb));memcpy(nb.dmem,s_rdram+address,4096);
+    nb.chunk=nb_dmem_r32(0x5a4u)&0x7ffff8u;
+    nb.off=(unsigned short)nb_dmem_s16(0x37cu)-0x270u;
+    nb.dl=nb.chunk+nb.off;
+    nb.geom=nb_dmem_r32(0x378u);
+    nb.sp=nb.dmem[0x142u^3u]/8u;
+    for(i=0;i<nb.sp;i++) {
+        nb.stack[i*2]=nb_dmem_r32(0xfe0u+i*8u)&0x7ffff8u;
+        nb.stack[i*2+1]=(nb_dmem_r32(0xfe4u+i*8u)&0xfffu)-0x270u;
+        if(nb.stack[i*2+1]<8u || nb.stack[i*2+1]>0x108u) return 0;
+    }
+    nb.active=1;nb_packet_bytes=0;
+    return nb.dl<s_rdram_size;
 }
 
 void naboo_seed_output(unsigned int end, unsigned int current)
@@ -3284,6 +3329,14 @@ static int nb_walk(RdpFifo *fifo, unsigned int stop_depth, int nested)
             nb_dl_step(8u);
             continue;
         case 0x05:                              /* load+run overlay */
+            if ((w1 & 0x3fu) == 0x1bu) {
+                /* The resident color processor also enters this lighting
+                 * overlay directly. The explicit loader command preserves
+                 * the same count byte in s4; it consumes no extra words. */
+                nb_ovl1b(w1);
+                nb_dl_step(8u);
+                continue;
+            }
             if ((w1 & 0x3fu) == 0x24u) {
                 if (!nb_ovl24(fifo,w0)) return NABOO_R_FALLBACK;
                 nb_dl_step(40u);
@@ -3329,6 +3382,7 @@ static int nb_walk(RdpFifo *fifo, unsigned int stop_depth, int nested)
                 nb_dl_step(8u + nb_ovl0f(w1));
                 continue;
             }
+            rdp_fifo_diagnostic(fifo, "Naboo overlay", nb.dl, w0, w1, 1);
             nb.active = 0;
             return NABOO_R_FALLBACK;
         case 0x07:                              /* DL jump (entry
@@ -3567,8 +3621,9 @@ static int nb_walk(RdpFifo *fifo, unsigned int stop_depth, int nested)
             nb_dl_step(8u);
             continue;
         default:
-            /* not yet implemented: rerun this slice on the LLE
-             * fallback.  (Test harness: NB_PERMISSIVE skips unknown
+            rdp_fifo_diagnostic(fifo, "Naboo", nb.dl, w0, w1, 1);
+            /* Unsupported command: reject the slice. Production Fast
+             * timing reports an error; diagnostic replay can use native RSP.  (Test harness: NB_PERMISSIVE skips unknown
              * commands so the loader/transform path can be
              * oracle-diffed in isolation; never set in production.) */
             {

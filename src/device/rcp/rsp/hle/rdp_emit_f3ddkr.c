@@ -447,6 +447,16 @@ static void f3ddkr_run_dl_impl(GSPState *gsp, RdpFifo *fifo, unsigned int addr,
             /* Index is the low byte of w0 (matches GLideN64 F3DDKR_MoveWord /
              * the gImmp21 G_MOVEWORD packing), not bits 16-23. */
             unsigned int index = w0 & 0xffu;
+            int stored=rdp_fifo_moveword(fifo,index,(w0>>8)&0xffffu,w1);
+            if (index==4u) {
+                unsigned int off=(w0>>8)&0xffffu;
+                int ratio=(int)(short)w1;
+                if((off==4u || off==12u) && ratio>0)gsp->clip_ratio=ratio;
+                break;
+            }
+            if (!stored && index != 0 && index != DKR_MW_BILLBOARD && index != DKR_MW_MVPMATRIX &&
+                index != DKR_MW_FOG && index != DKR_MW_SEGMENT)
+                rdp_fifo_diagnostic(fifo, "DKR MOVEWORD", pc-8u, w0, w1, 0);
             if (index == 0x00u) /* G_MW_MATRIX: two packed halves in bank zero */
             {
                 unsigned int off=(w0>>8)&0xffffu;
@@ -516,6 +526,7 @@ static void f3ddkr_run_dl_impl(GSPState *gsp, RdpFifo *fifo, unsigned int addr,
              * the second viewport with the wrong Y scale. */
             unsigned int mvidx = (w0 >> 16) & 0xffu;
             unsigned int ma    = seg_phys(w1);
+            if (mvidx != 0x80u) rdp_fifo_diagnostic(fifo, "DKR MOVEMEM", pc-8u, w0, w1, 0);
             if (mvidx == 0x80u && in_range(ma, 16u))
                 gsp_set_viewport(gsp, r, ma);
             break;
@@ -665,6 +676,8 @@ static void f3ddkr_run_dl_impl(GSPState *gsp, RdpFifo *fifo, unsigned int addr,
                     rdp_fifo_append(fifo, two, 2);
                 }
             }
+            if (cmd < 0xc0 && cmd != 0x00)
+                rdp_fifo_diagnostic(fifo, "DKR/JFG", pc-8u, w0, w1, 0);
             break;
         }
     }

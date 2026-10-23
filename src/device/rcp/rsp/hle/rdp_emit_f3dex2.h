@@ -17,6 +17,9 @@ extern "C" {
  * at [base, base+used) and invokes the rasterizer. */
 typedef struct RdpFifo
 {
+    unsigned int diagnostics;
+    void (*diagnostic)(const char *family, unsigned int pc,
+                       unsigned int w0, unsigned int w1, int fatal);
     unsigned char *storage; /* host backing store for the command words */
     unsigned char *dmem;    /* transient native scratch/state, never serialized */
     unsigned int   base;    /* virtual RDRAM byte address reported to the
@@ -39,6 +42,8 @@ typedef struct RdpFifo
     void         (*store_indices)(unsigned int packed);
     void         (*fetch_dl)(unsigned int pc, unsigned int w0);
     unsigned int matrix_dma_table;
+    unsigned int moveword_table; /* native DMEM base table, zero if unrecognized */
+    unsigned int native_noops[8];
     unsigned int dl_end; /* native prefetch boundary, transient */
     void         (*drain)(void); /* explicit native staging DMA */
     int          (*read_staging)(unsigned int offset, int32_t *words, unsigned int count);
@@ -47,8 +52,31 @@ typedef struct RdpFifo
                               unsigned int data, unsigned int data_bytes);
 } RdpFifo;
 
+/* MOVEWORD is a table-indexed SW, including unaligned/wrapping stores. */
+static inline int rdp_fifo_moveword(RdpFifo *f, unsigned int index,
+                                  unsigned int offset, unsigned int value)
+{
+    unsigned int table, destination, i;
+    if (!f || !f->dmem || !f->moveword_table) return 0;
+    table=(f->moveword_table+index)&0xfffu;
+    destination=((unsigned int)f->dmem[table^3u]<<8)|f->dmem[((table+1u)&0xfffu)^3u];
+    destination=(destination+offset)&0xfffu;
+    for(i=0;i<4;i++)f->dmem[((destination+i)&0xfffu)^3u]=(unsigned char)(value>>(24-i*8));
+    return 1;
+}
+
+/* Retain a count, but report only the first unknown command per walk. */
+static inline void rdp_fifo_diagnostic(RdpFifo *f, const char *family,
+    unsigned int pc, unsigned int w0, unsigned int w1, int fatal)
+{
+    if (f && (f->diagnostics++ == 0 || fatal) && f->diagnostic)
+        f->diagnostic(family, pc, w0, w1, fatal);
+}
+
 void rdp_fifo_init(RdpFifo *f, unsigned char *storage,
                    unsigned int base, unsigned int cap);
+void rdp_fifo_decode_commands(RdpFifo *f, const unsigned char *ram,
+                              unsigned int size, unsigned int text);
 void rdp_fifo_append(RdpFifo *f, const int32_t *words, int count);
 
 /* Track requested and already-emitted FullSyncs. Ordinary display lists
