@@ -31,6 +31,9 @@
 #include "device/rcp/rcp.h"
 #include "device/rcp/rsp/rsp_core.h"
 #include "device/rcp/rsp/rsp_timing.h"
+#if defined(HAVE_PARALLEL_RSP)
+#include "device/rcp/rsp/p_rsp/dpc_bridge.h"
+#endif
 #include "core/backend.h"
 #ifdef __LIBRETRO__
 #include "renderer_options.h"
@@ -41,6 +44,8 @@ static const uint32_t *hle_words;
 static uint32_t hle_base, hle_bytes;
 static uint32_t hle_rsp_cycles;
 static int hle_submission;
+static int hle_from_unfreeze;
+static int64_t hle_unfreeze_clock;
 /* HLE runs synchronously, so these milestones cannot span a CPU yield or a
  * savestate. Persistent DP work and packet phase stay in dp->timing. */
 static int hle_timed;
@@ -104,7 +109,12 @@ void rdp_submit_hle(struct rdp_core *dp, const uint32_t *words, uint32_t base, u
 {
     if (!bytes) return;
     if (dp->dpc_regs[DPC_STATUS_REG] & DPC_STATUS_FREEZE) {
-        if (!words) {
+        if (words) {
+            /* A long synchronous HLE list can wrap its guest FIFO before
+             * CLR_FREEZE. Retain the actual stream, rather than re-reading
+             * overwritten RAM when the CPU permits the DP to consume it. */
+            rdp_hle_frozen_append(dp, words, bytes);
+        } else {
             /* Native FIFO DMA publication while rendering is frozen. The
              * emitter has already written RAM. CURRENT remains at the first
              * unread command until DPC_CLR_FREEZE runs the normal consumer. */
@@ -130,9 +140,47 @@ void rdp_submit_hle(struct rdp_core *dp, const uint32_t *words, uint32_t base, u
     hle_timed = 0;
     memset(&hle_sync, 0, sizeof(hle_sync));
 }
+
+static void consume_frozen_hle(struct rdp_core *dp, int from_rsp)
+{
+    uint32_t bytes = dp->hle_frozen_bytes, at = 0;
+    uint32_t start = dp->dpc_regs[DPC_START_REG], end = dp->dpc_regs[DPC_END_REG];
+    uint32_t status = dp->dpc_regs[DPC_STATUS_REG] & (DPC_STATUS_XBUS_DMEM_DMA | DPC_STATUS_START_VALID);
+    uint32_t guest_end = dp->hle_frozen_guest_end;
+    hle_unfreeze_clock = dp->mi->r4300->cp0.count_clock;
+#if defined(HAVE_PARALLEL_RSP)
+    if (from_rsp) hle_unfreeze_clock = dp->sp->slice_start_clock +
+        rsp_count_ticks(parallelRSPExecutedCycles(), dp->sp->slice_overhang);
+#else
+    (void)from_rsp;
+#endif
+    dp->hle_frozen_bytes = 0;
+    hle_from_unfreeze = 1;
+    /* Keep submissions inside every backend's FIFO limit, without splitting
+     * a native triangle or texture rectangle between batches. */
+    while (at < bytes) {
+        uint32_t batch = at;
+        while (at < bytes) {
+            static const uint32_t triangle_words[8] = {8,12,24,28,24,28,40,44};
+            uint32_t op = (dp->hle_frozen_words[at/4]>>24)&63u;
+            uint32_t count = op>=8 && op<=15 ? triangle_words[op-8] : op==0x24 || op==0x25 ? 4 : 2;
+            uint32_t packet = count*4;
+            if (packet > bytes-at) packet=bytes-at;
+            if (at>batch && at-batch+packet>131072u) break;
+            at += packet;
+        }
+        dp->dpc_regs[DPC_STATUS_REG] &= ~DPC_STATUS_START_VALID;
+        rdp_submit_hle(dp, dp->hle_frozen_words+batch/4, 0x7e0000, at-batch, 0);
+    }
+    hle_from_unfreeze = 0;
+    dp->dpc_regs[DPC_START_REG]=start;
+    dp->dpc_regs[DPC_CURRENT_REG]=guest_end;
+    dp->dpc_regs[DPC_END_REG]=end;
+    dp->dpc_regs[DPC_STATUS_REG]=(dp->dpc_regs[DPC_STATUS_REG]&
+        ~(DPC_STATUS_XBUS_DMEM_DMA | DPC_STATUS_START_VALID)) | status;
+}
 #endif
 #if defined(HAVE_PARALLEL_RSP)
-#include "device/rcp/rsp/p_rsp/dpc_bridge.h"
 static uint32_t rsp_submission_cycles(void)
 {
     return hle_submission ? hle_rsp_cycles : parallelRSPExecutedCycles();
@@ -242,8 +290,9 @@ static void process_dpc_commands(struct rdp_core* dp, int from_rsp)
     if (hle_submission && hle_timed) sync = hle_sync;
     else if (dp->vi_regs && dp->instruction_timing) {
         int64_t submitted = dp->mi->r4300->cp0.count_clock;
+        if (hle_from_unfreeze) submitted = hle_unfreeze_clock;
 #if defined(HAVE_PARALLEL_RSP)
-        if (from_rsp) submitted = dp->sp->slice_start_clock +
+        if (from_rsp && !hle_from_unfreeze) submitted = dp->sp->slice_start_clock +
             rsp_count_ticks(rsp_submission_cycles(), dp->sp->slice_overhang);
 #endif
         uint32_t begin = dp->dpc_regs[DPC_CURRENT_REG] & 0xfffff8;
@@ -349,6 +398,9 @@ static void update_dpc_status(struct rdp_core* dp, uint32_t w, int from_rsp)
         if (dp->do_on_unfreeze & DELAY_UPDATESCREEN)
             renderer_present();
         dp->do_on_unfreeze = 0;
+#ifdef __LIBRETRO__
+        if (dp->hle_frozen_bytes) consume_frozen_hle(dp, from_rsp);
+#endif
         process_dpc_commands(dp, from_rsp);
     }
     if (w & DPC_SET_FREEZE) dp->dpc_regs[DPC_STATUS_REG] |= DPC_STATUS_FREEZE;
@@ -398,6 +450,8 @@ void init_rdp(struct rdp_core* dp,
 {
     dp->sp = sp;
     dp->mi = mi;
+    dp->hle_frozen_words = NULL;
+    dp->hle_frozen_bytes = dp->hle_frozen_capacity = dp->hle_frozen_guest_end = 0;
     dp->vi_regs = NULL;
     dp->instruction_timing = 1;
 #ifdef __LIBRETRO__
@@ -410,6 +464,7 @@ void init_rdp(struct rdp_core* dp,
 
 void poweron_rdp(struct rdp_core* dp)
 {
+    rdp_hle_frozen_reset(dp);
     hle_timed = 0;
     memset(&hle_sync, 0, sizeof(hle_sync));
     memset(dp->dpc_regs, 0, DPC_REGS_COUNT*sizeof(uint32_t));

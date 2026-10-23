@@ -1734,12 +1734,13 @@ uint framebuffer_byte(uint offset) {
 void main() {
     ivec2 p = ivec2(int(gl_FragCoord.x), 0);
     uvec4 mapping = texelFetch(byte_map, p, 0);
-    bytes = texelFetch(previous_tmem, p, 0);
+    uvec4 result = texelFetch(previous_tmem, p, 0);
     for (int i = 0; i < 4; ++i) {
         uint value = mapping[i];
         if (value == 0xffffffffu) continue;
-        bytes[i] = (value & 0x80000000u) != 0u ? framebuffer_byte(value & 0x7fffffffu) : value;
+        result[i] = (value & 0x80000000u) != 0u ? framebuffer_byte(value & 0x7fffffffu) : value;
     }
+    bytes = result;
 }
 )";
 constexpr const char *decode_fragment = R"(#version 330 core

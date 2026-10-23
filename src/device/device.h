@@ -25,17 +25,12 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include "cart/cart.h"
-#include "cart/is_viewer.h"
-#include "controllers/game_controller.h"
-#include "controllers/paks/biopak.h"
-#include "controllers/paks/mempak.h"
-#include "controllers/paks/rumblepak.h"
-#include "controllers/paks/transferpak.h"
+#include "device/cart.h"
+#include "device/controllers.h"
 #include "dd_controller.h"
-#include "gb/gb_cart.h"
+#include "device/gb.h"
 #include "memory.h"
-#include "pif/pif.h"
+#include "device/pif.h"
 #include "r4300/r4300_core.h"
 #include "device/rcp/rcp.h"
 #include "device/rcp/rcp.h"

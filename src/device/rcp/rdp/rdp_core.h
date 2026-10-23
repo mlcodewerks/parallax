@@ -84,6 +84,10 @@ enum
 #include "rdp_timing.h"
 #include "rdp_counters.h"
 
+#define RDP_HLE_FROZEN_STATE_BYTES (12u + 512u * 1024u)
+#define RDP_HLE_FROZEN_STATE_OFFSET RDP_EXTRA_STATE_BYTES
+#define RDP_TOTAL_EXTRA_STATE_BYTES (RDP_EXTRA_STATE_BYTES + RDP_HLE_FROZEN_STATE_BYTES)
+
 struct rdp_core
 {
     uint32_t dpc_regs[DPC_REGS_COUNT];
@@ -100,6 +104,10 @@ struct rdp_core
     struct rdp_timing timing;
     struct rdp_counters counters;
     int instruction_timing;
+    /* HLE can produce an entire list before the CPU unfreezes the DP.
+     * Keep those commands independent of the wrapping guest output FIFO. */
+    uint32_t *hle_frozen_words;
+    uint32_t hle_frozen_bytes, hle_frozen_capacity, hle_frozen_guest_end;
 };
 
 static osal_inline uint32_t dpc_reg(uint32_t address)
@@ -124,6 +132,10 @@ const uint32_t *rdp_hle_command_buffer(uint32_t address);
 void rdp_submit_hle(struct rdp_core *dp, const uint32_t *words, uint32_t base, uint32_t bytes, uint32_t rsp_cycles);
 void rdp_publish_hle_fifo(struct rdp_core *dp, uint32_t base, uint32_t bytes, int xbus);
 void rdp_time_hle(struct rdp_core *dp, const uint32_t *words, uint32_t count, uint32_t rsp_cycles);
+void rdp_hle_frozen_reset(struct rdp_core *dp);
+void rdp_hle_frozen_append(struct rdp_core *dp, const uint32_t *words, uint32_t bytes);
+int rdp_hle_frozen_save(const struct rdp_core *dp, void *data, uint32_t bytes);
+int rdp_hle_frozen_load(struct rdp_core *dp, const void *data, uint32_t bytes);
 uint32_t rdp_dpc_clock_value(const struct rdp_core* dp, uint32_t count);
 void rdp_restore_dpc_clock(struct rdp_core* dp, uint32_t count);
 uint32_t rdp_sync_full_delay(const struct rdp_core* dp);

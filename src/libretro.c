@@ -59,7 +59,7 @@
 #include "main/rom.h"
 #include "core/backend.h"
 #include "device/rcp/rcp.h"
-#include "device/pif/pif.h"
+#include "device/pif.h"
 #include "libretro_memory.h"
 
 #ifndef PRESCALE_WIDTH
@@ -741,7 +741,7 @@ size_t retro_get_memory_size(unsigned type)
 
 size_t retro_serialize_size(void)
 {
-    return 16788288 + 1024 + 4 + RDP_EXTRA_STATE_BYTES;
+    return 16788288 + 1024 + 4 + RDP_TOTAL_EXTRA_STATE_BYTES;
 }
 
 bool retro_serialize(void *data, size_t size)
@@ -756,7 +756,7 @@ bool retro_unserialize(const void *data, size_t size)
     const unsigned char* header = data;
     unsigned version = ((unsigned)header[8] << 24) | ((unsigned)header[9] << 16) |
                        ((unsigned)header[10] << 8) | header[11];
-    size_t extra = version >= 0x00011a00 ? RDP_EXTRA_STATE_BYTES : version >= 0x00010e00 ? 151552 : version >= 0x00010d00 ? 20480 : version >= 0x00010c00 ? 16384 :
+    size_t extra = version >= 0x00011b00 ? RDP_TOTAL_EXTRA_STATE_BYTES : version >= 0x00011a00 ? RDP_EXTRA_STATE_BYTES : version >= 0x00010e00 ? 151552 : version >= 0x00010d00 ? 20480 : version >= 0x00010c00 ? 16384 :
                    version >= 0x00010b00 ? 8192 : version >= 0x00010200 ? 4096 : 0;
     if (size < 16788288 + 1024 + 4 + extra) return false;
     return main_stateload(data) != 0;

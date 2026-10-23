@@ -44,12 +44,9 @@
 #include "core/controller.h"
 #include "device/device.h"
 #include "device/disk.h"
-#include "device/controllers/paks/biopak.h"
-#include "device/controllers/paks/mempak.h"
-#include "device/controllers/paks/rumblepak.h"
-#include "device/controllers/paks/transferpak.h"
-#include "device/gb/gb_cart.h"
-#include "device/pif/bootrom_hle.h"
+#include "device/controllers.h"
+#include "device/gb.h"
+#include "device/pif.h"
 
 #include "main.h"
 #include "savestates.h"
@@ -1055,6 +1052,7 @@ void main_stop(void)
     }
 
     stop_device(&g_dev);
+    rdp_hle_frozen_reset(&g_dev.dp);
 }
 
 core_result open_pif(const unsigned char* pifimage, unsigned int size)

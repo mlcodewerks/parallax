@@ -2,7 +2,7 @@
  * Component copyright and license notices are retained below.
  */
 
-#include "device/gb/gb_cart.h"
+#include "device/gb.h"
 #include "core/types.h"
 #include "core/log.h"
 #include "core/rumble.h"
@@ -10,9 +10,7 @@
 #include "core/video_capture.h"
 #include <assert.h>
 #include <string.h>
-#include "device/gb/mbc3_rtc.h"
 #include "core/clock.h"
-#include "device/gb/m64282fp.h"
 
 /* ---- gb/gb_cart.c ---- */
 

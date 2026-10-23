@@ -2,21 +2,17 @@
  * Component copyright and license notices are retained below.
  */
 
-#include "device/controllers/game_controller.h"
+#include "device/controllers.h"
 #include "core/log.h"
 #include "core/types.h"
 #include "core/controller_input.h"
 #include "core/joybus.h"
 #include <stdint.h>
 #include <string.h>
-#include "device/controllers/paks/biopak.h"
 #include <time.h>
-#include "device/controllers/paks/mempak.h"
 #include "core/storage.h"
-#include "device/controllers/paks/rumblepak.h"
 #include "core/rumble.h"
-#include "device/controllers/paks/transferpak.h"
-#include "device/gb/gb_cart.h"
+#include "device/gb.h"
 
 /* ---- controllers/game_controller.c ---- */
 

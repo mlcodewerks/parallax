@@ -3,9 +3,8 @@
 
 #include <stdint.h>
 #define EEPROM_MAX_SIZE 0x800
-#include <device/controllers/paks/mempak.h>
-#include <device/cart/flashram.h>
-#include <device/cart/sram.h>
+#include <device/controllers.h>
+#include <device/cart.h>
 
 typedef struct _save_memory_data
 {

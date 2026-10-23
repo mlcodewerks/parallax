@@ -64,7 +64,7 @@ _Static_assert(RDP_RASTER_STATE_OFFSET + 192 <= 20480,
     "RDP raster state overlaps optional HLE state");
 
 static const char* savestate_magic = "M64+SAVE";
-static const int savestate_latest_version = 0x00011a00;  /* 1.26: queued RDP busy counters */
+static const int savestate_latest_version = 0x00011b00;  /* 1.27: frozen HLE command stream */
 
 struct savestate_work {
     char *data;
@@ -889,6 +889,11 @@ int core_state_load(struct device* dev, const void *data)
     else if (version >= 0x00011000) optional_rsp_load_legacy_stream(data_0001_0200 + 20480);
     else optional_rsp_load_legacy(version >= 0x00010e00 ? data_0001_0200 + 20480 : NULL);
 #endif
+    if (!rdp_hle_frozen_load(&dev->dp, version >= 0x00011b00 ?
+            data + 44 + savestateSize + sizeof(queue) + sizeof(using_tlb_data) +
+            RDP_HLE_FROZEN_STATE_OFFSET : NULL, RDP_HLE_FROZEN_STATE_BYTES)) {
+        free(savestateData); return 0;
+    }
     if (version >= 0x00011a00) {
         curr = data_0001_0200 + RDP_RASTER_STATE_OFFSET;
         dev->dp.timing.primitive_color = GETDATA(curr, uint32_t);
@@ -960,7 +965,7 @@ int core_state_save(const struct device* dev, void *data)
     save_eventqueue_infos(&dev->r4300.cp0, queue);
 
     // Allocate memory for the save state data
-    save->size = 16788288 + sizeof(queue) + 4 + RDP_EXTRA_STATE_BYTES;
+    save->size = 16788288 + sizeof(queue) + 4 + RDP_TOTAL_EXTRA_STATE_BYTES;
     save->data = curr = malloc(save->size);
     if (save->data == NULL)
     {
@@ -1406,6 +1411,9 @@ int core_state_save(const struct device* dev, void *data)
     if (!rdp_counters_save(&dev->dp.counters,
             save->data + 16788288 + sizeof(queue) + 4 + RDP_COUNTER_STATE_OFFSET,
             RDP_COUNTER_STATE_BYTES)) { free(save->data); free(save); return 0; }
+    if (!rdp_hle_frozen_save(&dev->dp,
+            save->data + 16788288 + sizeof(queue) + 4 + RDP_HLE_FROZEN_STATE_OFFSET,
+            RDP_HLE_FROZEN_STATE_BYTES)) { free(save->data); free(save); return 0; }
     memcpy(save->mempointer, save->data, save->size);
     free(save->data);
     free(save);

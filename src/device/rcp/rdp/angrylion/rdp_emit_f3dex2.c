@@ -711,6 +711,16 @@ void f3dex2_run_dl(GSPState *gsp, RdpFifo *fifo, unsigned int addr,
         unsigned int w0, w1;
         int cmd;
         const unsigned char *r = s_rdram_base;
+        /* The CPU must get a chance to request a task yield while a long
+         * streaming list is still running. Completing it synchronously and
+         * delaying only SP-done leaves DK64's task scheduler out of order.
+         * Inline command spans keep their local return state until done. */
+        if (s_streaming && !inline_end && hle_timing_slice_limit() &&
+            hle_timing_cycles() >= hle_timing_slice_limit()) {
+            s_stream_pc = pc;
+            s_stream_stalled = 1;
+            return;
+        }
 
         if (r == 0)
             return;
@@ -1295,13 +1305,15 @@ void f3dex2_run_dl(GSPState *gsp, RdpFifo *fifo, unsigned int addr,
         case 0x18: case 0x19: case 0x1a: case 0x1b:
         case 0x1c: case 0x1d: case 0x1e: case 0x1f:
         {
-            /* Conker's F3DEXBG.NoN G_TRI4: opcodes 0x10..0x1f each draw four
+            /* Both Conker lighting variants use G_TRI4, including the
+             * normal-indexed resident selected by a mid-list LOAD_UCODE.
+             * Opcodes 0x10..0x1f each draw four
              * triangles from twelve 5-bit vertex indices. The third index of
              * the first triangle is split across the two command words (three
              * high bits in w0, two low bits in w1); the other eleven indices
              * are packed 5 bits each. Only active on the CBFD build -- every
              * other F3DEX2 title leaves 0x10..0x1f as unused no-ops. */
-            if (s_variant_cbfd&1)
+            if (s_variant_cbfd)
             {
                 int idx[4][3];
                 int t;

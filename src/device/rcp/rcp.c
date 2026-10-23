@@ -834,7 +834,7 @@ void write_ri_regs(void* opaque, uint32_t address, uint32_t value, uint32_t mask
 #include "core/log.h"
 #include "core/types.h"
 #include "device/memory.h"
-#include "device/pif/pif.h"
+#include "device/pif.h"
 #include "device/r4300/r4300_core.h"
 #include "device/rcp/rcp.h"
 #include "device/rcp/rcp.h"

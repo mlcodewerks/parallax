@@ -22,7 +22,7 @@
 #include "device.h"
 
 #include "memory.h"
-#include "pif/pif.h"
+#include "device/pif.h"
 #include "r4300/r4300_core.h"
 #include "device/rcp/rcp.h"
 #include "device/rcp/rcp.h"

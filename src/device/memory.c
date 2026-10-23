@@ -26,7 +26,7 @@
 
 #include "device/device.h"
 #include "device/rcp/rsp/rsp_core.h"
-#include "device/pif/pif.h"
+#include "device/pif.h"
 
 
 #include <assert.h>

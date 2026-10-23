@@ -18,28 +18,9 @@ struct GLRDPConfig {
     bool vi_bob;
     bool accurate_shading, specialize_shaders;
 };
-// Frontend defaults preserve the former Fast preset. Low-level renderers use
-// full emulation by default for reference clients that supply no configuration.
+// Preserve the game's coverage and VI requests unless explicitly overridden.
+// Reduced sampling and disabled reconstruction remain opt-in performance choices.
 static inline struct GLRDPConfig glrdp_default_config(void) {
-    struct GLRDPConfig config = {GLRDP_COVERAGE_OFF,
-                                 GLRDP_VI_AA_OFF,
-                                 false,
-                                 false,
-                                 true,
-                                 true,
-                                 true,
-                                 GLRDP_ARITHMETIC_ACCURATE,
-                                 GLRDP_ARITHMETIC_ACCURATE,
-                                 true,
-                                 true,
-                                 true,
-                                 true,
-                                 true,
-                                 true,
-                                 false, true, false};
-    return config;
-}
-static inline struct GLRDPConfig glrdp_reference_config(void) {
     struct GLRDPConfig config = {GLRDP_COVERAGE_FULL,
                                  GLRDP_VI_AA_FULL,
                                  true,
@@ -57,6 +38,9 @@ static inline struct GLRDPConfig glrdp_reference_config(void) {
                                  true,
                                  false, true, false};
     return config;
+}
+static inline struct GLRDPConfig glrdp_reference_config(void) {
+    return glrdp_default_config();
 }
 static inline struct GLRDPConfig glrdp_validate_config(struct GLRDPConfig config) {
     if ((unsigned)config.coverage > GLRDP_COVERAGE_2X)

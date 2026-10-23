@@ -4,26 +4,20 @@
 
 #define __STDC_FORMAT_MACROS
 
-#include "device/cart/cart.h"
+#include "device/cart.h"
 #include "core/log.h"
 #include "core/types.h"
 #include "main/rom.h"
 #include <stdint.h>
 #include <string.h>
-#include "device/cart/af_rtc.h"
 #include "core/clock.h"
 #include <time.h>
-#include "device/cart/cart_rom.h"
 #include "device/memory.h"
 #include "device/r4300/r4300_core.h"
 #include "device/rcp/rcp.h"
 #include <inttypes.h>
-#include "device/cart/eeprom.h"
 #include "core/storage.h"
-#include "device/cart/flashram.h"
-#include "device/cart/is_viewer.h"
 #include "main/util.h"
-#include "device/cart/sram.h"
 #include <stddef.h>
 
 /* ---- cart/cart.c ---- */

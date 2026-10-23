@@ -35,34 +35,18 @@ SOURCES_C = \
 	$(CORE_DIR)/src/core/lifecycle.c \
 	$(CORE_DIR)/src/core/file.c \
 	$(CORE_DIR)/src/core/log.c \
-	$(CORE_DIR)/src/backends/api/video_capture_backend.c \
+	$(CORE_DIR)/src/core/video_capture.c \
 	$(CORE_DIR)/src/core/controller.c \
-	$(CORE_DIR)/src/backends/clock_ctime_plus_delta.c \
-	$(CORE_DIR)/src/backends/dummy_video_capture.c \
-	$(CORE_DIR)/src/backends/file_storage.c \
-	$(CORE_DIR)/src/device/cart/cart.c \
-	$(CORE_DIR)/src/device/cart/af_rtc.c \
-	$(CORE_DIR)/src/device/cart/cart_rom.c \
-	$(CORE_DIR)/src/device/cart/eeprom.c \
-	$(CORE_DIR)/src/device/cart/flashram.c \
-	$(CORE_DIR)/src/device/cart/is_viewer.c \
-	$(CORE_DIR)/src/device/cart/sram.c \
-	$(CORE_DIR)/src/device/controllers/game_controller.c \
-	$(CORE_DIR)/src/device/controllers/paks/biopak.c \
-	$(CORE_DIR)/src/device/controllers/paks/mempak.c \
-	$(CORE_DIR)/src/device/controllers/paks/rumblepak.c \
-	$(CORE_DIR)/src/device/controllers/paks/transferpak.c \
+	$(CORE_DIR)/src/core/clock.c \
+	$(CORE_DIR)/src/core/storage.c \
+	$(CORE_DIR)/src/device/cart.c \
+	$(CORE_DIR)/src/device/controllers.c \
 	$(CORE_DIR)/src/device/dd_controller.c \
 	$(CORE_DIR)/src/device/disk.c \
 	$(CORE_DIR)/src/device/device.c \
-	$(CORE_DIR)/src/device/gb/gb_cart.c \
-	$(CORE_DIR)/src/device/gb/mbc3_rtc.c \
-	$(CORE_DIR)/src/device/gb/m64282fp.c \
+	$(CORE_DIR)/src/device/gb.c \
 	$(CORE_DIR)/src/device/memory.c \
-	$(CORE_DIR)/src/device/pif/bootrom_hle.c \
-	$(CORE_DIR)/src/device/pif/cic.c \
-	$(CORE_DIR)/src/device/pif/n64_cic_nus_6105.c \
-	$(CORE_DIR)/src/device/pif/pif.c \
+	$(CORE_DIR)/src/device/pif.c \
 	$(CORE_DIR)/src/device/r4300/cp0.c \
 	$(CORE_DIR)/src/device/r4300/cached_interp.c \
 	$(CORE_DIR)/src/device/r4300/cp1.c \
@@ -75,6 +59,7 @@ SOURCES_C = \
 	$(CORE_DIR)/src/device/rcp/rcp.c \
 	$(CORE_DIR)/src/device/rcp/rdp/fb.c \
 	$(CORE_DIR)/src/device/rcp/rdp/rdp_core.c \
+	$(CORE_DIR)/src/device/rcp/rdp/rdp_hle_fifo.c \
 	$(CORE_DIR)/src/device/rcp/rsp/rsp_core.c \
 	$(CORE_DIR)/src/device/rcp/rsp/rsp_dma_memory.c \
 	$(CORE_DIR)/src/device/rdram.c \

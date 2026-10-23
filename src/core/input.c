@@ -23,7 +23,7 @@
 #include "core/backend.h"
 
 #include "core/backend.h"
-#include "device/controllers/game_controller.h"
+#include "device/controllers.h"
 #include <libretro.h>
 #include <stdio.h>
 #include <stdlib.h>

@@ -35,7 +35,7 @@
 
 #include "core/log.h"
 #include "core/types.h"
-#include "device/pif/bootrom_hle.h"
+#include "device/pif.h"
 #include "device/r4300/cp0.h"
 #include "device/r4300/r4300_core.h"
 #include "device/rcp/rcp.h"

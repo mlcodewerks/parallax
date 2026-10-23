@@ -35,10 +35,10 @@ static const struct retro_variable options[] = {
     {"wtfn64_glrdp_alpha_dither", "GLRDP alpha dithering (restart required); enabled|disabled"},
     {"wtfn64_glrdp_vi_filter", "GLRDP VI filters (restart required); enabled|disabled"},
     {"wtfn64_glrdp_deinterlace", "GLRDP deinterlacing (restart required); weave|bob"},
-    {"wtfn64_glrdp_coverage", "GLRDP coverage sampling (restart required); off|2x|reduced|full"},
-    {"wtfn64_glrdp_vi_aa", "GLRDP VI antialiasing (restart required); off|reduced|full"},
-    {"wtfn64_glrdp_vi_restore", "GLRDP VI dedithering (restart required); disabled|enabled"},
-    {"wtfn64_glrdp_vi_divot", "GLRDP VI divot filter (restart required); disabled|enabled"},
+    {"wtfn64_glrdp_coverage", "GLRDP coverage sampling (restart required); full|reduced|2x|off"},
+    {"wtfn64_glrdp_vi_aa", "GLRDP VI antialiasing (restart required); full|reduced|off"},
+    {"wtfn64_glrdp_vi_restore", "GLRDP VI dedithering (restart required); enabled|disabled"},
+    {"wtfn64_glrdp_vi_divot", "GLRDP VI divot filter (restart required); enabled|disabled"},
     {"wtfn64_glrdp_vi_resample", "GLRDP VI resampling (restart required); enabled|disabled"},
     {"wtfn64_glrdp_vi_gamma", "GLRDP VI gamma correction (restart required); enabled|disabled"},
     {"wtfn64_glrdp_vi_gamma_dither", "GLRDP VI gamma dithering (restart required); enabled|disabled"},
@@ -173,15 +173,15 @@ void renderer_register_options(retro_environment_t environment)
                 p = next;
             } while (p && j < RETRO_NUM_CORE_OPTION_VALUES_MAX - 1);
             if (!strcmp(d->key, "wtfn64_glrdp_coverage")) {
-                d->values[0].label = "Off (full coverage per surviving pixel)";
-                d->values[1].label = "2x (2 samples)";
-                d->values[2].label = "4x (4 samples, reduced)";
-                d->values[3].label = "8x (8 samples, full)";
+                d->values[0].label = "8x (8 samples, full)";
+                d->values[1].label = "4x (4 samples, reduced)";
+                d->values[2].label = "2x (2 samples)";
+                d->values[3].label = "Off (full coverage per surviving pixel)";
             }
             if (!strcmp(d->key, "wtfn64_glrdp_vi_aa")) {
-                d->values[0].label = "Off";
+                d->values[0].label = "Full (6 neighbours)";
                 d->values[1].label = "Reduced (4 neighbours)";
-                d->values[2].label = "Full (6 neighbours)";
+                d->values[2].label = "Off";
             }
             d->default_value = d->values[0].value;
             legacy_definitions[i].key = d->key;
@@ -266,15 +266,15 @@ void renderer_read_options(retro_environment_t env)
     s->glrdp.texture_lod = toggle(env, "wtfn64_glrdp_texture_lod", true);
     s->glrdp.color_dither = toggle(env, "wtfn64_glrdp_color_dither", true);
     s->glrdp.alpha_dither = toggle(env, "wtfn64_glrdp_alpha_dither", true);
-    v = value(env, "wtfn64_glrdp_coverage", "off");
+    v = value(env, "wtfn64_glrdp_coverage", "full");
     s->glrdp.coverage = !strcmp(v, "off") ? GLRDP_COVERAGE_OFF :
         !strcmp(v, "2x") ? GLRDP_COVERAGE_2X :
         !strcmp(v, "reduced") ? GLRDP_COVERAGE_REDUCED : GLRDP_COVERAGE_FULL;
-    v = value(env, "wtfn64_glrdp_vi_aa", "off");
+    v = value(env, "wtfn64_glrdp_vi_aa", "full");
     s->glrdp.vi_aa = !strcmp(v, "off") ? GLRDP_VI_AA_OFF :
         !strcmp(v, "reduced") ? GLRDP_VI_AA_REDUCED : GLRDP_VI_AA_FULL;
-    s->glrdp.vi_restore = toggle(env, "wtfn64_glrdp_vi_restore", false);
-    s->glrdp.vi_divot = toggle(env, "wtfn64_glrdp_vi_divot", false);
+    s->glrdp.vi_restore = toggle(env, "wtfn64_glrdp_vi_restore", true);
+    s->glrdp.vi_divot = toggle(env, "wtfn64_glrdp_vi_divot", true);
     s->glrdp.vi_resample = toggle(env, "wtfn64_glrdp_vi_resample", true);
     s->glrdp.vi_gamma = toggle(env, "wtfn64_glrdp_vi_gamma", true);
     s->glrdp.vi_gamma_dither = toggle(env, "wtfn64_glrdp_vi_gamma_dither", true);

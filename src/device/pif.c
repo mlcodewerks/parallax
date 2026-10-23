@@ -4,7 +4,7 @@
 
 #define __STDC_FORMAT_MACROS
 
-#include "device/pif/bootrom_hle.h"
+#include "device/pif.h"
 #include <stdint.h>
 #include <string.h>
 #include "core/types.h"
@@ -13,12 +13,9 @@
 #include "device/rcp/rcp.h"
 #include "device/rcp/rsp/rsp_core.h"
 #include "main/rom.h"
-#include "device/pif/cic.h"
 #include <stddef.h>
 #include "core/log.h"
 #include <inttypes.h>
-#include "device/pif/n64_cic_nus_6105.h"
-#include "device/pif/pif.h"
 #include <assert.h>
 #include "core/backend.h"
 #include "core/joybus.h"
