@@ -601,7 +601,7 @@ COREFLAGS += -DHLE_SIMD_DISABLE
 else
 ifneq (,$(filter x86_64 amd64 x86 i386 i486 i586 i686,$(ARCH)))
 $(addprefix $(CORE_DIR)/src/device/rcp/rsp/hle/,$(notdir $(patsubst %.c,%.o,$(wildcard $(CORE_DIR)/src/device/rcp/rsp/hle/*.c)))): CFLAGS += -msse4.2
-$(patsubst %.c,%.o,$(wildcard $(CORE_DIR)/src/device/rcp/rdp/angrylion/rdp_emit*.c)): CFLAGS += -msse4.2
+$(patsubst %.c,%.o,$(wildcard $(CORE_DIR)/src/device/rcp/rsp/hle/rdp_emit*.c)): CFLAGS += -msse4.2
 endif
 endif
 

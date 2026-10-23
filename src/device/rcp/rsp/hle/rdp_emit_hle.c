@@ -28,7 +28,7 @@
 #include "rdp_emit_rsp.h"
 #include "rdp_emit_backend.h"
 #include "rdp_emit_state.h"
-#include "../../rsp/hle/hle_timing.h"
+#include "hle_timing.h"
 
 /* The active rasterizer backend (angrylion or parallel-rdp).  Installed via
  * rdp_emit_set_backend() at plugin connect time.  The display-list walk,

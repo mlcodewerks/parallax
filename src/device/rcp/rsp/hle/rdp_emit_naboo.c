@@ -1,4 +1,4 @@
-#include "../../rsp/hle/hle_timing.h"
+#include "hle_timing.h"
 /* Factor 5 / LucasArts Naboo-era microcode walker (Star Wars Episode I:
  * Battle for Naboo, Indiana Jones and the Infernal Machine) for the
  * angrylion HLE path.

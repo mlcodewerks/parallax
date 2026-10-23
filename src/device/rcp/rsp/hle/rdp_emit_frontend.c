@@ -1,4 +1,4 @@
-#include "../../rsp/hle/hle_timing.h"
+#include "hle_timing.h"
 /* rdp_emit_frontend.c -- self-contained geometry frontend for the angrylion
  * HLE path. Reimplements the N64 matrix stack and vertex transform in C89,
  * reading matrices/vertices from RDRAM and producing clip-space vertices for

@@ -1,4 +1,4 @@
-#include "../../rsp/hle/hle_timing.h"
+#include "hle_timing.h"
 /* Turbo3D (original SGI "RSP SW Version: 2.0D") microcode walker for the
  * angrylion HLE path.
  *

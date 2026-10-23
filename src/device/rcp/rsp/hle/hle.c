@@ -1009,7 +1009,7 @@ static void dump_task(struct hle_t* hle, const char *const filename)
 }
 #endif
 
-#include "../../rdp/angrylion/rdp_emit_state.h"
+#include "rdp_emit_state.h"
 #define STREAM_FIELDS(X) X(l_streaming_gfx_running) X(l_rs_gfx_running) X(l_zboss_wait) X(l_zboss_running) X(l_naboo_gfx_running) X(l_naboo_emit)
 EMIT_STATE_DEFINE(hle_stream, STREAM_FIELDS)
 #undef STREAM_FIELDS

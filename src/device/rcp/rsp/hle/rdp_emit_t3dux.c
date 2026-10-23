@@ -1,4 +1,4 @@
-#include "../../rsp/hle/hle_timing.h"
+#include "hle_timing.h"
 /* T3DUX (Turbo3D UX) microcode walker for the angrylion HLE path.
  *
  * T3DUX is Yasumoto's compact Turbo3D display-list format (data-segment tag

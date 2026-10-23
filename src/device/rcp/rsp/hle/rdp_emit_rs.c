@@ -1,4 +1,4 @@
-#include "../../rsp/hle/hle_timing.h"
+#include "hle_timing.h"
 /* Factor 5 / LucasArts custom microcode walker (Star Wars: Rogue Squadron)
  * for the angrylion HLE path.
  *

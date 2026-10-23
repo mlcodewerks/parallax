@@ -55,7 +55,7 @@ for correctness checks, readback counts and performance measurements.
 | Option (`wtfn64_glrdp_` prefix) | Values; default first | Effect |
 | --- | --- | --- |
 | `upscale` | `1`, `2`, `4`, `8` | Internal resolution multiplier. |
-| `coverage` | `off`, `2x`, `reduced`, `full` | Full coverage for surviving pixels, two, four or eight native samples. The UI labels the sampled modes 2x/4x/8x. Lower counts can lose thin edges. Alpha, depth and AA-off first-sample rejection remain active. |
+| `coverage` | `full`, `reduced`, `2x`, `off` | Eight, four or two native samples, or full coverage for every surviving pixel. The UI labels the sampled modes 8x/4x/2x. Lower counts can lose thin edges. Alpha, depth and AA-off first-sample rejection remain active. |
 | `blending` | `accurate`, `fast` | RDP restoring divider, or arithmetic division with the same mux sources and quantized factors. Fast can change translucent edges. |
 | `combiner` | `accurate`, `fast` | Signed nine-bit arithmetic and rounding, or saturating arithmetic with normalized eight-bit factors. Fast can change lighting/sharpening. Both retain both cycles and alpha tests. |
 | `texture_filter` | `native`, `point` | Follow the game's multi-tap RDP filtering, or point sample for lower GPU cost and a pixelated image. Independent of VI resampling. |
@@ -67,12 +67,17 @@ for correctness checks, readback counts and performance measurements.
 | `alpha_dither` | `enabled`, `disabled` | Dither added to pixel/shade alpha. Disabling can change transparency thresholds and fades; alpha and depth tests remain active. Independent of RGB dithering. |
 | `vi_filter` | `enabled`, `disabled` | Master switch for **all** VI filters below. Individual choices are retained. Does not change RDP coverage/arithmetic. |
 | `deinterlace` | `weave`, `bob` | Weave retains alternating VI fields. Bob duplicates the current field, reducing motion combing at half vertical detail. Independent of VI filters. |
-| `vi_aa` | `off`, `reduced`, `full` | Skip reconstruction, four neighbours, or six neighbours. |
-| `vi_restore` | `disabled`, `enabled` | Dither restoration. |
-| `vi_divot` | `disabled`, `enabled` | Median filtering of partially covered edges. |
+| `vi_aa` | `full`, `reduced`, `off` | Six neighbours, four neighbours, or skip reconstruction. |
+| `vi_restore` | `enabled`, `disabled` | Dither restoration. |
+| `vi_divot` | `enabled`, `disabled` | Median filtering of partially covered edges. |
 | `vi_resample` | `enabled`, `disabled` | Native VI bilinear resampling, or point sampling. |
 | `vi_gamma` | `enabled`, `disabled` | Allow the game's gamma correction. |
 | `vi_gamma_dither` | `enabled`, `disabled` | Allow the game's gamma dithering independently of gamma correction. |
+
+Full coverage and VI reconstruction are the defaults. Existing saved options
+remain effective and require a content restart when changed. See the
+[DK64 intro regression checks](../../../../../benchmarks/DK64_GRAPHICS.md)
+for image comparisons and the Fast timing streaming-list fix.
 
 Enabled individual filters still obey the game's VI register requests. The
 shared `wtfn64_vi_filter`, `wtfn64_vi_dedither` and `wtfn64_vi_blur` options apply

@@ -1,4 +1,4 @@
-#include "../../rsp/hle/hle_timing.h"
+#include "hle_timing.h"
 /* RSP-exact triangle attribute setup for the angrylion HLE path.
  *
  * Transcribed from the F3DEX2 microcode triangle write (tri_to_rdp in the

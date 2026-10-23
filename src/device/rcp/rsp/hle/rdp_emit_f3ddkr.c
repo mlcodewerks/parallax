@@ -1,4 +1,4 @@
-#include "../../rsp/hle/hle_timing.h"
+#include "hle_timing.h"
 /* Rare's F3DDKR / JFG display-list decoder. Command dispatch, DMA,
  * projection and clipping were decoded from the retail programs, including
  * their reciprocal and clip overlays. See benchmarks/RARE_UCODE_ACCURACY.md

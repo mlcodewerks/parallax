@@ -73,7 +73,6 @@ SOURCES_C = \
 ANGRYLION_DIR = $(CORE_DIR)/src/device/rcp/rdp/angrylion
 RSP_HLE_DIR = $(CORE_DIR)/src/device/rcp/rsp/hle
 SOURCES_C += $(wildcard $(RSP_HLE_DIR)/*.c) \
-             $(wildcard $(ANGRYLION_DIR)/rdp_emit*.c) \
              $(CORE_DIR)/src/device/rcp/rsp/optional_rsp.c
 SOURCES_C += $(LIBRETRO_COMM_DIR)/encodings/encoding_crc32.c
 SOURCES_C += $(CORE_DIR)/src/renderer_options.c \

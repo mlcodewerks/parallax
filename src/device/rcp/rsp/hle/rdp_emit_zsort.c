@@ -1,5 +1,5 @@
 #include "rdp_emit_simd.h"
-#include "../../rsp/hle/hle_timing.h"
+#include "hle_timing.h"
 /* SGI ZSortp screen-space object walker. Grammar reference:
  * https://github.com/gonetz/GLideN64/blob/master/src/uCodes/ZSort.cpp
  * Uses the shared integer frontend/RDP encoder, not the OpenGL renderer.

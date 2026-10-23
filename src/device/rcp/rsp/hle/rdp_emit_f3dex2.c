@@ -1,4 +1,4 @@
-#include "../../rsp/hle/hle_timing.h"
+#include "hle_timing.h"
 /* rdp_emit_f3dex2.c -- F3DEX2 display-list dispatcher for the angrylion HLE
  * path. Reads F3DEX2 commands from RDRAM, routes geometry to the C89
  * frontend (rdp_emit_frontend), and appends the resulting RDP triangle

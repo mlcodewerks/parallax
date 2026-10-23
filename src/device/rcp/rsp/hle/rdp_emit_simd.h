@@ -3,7 +3,7 @@
  * with audio HLE. Display-list and FIFO state remain ordered by callers. */
 #ifndef PARALLAX_RDP_EMIT_SIMD_H
 #define PARALLAX_RDP_EMIT_SIMD_H
-#include "../../rsp/hle/hle_simd.h"
+#include "hle_simd.h"
 
 #if HLE_SIMD_ENABLED
 static inline unsigned rdp_simd_mask8(__m128i a)
