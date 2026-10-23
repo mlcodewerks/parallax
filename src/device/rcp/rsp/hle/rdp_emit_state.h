@@ -17,6 +17,7 @@ unsigned int name##_state_size(void); \
 void name##_state_save(void *); \
 void name##_state_load(const void *);
 EMIT_STATE_DECLARE(f3dex2)
+EMIT_STATE_DECLARE(f3d)
 EMIT_STATE_DECLARE(rs)
 EMIT_STATE_DECLARE(naboo)
 EMIT_STATE_DECLARE(zboss)

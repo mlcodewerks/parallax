@@ -92,6 +92,10 @@ static int s_yield_restored;
 static unsigned int s_yield_vertex_base;
 static unsigned int s_yield_prefetch_base, s_yield_prefetch_bytes;
 static unsigned char s_yield_prefetch[0x140];
+static int s_streaming, s_stream_active, s_stream_stalled, s_stream_resuming;
+static unsigned int s_stream_pc, s_stream_unwind_base;
+static unsigned char s_stream_dmem[0xfc0];
+static int s_stream_yielded;
 
 /* ---- Wipeout 64 sprite microcode (custom F3DLX-derived ucode) -------------
  * Its 2D content (menu background, text, intro screens) is drawn by a custom
@@ -1168,8 +1172,9 @@ void f3d_run_dl(GSPState *gsp, RdpFifo *fifo, unsigned int addr,
     if (z_buffered) s_zbuffered = z_buffered;
     if (r == 0)
         return;
-    if (s_dl_depth == 0) f3d_prepare_writer(gsp,fifo);
-    if (s_dl_depth >= F3D_DL_MAX_DEPTH)
+    if (s_dl_depth == 0 && !s_stream_resuming) f3d_prepare_writer(gsp,fifo);
+    s_stream_resuming = 0;
+    if (s_dl_depth + (s_streaming ? s_yield_depth : 0) >= F3D_DL_MAX_DEPTH)
         return;
     s_dl_depth++;
 
@@ -1182,6 +1187,13 @@ void f3d_run_dl(GSPState *gsp, RdpFifo *fifo, unsigned int addr,
 
     while (running && guard++ < 100000)
     {
+        if (s_streaming && hle_timing_slice_limit() &&
+            hle_timing_cycles() >= hle_timing_slice_limit()) {
+            s_stream_pc = pc;
+            s_stream_unwind_base = s_yield_depth;
+            s_stream_stalled = 1;
+            break;
+        }
         unsigned int w0 = command_word(r, pc);
         unsigned int w1 = command_word(r, pc + 4);
         if (s_yield_prefetch_bytes && (pc < s_yield_prefetch_base ||
@@ -1532,6 +1544,18 @@ void f3d_run_dl(GSPState *gsp, RdpFifo *fifo, unsigned int addr,
             else if (in_range(da, 8u))
             {
                 f3d_run_dl(gsp, fifo, da, s_textured, s_zbuffered);
+                if (s_streaming && s_stream_stalled) {
+                    /* Unwind the C recursion into the same outer-to-inner
+                     * return stack used by imported native yield images. */
+                    unsigned int at = s_stream_unwind_base;
+                    if (s_yield_depth < F3D_DL_MAX_DEPTH) {
+                        memmove(s_yield_returns + at + 1, s_yield_returns + at,
+                            (s_yield_depth - at) * sizeof(s_yield_returns[0]));
+                        s_yield_returns[at] = pc;
+                        ++s_yield_depth;
+                    }
+                    running = 0;
+                }
             }
             break;
         }
@@ -2110,4 +2134,47 @@ void f3d_run_dl(GSPState *gsp, RdpFifo *fifo, unsigned int addr,
     }
 
     s_dl_depth--;
+}
+
+int f3d_run_dl_streaming(GSPState *gsp, RdpFifo *fifo, unsigned int addr, int resume)
+{
+    s_streaming = 1;
+    s_stream_stalled = 0;
+    s_stream_resuming = resume && s_stream_active;
+    if (s_stream_resuming) addr = s_stream_pc;
+    s_stream_active = 1;
+    f3d_run_dl(gsp, fifo, addr, 0, 0);
+    s_streaming = 0;
+    if (!s_stream_stalled) s_stream_active = 0;
+    return s_stream_stalled;
+}
+int f3d_stream_active(void) { return s_stream_active; }
+void f3d_stream_yield(const unsigned char *dm)
+{
+    memcpy(s_stream_dmem, dm, sizeof(s_stream_dmem));
+    s_stream_yielded = 1;
+}
+void f3d_stream_restore(unsigned char *dm)
+{
+    if (s_stream_yielded) memcpy(dm, s_stream_dmem, sizeof(s_stream_dmem));
+    s_stream_yielded = 0;
+}
+
+#include "rdp_emit_state.h"
+#define F3D_FIELDS(X) X(s_seg) X(s_textured) X(s_zbuffered) X(s_othermode_h) X(s_othermode_l) X(s_dl_depth) X(s_geom) \
+    X(s_yield_returns) X(s_yield_depth) X(s_yield_restored) X(s_yield_vertex_base) X(s_yield_prefetch_base) \
+    X(s_yield_prefetch_bytes) X(s_yield_prefetch) X(s_streaming) X(s_stream_active) X(s_stream_stalled) \
+    X(s_stream_resuming) X(s_stream_pc) X(s_stream_unwind_base) X(s_stream_dmem) X(s_stream_yielded) \
+    X(s_spr_have) X(s_spr_struct) X(s_spr_size) \
+    X(s_spr_flip) X(s_spr_disjoint_bands) X(s_variant_seta) X(s_stop_uc) X(s_resume_pc) X(s_uc_stop_depth) \
+    X(s_stopped_at_uc) X(s_last_rdphalf1) X(s_variant_bhline) X(s_variant_ff2d) X(s_variant_d64) \
+    X(s_variant_line) X(s_variant_wr64) X(s_variant_f3dex) X(s_variant_pd) X(s_near_plane_z) X(s_variant_wo64)
+EMIT_STATE_DEFINE(f3d_snapshot, F3D_FIELDS)
+#undef F3D_FIELDS
+unsigned int f3d_state_size(void) { return f3d_snapshot_state_size(); }
+void f3d_state_save(void *p) { f3d_snapshot_state_save(p); }
+void f3d_state_load(const void *p)
+{
+    f3d_snapshot_state_load(p);
+    if (!p) { s_uc_stop_depth = -1; s_near_plane_z = -1; }
 }

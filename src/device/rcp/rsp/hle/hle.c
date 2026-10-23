@@ -36,6 +36,7 @@
 #include "hle_internal.h"
 #include "hle.h"
 #include "memory.h"
+#include "rdp_emit_f3d.h"
 #include <string.h>
 #include "ucodes.h"
 
@@ -311,6 +312,7 @@ static void forward_gfx_task_to_lle(struct hle_t* hle)
  * the direct call mirrors the existing cxd4 forward. If the walker
  * cannot service the task, fall back to the LLE forward. */
 int angrylion_streaming_dlist(int resume);
+int angrylion_f3d_dlist(int resume);
 int angrylion_rs_dlist(int resume);
 int angrylion_zboss_dlist(int resume, unsigned int *sp_status);
 unsigned int zboss_cycles(void);
@@ -499,6 +501,30 @@ static void rs_gfx_task(struct hle_t* hle)
      * core re-dispatches the task after the CPU has run */
 }
 
+/* FIFO GBI1 graphics must release the SP for audio at SIG0, rather than
+ * occupying it for the complete (often multi-VI) display list. */
+static void f3d_gfx_task(struct hle_t* hle)
+{
+    int resume = f3d_stream_active();
+    int relaunched = (*dmem_u32(hle, TASK_FLAGS) & 1u) != 0;
+    int r;
+    if (resume && !relaunched && (*hle->sp_status & SP_STATUS_SIG0)) {
+        f3d_stream_yield(hle->dmem);
+        rsp_break(hle, SP_STATUS_SIG1 | SP_STATUS_TASKDONE);
+        return;
+    }
+    if (!resume || relaunched)
+        *hle->sp_status &= ~(SP_STATUS_SIG1 | SP_STATUS_TASKDONE);
+    if (resume && relaunched) f3d_stream_restore(hle->dmem);
+    r = angrylion_f3d_dlist(resume);
+    if (r < 0) { forward_gfx_task_to_lle(hle); return; }
+    if (!r) rsp_break(hle, SP_STATUS_TASKDONE);
+    else if (*hle->sp_status & SP_STATUS_SIG0) {
+        f3d_stream_yield(hle->dmem);
+        rsp_break(hle, SP_STATUS_SIG1 | SP_STATUS_TASKDONE);
+    }
+}
+
 static void streaming_gfx_task(struct hle_t* hle)
 {
     int resume;
@@ -595,7 +621,7 @@ enum hle_graphics_resume hle_graphics_resume_pending(struct hle_t* hle)
     uint32_t text, data, bytes;
     int i;
     if (!(l_zboss_running || l_streaming_gfx_running || l_rs_gfx_running ||
-          l_naboo_gfx_running) || !cache->count)
+          l_naboo_gfx_running || f3d_stream_active()) || !cache->count)
         return HLE_RESUME_NONE;
     text = *dmem_u32(hle, TASK_UCODE);
     data = *dmem_u32(hle, TASK_UCODE_DATA);
@@ -606,6 +632,7 @@ enum hle_graphics_resume hle_graphics_resume_pending(struct hle_t* hle)
             continue;
         if (entry->uc_pfunc == zboss_gfx_task && l_zboss_running) return HLE_RESUME_ZBOSS;
         if (entry->uc_pfunc == streaming_gfx_task && l_streaming_gfx_running) return HLE_RESUME_STREAMING;
+        if (entry->uc_pfunc == f3d_gfx_task && f3d_stream_active()) return HLE_RESUME_F3D;
         if (entry->uc_pfunc == rs_gfx_task && l_rs_gfx_running) return HLE_RESUME_RS;
         if (entry->uc_pfunc == naboo_gfx_task && l_naboo_gfx_running) return HLE_RESUME_NABOO;
         break;
@@ -622,6 +649,7 @@ void hle_resume_graphics(struct hle_t* hle, enum hle_graphics_resume resume,
     case HLE_RESUME_RS: handler = rs_gfx_task; break;
     case HLE_RESUME_ZBOSS: handler = zboss_gfx_task; break;
     case HLE_RESUME_NABOO: handler = naboo_gfx_task; break;
+    case HLE_RESUME_F3D: handler = f3d_gfx_task; break;
     default: hle_execute(hle); return;
     }
     hle_timing_begin();
@@ -734,6 +762,11 @@ static ucode_func_t try_normal_task_detection(struct hle_t* hle)
     }
 
     switch (sum) {
+    /* Standard FIFO F3DEX GBI1 build (F1, Star Fox, Top Gear Rally).
+     * Select by microcode identity, never by ROM or a frame-rate target. */
+    case 0x237e9:
+        if (hle->hle_gfx) return &f3d_gfx_task;
+        return NULL;
     /* StoreVe12: found in Zelda Ocarina of Time [misleading task->type == 4] */
     case 0x278:
         /* Nothing to emulate */
@@ -859,6 +892,7 @@ static void timing_identify(ucode_func_t handler)
     if (handler == task_done) { hle_timing_family("task_done"); return; }
     if (handler == cicx105_ucode) { hle_timing_family("cicx105_ucode"); return; }
     if (handler == send_dlist_to_gfx_plugin) { hle_timing_family("send_dlist_to_gfx_plugin"); return; }
+    if (handler == f3d_gfx_task) { hle_timing_family("send_dlist_to_gfx_plugin"); return; }
     if (handler == streaming_gfx_task) { hle_timing_family("streaming_gfx_task"); return; }
     if (handler == rs_gfx_task) { hle_timing_family("rs_gfx_task"); return; }
     if (handler == zboss_gfx_task) { hle_timing_family("zboss_gfx_task"); return; }
@@ -905,7 +939,8 @@ enum hle_task_kind hle_get_task_kind(struct hle_t* hle)
     if (handler == cicx105_ucode)
         return HLE_TASK_BOOT;
     if (handler == send_dlist_to_gfx_plugin || handler == streaming_gfx_task ||
-        handler == rs_gfx_task || handler == zboss_gfx_task || handler == naboo_gfx_task)
+        handler == rs_gfx_task || handler == zboss_gfx_task || handler == naboo_gfx_task ||
+        handler == f3d_gfx_task)
         return HLE_TASK_GRAPHICS;
     if (*dmem_u32(hle, TASK_TYPE) == 2 &&
         (handler == send_alist_to_audio_plugin || handler == try_audio_task_detection(hle)))
@@ -1018,6 +1053,7 @@ EMIT_STATE_DEFINE(hle_stream, STREAM_FIELDS)
 int hle_stream_can_resume(unsigned int checksum)
 {
     switch (checksum) {
+    case 0x237e9: return f3d_stream_active();
     case 0x28b9e: return l_streaming_gfx_running;
     case 0x2095b: return l_rs_gfx_running;
     case 0x1f7bb: return l_zboss_running;

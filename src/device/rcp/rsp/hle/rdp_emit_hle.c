@@ -52,6 +52,7 @@ void rdp_emit_hle_reset(void) {
     memset(&s_gsp, 0, sizeof(s_gsp)); s_inited = 0;
     f3dex2_state_load(0); rs_state_load(0); naboo_state_load(0);
     zboss_state_load(0); rsp_emit_state_load(0);
+    f3d_state_load(0);
 }
 unsigned int rdp_emit_hle_state_size(void) { return sizeof(s_gsp) + sizeof(s_inited); }
 void rdp_emit_hle_save(void *p)
@@ -1591,23 +1592,24 @@ int rdp_emit_hle_supported(const unsigned char *ram, unsigned int size,
     return 0;
 }
 
-void rdp_emit_hle_process_dlist(void)
+static int process_dlist(int sliced_f3d)
 {
     unsigned char *rdram;
     unsigned char *dmem;
     unsigned int   rdram_size;
     unsigned int   dl_addr;
     unsigned int   fifo_base;
+    int stalled = 0;
 
     if (s_backend == 0 || s_backend->get_rdram == 0
         || s_backend->get_dmem == 0 || s_backend->get_rdram_size == 0)
-        return;
+        return -1;
 
     rdram      = s_backend->get_rdram();
     dmem       = s_backend->get_dmem();
     rdram_size = s_backend->get_rdram_size();
     if (rdram == 0 || dmem == 0 || rdram_size == 0)
-        return;
+        return -1;
 
     /* forget any fullsync seen by a previous task before the parsers run */
     rdp_fifo_fullsync_reset();
@@ -1639,7 +1641,7 @@ void rdp_emit_hle_process_dlist(void)
     /* the FIFO lives in host memory; the top 256 KiB of RDRAM is used
      * only as the virtual address range the DPC registers report */
     if (rdram_size < (512u * 1024u))
-        return;
+        return -1;
     fifo_base = rdram_size - HLE_FIFO_CAP;
     rdp_fifo_init(&s_fifo, s_fifo_storage, fifo_base, HLE_FIFO_CAP);
     s_fifo.diagnostic = s_backend ? s_backend->diagnostic : 0;
@@ -1648,7 +1650,7 @@ void rdp_emit_hle_process_dlist(void)
 
     dl_addr = read_dmem_u32(dmem, TASK_DATA_PTR_DMEM) & 0x00ffffffu;
     if (dl_addr == 0 || dl_addr >= rdram_size)
-        return;
+        return -1;
 
     guest_ring_begin(&s_fifo, read_dmem_u32(dmem, 0xfd0u) & 0xffffffu, 0);
 
@@ -1727,7 +1729,7 @@ void rdp_emit_hle_process_dlist(void)
             if (!zsort_run_dl(&s_gsp, &s_fifo, rdram, rdram_size, dmem, dl_addr)) {
                 rdp_fifo_diagnostic(&s_fifo, "ZSort", dl_addr, 0, 0, 1);
                 s_fifo.used = 0;
-                return;
+                return -1;
             }
         }
         else if (turbo3d_ucode_match(rdram, rdram_size, ut))
@@ -1940,7 +1942,10 @@ void rdp_emit_hle_process_dlist(void)
                     *(unsigned int *)(dmem+0xfc4u)=0;
                 }
             }
-            f3d_run_dl(&s_gsp, &s_fifo, dl_addr, 0, 0);
+            if (sliced_f3d)
+                stalled = f3d_run_dl_streaming(&s_gsp, &s_fifo, dl_addr, 0);
+            else
+                f3d_run_dl(&s_gsp, &s_fifo, dl_addr, 0, 0);
         }
         else
         {
@@ -1983,7 +1988,7 @@ void rdp_emit_hle_process_dlist(void)
      * NULL frame pointer when one arrives for a task that never requested a
      * full sync (its first display list after the Rareware logo), faulting
      * the scheduler thread and softlocking the game. */
-    if (rdp_fifo_fullsync_pending())
+    if (!stalled && rdp_fifo_fullsync_pending())
     {
         int32_t sync[2];
         sync[0] = (int32_t)0x29000000u;
@@ -1991,11 +1996,42 @@ void rdp_emit_hle_process_dlist(void)
         rdp_fifo_append(&s_fifo, sync, 2);
     }
 
-    guest_ring_finish(&s_fifo);
+    if (!stalled) guest_ring_finish(&s_fifo);
     /* submit the final batch (everything since the last overflow flush,
      * or the whole frame when no flush happened). */
     fifo_flush_to_rdp(&s_fifo);
+    return stalled;
+}
 
+void rdp_emit_hle_process_dlist(void) { (void)process_dlist(0); }
+
+int angrylion_f3d_dlist(int resume)
+{
+    unsigned char *ram, *dm;
+    unsigned int size;
+    int stalled;
+    if (!resume) return process_dlist(1);
+    if (!s_backend || !s_backend->get_rdram || !s_backend->get_dmem ||
+        !s_backend->get_rdram_size) return -1;
+    ram = s_backend->get_rdram(); dm = s_backend->get_dmem();
+    size = s_backend->get_rdram_size();
+    if (!ram || !dm || size < HLE_FIFO_CAP) return -1;
+    rdp_fifo_init(&s_fifo, s_fifo_storage, size - HLE_FIFO_CAP, HLE_FIFO_CAP);
+    s_fifo.diagnostic = s_backend->diagnostic;
+    s_fifo.flush = fifo_flush_to_rdp;
+    s_fifo.time = s_backend->time;
+    guest_ring_begin(&s_fifo, read_dmem_u32(dm, 0xfd0u) & 0xffffffu, 1);
+    f3d_set_rdram(ram); f3d_set_rdram_size(size);
+    stalled = f3d_run_dl_streaming(&s_gsp, &s_fifo, 0, 1);
+    if (!stalled) {
+        if (rdp_fifo_fullsync_pending()) {
+            int32_t sync[2] = {0x29000000, 0};
+            rdp_fifo_append(&s_fifo, sync, 2);
+        }
+        guest_ring_finish(&s_fifo);
+    }
+    fifo_flush_to_rdp(&s_fifo);
+    return stalled;
 }
 
 

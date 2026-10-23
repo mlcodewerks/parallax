@@ -55,7 +55,8 @@ enum hle_graphics_resume {
     HLE_RESUME_STREAMING,
     HLE_RESUME_RS,
     HLE_RESUME_ZBOSS,
-    HLE_RESUME_NABOO
+    HLE_RESUME_NABOO,
+    HLE_RESUME_F3D
 };
 enum hle_graphics_resume hle_graphics_resume_pending(struct hle_t* hle);
 void hle_resume_graphics(struct hle_t* hle, enum hle_graphics_resume resume,

@@ -31,6 +31,7 @@ void rdp_emit_stream_load(const void *);
 /* streaming display-list service for the Gauntlet Legends microcode;
  * see rdp_emit_hle.c for the contract */
 int angrylion_streaming_dlist(int resume);
+int angrylion_f3d_dlist(int resume);
 int angrylion_rs_dlist(int resume);
 int angrylion_naboo_dlist(int resume, int emit);
 

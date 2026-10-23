@@ -70,6 +70,11 @@ void f3d_set_near_plane_from_data(const unsigned char *rdram,
  * display lists up to a bounded depth. */
 void f3d_run_dl(GSPState *gsp, RdpFifo *fifo, unsigned int addr,
                 int textured, int z_buffered);
+/* Bounded command slices retain nested DL returns across CPU/audio service. */
+int f3d_run_dl_streaming(GSPState *gsp, RdpFifo *fifo, unsigned int addr, int resume);
+int f3d_stream_active(void);
+void f3d_stream_yield(const unsigned char *dmem);
+void f3d_stream_restore(unsigned char *dmem);
 
 /* Mid-list ucode-swap support: route an embedded F3DEX.NoN section (entered
  * from an S2DEX 1.06 list via G_LOAD_UCODE) through the F3D walker, stopping

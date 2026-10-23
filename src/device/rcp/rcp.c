@@ -78,8 +78,12 @@ static void ai_emit_idle(struct ai_controller* ai, int64_t now)
     size_t frames = (size_t)(ticks / divider);
     ai->idle_phase = ticks % divider;
     ai->idle_clock = now;
-    if (frames && ai->iaout->push_idle_samples)
+    if (frames && ai->iaout->push_idle_samples) {
+#ifdef AI_TIMING_OBSERVE
+        AI_TIMING_OBSERVE(ai, "idle", frames);
+#endif
         ai->iaout->push_idle_samples(ai->aout, frames);
+    }
 }
 
 static uint32_t get_remaining_dma_length(struct ai_controller* ai)
@@ -129,6 +133,9 @@ static void do_dma(struct ai_controller* ai, struct ai_dma* dma, int64_t start)
     struct cp0* cp0 = &ai->mi->r4300->cp0;
     add_interrupt_event_count(cp0, AI_INT, cp0->regs[CP0_COUNT_REG] +
         (uint32_t)(ai_count_deadline(ai, start + dma->duration) - cp0->count_clock));
+#ifdef AI_TIMING_OBSERVE
+    AI_TIMING_OBSERVE(ai, "dma", dma->length / 4);
+#endif
 }
 
 static void fifo_push(struct ai_controller* ai)

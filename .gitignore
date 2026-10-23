@@ -16,3 +16,11 @@ linker.list
 # Native GLRDP build and validation artifacts
 .cpu-jit-config
 benchmarks/*
+!benchmarks/ai_timing_trace.h
+!benchmarks/ai_timing_trace.mk
+!benchmarks/f1_intro.py
+!benchmarks/f1_audio_checks.py
+!benchmarks/f1_audio_controls.py
+!benchmarks/f1-race-input.csv
+!benchmarks/F1_AUDIO_STUTTER.md
+!benchmarks/f1_audio_validation.json

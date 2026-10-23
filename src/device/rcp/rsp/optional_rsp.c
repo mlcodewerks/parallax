@@ -54,7 +54,7 @@ static unsigned int graphics_checksum;
 static const char *graphics_capture_prefix;
 static unsigned int graphics_capture_started, graphics_capture_count;
 static unsigned long long graphics_tasks, audio_tasks, other_tasks, boot_tasks, lle_tasks;
-static unsigned long long graphics_resumes[HLE_RESUME_NABOO + 1];
+static unsigned long long graphics_resumes[HLE_RESUME_F3D + 1];
 static int timing_probe_active, timing_probe_failed;
 static uint32_t timing_probe_status;
 uint32_t optional_rsp_timing_status(void){return timing_probe_status;}
@@ -432,13 +432,15 @@ void optional_rsp_report(void)
     core_log(CORE_LOG_INFO, "RSP streaming continuations: F3DEX2=%llu Rogue=%llu BOSS=%llu Naboo=%llu",
         graphics_resumes[HLE_RESUME_STREAMING], graphics_resumes[HLE_RESUME_RS],
         graphics_resumes[HLE_RESUME_ZBOSS], graphics_resumes[HLE_RESUME_NABOO]);
+    core_log(CORE_LOG_INFO, "RSP F3D continuations: %llu", graphics_resumes[HLE_RESUME_F3D]);
 }
 
 #define AUDIO_STATE_OFFSET offsetof(struct hle_t, alist_buffer)
 #define AUDIO_STATE_BYTES (offsetof(struct hle_t, cached_ucodes) - AUDIO_STATE_OFFSET)
 static unsigned int legacy_state_size(void) { return AUDIO_STATE_BYTES + rdp_emit_hle_state_size() + n64video_noise_state_size(); }
 static unsigned int nead_state_offset(void) { return legacy_state_size() + rdp_emit_stream_state_size() + hle_stream_state_size(); }
-unsigned int optional_rsp_state_size(void) { return nead_state_offset() + sizeof(hle.nead_v31); }
+static unsigned int f3d_state_offset(void) { return nead_state_offset() + sizeof(hle.nead_v31); }
+unsigned int optional_rsp_state_size(void) { return f3d_state_offset() + f3d_state_size(); }
 void optional_rsp_save(void *buffer)
 {
     memcpy(buffer, (const unsigned char *)&hle + AUDIO_STATE_OFFSET, AUDIO_STATE_BYTES);
@@ -447,12 +449,14 @@ void optional_rsp_save(void *buffer)
     rdp_emit_stream_save((unsigned char *)buffer + legacy_state_size());
     hle_stream_state_save((unsigned char *)buffer + legacy_state_size() + rdp_emit_stream_state_size());
     memcpy((unsigned char *)buffer + nead_state_offset(), hle.nead_v31, sizeof(hle.nead_v31));
+    f3d_state_save((unsigned char *)buffer + f3d_state_offset());
 }
 void optional_rsp_load_legacy(const void *buffer)
 {
     memset(hle.nead_v31, 0, sizeof(hle.nead_v31));
     rdp_emit_stream_load(NULL);
     hle_stream_state_load(NULL);
+    f3d_state_load(NULL);
     if (!buffer) {
         memset((unsigned char *)&hle + AUDIO_STATE_OFFSET, 0, AUDIO_STATE_BYTES);
         memset(&hle.cached_ucodes, 0, sizeof(hle.cached_ucodes));
@@ -473,10 +477,15 @@ void optional_rsp_load_v116(const void *buffer)
     hle_stream_state_load((const unsigned char *)buffer + legacy_state_size() + rdp_emit_stream_state_size());
 }
 
-void optional_rsp_load(const void *buffer)
+void optional_rsp_load_v11b(const void *buffer)
 {
     optional_rsp_load_v116(buffer);
     if (buffer) memcpy(hle.nead_v31, (const unsigned char *)buffer + nead_state_offset(), sizeof(hle.nead_v31));
+}
+void optional_rsp_load(const void *buffer)
+{
+    optional_rsp_load_v11b(buffer);
+    if (buffer) f3d_state_load((const unsigned char *)buffer + f3d_state_offset());
 }
 
 void optional_rsp_load_legacy_stream(const void *buffer)
