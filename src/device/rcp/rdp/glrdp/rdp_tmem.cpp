@@ -1,3 +1,4 @@
+#include "rdp_profile.hpp"
 #include "rdp_tmem.hpp"
 #include <algorithm>
 #include <cmath>
@@ -363,6 +364,7 @@ void rdp_load_tlut(RDPState &s, std::uint64_t cmd, RDPMemoryView r) {
 }
 bool rdp_texture_load_map(const RDPState &s, RDPOpcode opcode, std::uint64_t cmd,
                           std::array<std::uint32_t, 4096> &map) {
+    GLRDP_PROFILE_SCOPE(load_map);
     if (opcode == RDPOpcode::LoadBlock && s.texture_image.size == RDPImageSize::Bits4)
         return false; // A nibble load needs a byte merge, rather than a byte source.
     struct MapState {
@@ -414,6 +416,7 @@ bool rdp_tile_uses_gpu(const RDPState &s, std::uint8_t ti) {
 }
 
 DecodedTexture rdp_decode_tile(const RDPState &s, std::uint8_t ti, bool compact) {
+    GLRDP_PROFILE_SCOPE(cpu_decode);
     if (rdp_tile_uses_gpu(s, ti)) throw std::runtime_error("CPU texture decode requires resolved TMEM");
     const auto &t = s.tiles[ti & 7];
     if (rdp_linear_copy_tile(s, ti)) {

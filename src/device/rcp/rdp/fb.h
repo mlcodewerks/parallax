@@ -42,6 +42,9 @@ struct fb
     struct r4300_core* r4300;
 
     unsigned char dirty_page[FB_DIRTY_PAGES_COUNT];
+    unsigned char native_pages[FB_DIRTY_PAGES_COUNT];
+    unsigned char native_regions[FB_DIRTY_PAGES_COUNT / 16];
+    unsigned int native_notifications;
     core_framebuffer_info infos[FB_INFOS_COUNT];
     unsigned int once;
     uint32_t timing_address[8], timing_bytes[8];

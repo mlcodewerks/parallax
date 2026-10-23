@@ -1,4 +1,6 @@
+#include "rdp_profile.hpp"
 #include "core/file.h"
+#include "core/framebuffer_notifications.h"
 #include "rdp_renderer.hpp"
 #include "rdp_combiner_usage.hpp"
 #include "vi_filter_shader.hpp"
@@ -1890,6 +1892,14 @@ void main() {
     glGenTextures(GLsizei(tile_texture_.size()), tile_texture_.data());
     tile_signature_.fill(~0ull);
     glGenTextures(1, &feedback_texture_);
+    glActiveTexture(GL_TEXTURE2); glBindTexture(GL_TEXTURE_2D, feedback_texture_);
+    const std::uint8_t empty_feedback[4] = {};
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, empty_feedback);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    feedback_w_ = feedback_h_ = 1;
     GLint max_texture_size = 0;
     glGetIntegerv(GL_MAX_TEXTURE_SIZE, &max_texture_size);
     max_texture_size_ = std::max<int>(max_texture_size, 1);
@@ -1923,6 +1933,7 @@ void main() {
                           (void *)offsetof(GLVertex, inverse_w));
     glBindVertexArray(0);
     gpu_tmem_.initialize();
+    fb_.initialize_aliases();
     return true;
 }
 GLint RDPRenderer::uniform(GLuint program, const char *name) {
@@ -1952,6 +1963,7 @@ void RDPRenderer::initialize_samplers(GLuint program) {
 }
 void RDPRenderer::shutdown() {
     flush();
+    if (fb_.alias_copies()) std::fprintf(stderr, "GLRDP GPU color aliases = copies=%llu\n", (unsigned long long)fb_.alias_copies());
     gpu_tmem_.clear();
     if (stats_.gpu_texture_loads || stats_.tmem_cpu_reads)
         std::fprintf(stderr, "GLRDP GPU textures = loads=%llu tiles=%llu cache_hits=%llu tmem_cpu_reads=%llu\n",
@@ -1996,6 +2008,7 @@ void RDPRenderer::shutdown() {
         pixels.clear();
     tile_signature_.fill(~0ull);
     fb_.clear();
+    fb_.shutdown_aliases();
     if (vi_color_)
         glDeleteTextures(1, &vi_color_);
     if (vi_fbo_)
@@ -2032,6 +2045,7 @@ void RDPRenderer::shutdown() {
     gpu_depth_.clear();
 }
 void RDPRenderer::reset() {
+    cpu_writes_.clear();
     flush(); atlas_.clear(); ++atlas_epoch_; texture_decode_cache_.clear(); tile_regions_ = {};
     field_history_.reset();
     gpu_depth_.clear();
@@ -2185,6 +2199,7 @@ void RDPRenderer::draw_final_present() {
 }
 
 void RDPRenderer::upload_tile(const RDPState &s, std::uint8_t ti, unsigned unit) {
+    GLRDP_PROFILE_SCOPE(tile);
     auto sig = tile_sig(s, ti);
     const bool framebuffer_tile = fb_.find_containing(s.texture_image.address) != nullptr ||
         gpu_depth_.find(s.texture_image.address) != nullptr;
@@ -2300,6 +2315,10 @@ void RDPRenderer::upload_tile(const RDPState &s, std::uint8_t ti, unsigned unit)
 }
 void RDPRenderer::update_feedback(GLFramebuffer &f, bool copy, bool defer_barrier) {
     current_feedback_texture_ = feedback_texture_;
+    // Write-only draws do not consume this sampler. In particular, switching
+    // between the narrow and wide Z/color views must not reallocate feedback
+    // storage that the draw is immediately going to ignore.
+    if (!copy) return;
     if (glrdp_texture_barrier && f.internal_scale == 1 && copy) {
         // One quad invokes the fragment shader once per destination texel.
         // Separate native Z passes can read this colour image without writing it.
@@ -2316,12 +2335,7 @@ void RDPRenderer::update_feedback(GLFramebuffer &f, bool copy, bool defer_barrie
         glBindTexture(GL_TEXTURE_2D, feedback_texture_);
         glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, f.width, f.height, 0, GL_RGBA, GL_UNSIGNED_BYTE,
                      nullptr);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
     }
-    if (!copy) return;
     glBindFramebuffer(GL_READ_FRAMEBUFFER, f.fbo);
     glActiveTexture(GL_TEXTURE2);
     glBindTexture(GL_TEXTURE_2D, feedback_texture_);
@@ -2450,6 +2464,7 @@ void RDPRenderer::bind_primitive_pipeline(GLuint shader) {
     glBindBuffer(GL_UNIFORM_BUFFER, primitive_ubo_);
 }
 void RDPRenderer::submit_records(const PrimitiveUniforms::Slot *records, unsigned count) {
+    GLRDP_PROFILE_SCOPE(submit);
     const auto stride = primitive_uniforms_.values.size() * sizeof(PrimitiveUniforms::Slot);
     // Stream into fresh, aligned ranges. Orphan only on wrap, so in-flight
     // draws never depend on bytes overwritten by a later batch.
@@ -2480,6 +2495,7 @@ void RDPRenderer::issue_geometry(const std::vector<GLVertex> &vertices, bool /*r
     submit_records(primitive_uniforms_.values.data(), 1);
 }
 void RDPRenderer::flush() {
+    GLRDP_PROFILE_SCOPE(flush);
     if (batch_bounds_.empty()) return;
     ++stats_.queues;
     // No frontend or texture uploads run between these dependency groups.
@@ -2670,6 +2686,8 @@ void RDPRenderer::primitive_scissor(const GLFramebuffer &target, const RDPState 
 }
 void RDPRenderer::draw_vertices(const std::vector<GLVertex> &v, bool textured, const RDPState &s,
                                 std::uint8_t ti, bool rectangle) {
+    GLRDP_PROFILE_SCOPE(draw);
+    synchronize_cpu_writes();
     if (v.empty())
         return;
     if (atlas_full_) {
@@ -2684,10 +2702,17 @@ void RDPRenderer::draw_vertices(const std::vector<GLVertex> &v, bool textured, c
         rdp_h_ = 240;
     rdp_h_ = fb_.drawing_height(s.color_image, rdp_h_);
 
-    if (auto *old = fb_.find(s.color_image.address);
-        old && old->gpu_dirty &&
-        (old->native_width != int(s.color_image.width) || old->native_height != rdp_h_))
-        fb_read(old->address);
+    // A different format at the same address is a separate alias, not a
+    // resize. bind_color_image synchronizes that alias only when switching
+    // targets; probing it on every primitive forces redundant readbacks.
+    if (auto *old = fb_.find_image(s.color_image);
+        memory_ && old && old->gpu_dirty &&
+        (old->native_width != int(s.color_image.width) || old->native_height != rdp_h_)) {
+        GLRDP_PROFILE_SCOPE(color_resize);
+        flush();
+        if (old->raw_z) gpu_depth_.store_to_rdram(old->address, *memory_);
+        else fb_.download_to_rdram(*old, *memory_);
+    }
     if (batch_target_ && (batch_target_->address != s.color_image.address ||
         batch_target_->format != s.color_image.format || batch_target_->size != s.color_image.size ||
         batch_target_->native_width != rdp_w_ || batch_target_->native_height != rdp_h_ ||
@@ -2703,6 +2728,8 @@ void RDPRenderer::draw_vertices(const std::vector<GLVertex> &v, bool textured, c
                             s.color_image.address == s.z_image_address;
     const auto destination_bytes =
         (std::uint64_t(rdp_w_) * rdp_h_ * (4u << unsigned(s.color_image.size)) + 7u) / 8u;
+    if (writing_cycle >= 2 && !raw16_fill)
+        export_depth_range(s.color_image.address, std::uint32_t(destination_bytes));
     if (writing_cycle >= 2 && !raw16_fill && memory_ &&
         gpu_depth_.flush_range(s.color_image.address, std::uint32_t(destination_bytes), *memory_))
         fb_.depth_written_to_ram(s.color_image.address, std::uint32_t(destination_bytes));
@@ -2711,13 +2738,6 @@ void RDPRenderer::draw_vertices(const std::vector<GLVertex> &v, bool textured, c
     if (!target.fbo || !target.color || target.width <= 0 || target.height <= 0)
         return;
 
-    if (target.cpu_dirty && memory_) {
-        flush();
-        // Merge pending GPU pixels with CPU/DMA writes before importing RAM.
-        if (target.gpu_dirty && !target.raw_z)
-            fb_.download_to_rdram(target, *memory_);
-        fb_.upload_from_rdram(target, *memory_);
-    }
     float min_x = v[0].x, max_x = v[0].x, min_y = v[0].y, max_y = v[0].y;
     for (const auto &vertex : v) {
         min_x = std::min(min_x, vertex.x);
@@ -2737,6 +2757,27 @@ void RDPRenderer::draw_vertices(const std::vector<GLVertex> &v, bool textured, c
     bounds_h_ = std::clamp(int(std::ceil(max_y)), bounds_y_, target.native_height) - bounds_y_;
     if (!bounds_w_ || !bounds_h_)
         return;
+
+    const bool full_z_clear = raw16_fill && s.z_image_address && rectangle &&
+        min_x <= 0 && min_y <= 0 && max_x >= target.native_width && max_y >= target.native_height;
+    if (full_z_clear && fb_.native_notifications()) {
+        flush();
+        const auto bytes = std::uint32_t(std::uint64_t(target.native_width) * target.native_height * 2);
+        // Every physical word is about to be replaced. Retire only owners
+        // wholly covered by this clear; partially overlapping views still
+        // synchronize their surviving pixels through the normal path.
+        fb_.discard_overwritten(target.address, bytes);
+        gpu_depth_.discard_overwritten(target.address, target.native_width, target.native_height);
+    }
+
+    if (target.cpu_dirty && memory_) {
+        GLRDP_PROFILE_SCOPE(color_merge);
+        flush();
+        // Merge pending GPU pixels with CPU/DMA writes before importing RAM.
+        if (target.gpu_dirty && !target.raw_z)
+            fb_.download_to_rdram(target, *memory_);
+        fb_.upload_from_rdram(target, *memory_);
+    }
 
     const bool texture_is_framebuffer = false;
     triangle_coverage_ = !rectangle;
@@ -2826,11 +2867,15 @@ void RDPRenderer::draw_vertices(const std::vector<GLVertex> &v, bool textured, c
     // before changing ownership; subsequent texture reads must use the color
     // target and must not overwrite it with stale depth ping-pong contents.
     if (target.raw_z && !fill_writes_z_image && target.gpu_dirty) {
+        GLRDP_PROFILE_SCOPE(depth_alias);
         flush();
-        gpu_depth_.store_to_rdram(target.address, *memory_);
-        // A depth readback is a renderer write, not a later CPU modification.
-        // Refresh the color snapshot so it cannot suppress the new color copy.
-        fb_.upload_from_rdram(target, *memory_);
+        export_depth_range(target.address, std::uint32_t(std::uint64_t(target.native_width) * target.native_height * 2));
+        if (target.raw_z) {
+            gpu_depth_.store_to_rdram(target.address, *memory_);
+            // A depth readback is a renderer write, not a later CPU modification.
+            // Refresh the color snapshot so it cannot suppress the new color copy.
+            fb_.upload_from_rdram(target, *memory_);
+        }
     }
     if (needs_depth && s.z_image_address && !batch_depth_)
         fb_.commit_color_range(s.z_image_address, std::uint32_t(std::uint64_t(target.native_width) *
@@ -2838,7 +2883,8 @@ void RDPRenderer::draw_vertices(const std::vector<GLVertex> &v, bool textured, c
 
     GPUDepthBuffer::Surface *depth_surface =
         needs_depth ? gpu_depth_.ensure(depth_surface_id, target.native_width, target.native_height,
-                                        memory_, s.z_image_address != 0)
+                                        memory_, s.z_image_address != 0,
+                                        full_z_clear)
                     : nullptr;
     // The in-place depth barrier also makes prior colour writes visible.
     const bool combined = depth_surface && target.internal_scale == 1 && cycle_type < 2 &&
@@ -3076,6 +3122,7 @@ void RDPRenderer::present(const RDPState &state, std::uint32_t vi_status, std::u
                           std::uint32_t width, std::uint32_t hstart, std::uint32_t vstart,
                           std::uint32_t xscale, std::uint32_t yscale, std::uint32_t vsync,
                           std::uint32_t current) {
+    synchronize_cpu_writes();
     flush();
     const auto scanout = glrdp_scanout_config(config_);
     glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
@@ -3331,7 +3378,20 @@ void RDPRenderer::materialize_tmem(RDPState &state) {
     if (gpu_tmem_.materialize(state)) ++stats_.tmem_cpu_reads;
 }
 
+void RDPRenderer::export_depth_range(std::uint32_t address, std::uint32_t size) {
+    if (internal_scale_ != 1 || !fb_.native_notifications()) return;
+    if (batch_depth_ && batch_writes_z_ &&
+        address < std::uint64_t(batch_depth_->address) + std::uint64_t(batch_depth_->width) * batch_depth_->height * 2 &&
+        batch_depth_->address < std::uint64_t(address) + size)
+        flush();
+    if (!gpu_depth_.has_pending_read(address, size)) return;
+    GLStateGuard guard;
+    gpu_depth_.export_color_range(address, size, fb_);
+}
+
 bool RDPRenderer::load_texture(RDPState &state, RDPOpcode opcode, std::uint64_t command) {
+    GLRDP_PROFILE_SCOPE(texture_load);
+    synchronize_cpu_writes();
     if (!memory_) return false;
     const auto [begin, bytes] = texture_source_range(state, opcode, command);
     if (!bytes) return bool(state.gpu_tmem);
@@ -3345,6 +3405,7 @@ bool RDPRenderer::load_texture(RDPState &state, RDPOpcode opcode, std::uint64_t 
     bool depth_pending = false, unsupported_color = false;
     for (const auto &[start, count] : ranges) {
         if (!count) continue;
+        export_depth_range(start, count);
         depth_pending |= gpu_depth_.has_pending_read(start, count);
         depth_pending |= batch_depth_ && batch_writes_z_ &&
             std::uint64_t(start) < std::uint64_t(batch_depth_->address) +
@@ -3365,7 +3426,9 @@ bool RDPRenderer::load_texture(RDPState &state, RDPOpcode opcode, std::uint64_t 
         materialize_tmem(state);
         return false;
     }
-    std::sort(candidates.begin(), candidates.end(), [](auto a, auto b) { return a->serial > b->serial; });
+    std::sort(candidates.begin(), candidates.end(), [&](auto a, auto b) {
+        return fb_.native_notifications() ? a->write_serial > b->write_serial : a->serial > b->serial;
+    });
     struct Pass { const GLFramebuffer *source; std::array<std::uint32_t, 4096> map; };
     std::vector<Pass> passes;
     std::array<std::uint32_t, 4096> cpu_map;
@@ -3374,13 +3437,35 @@ bool RDPRenderer::load_texture(RDPState &state, RDPOpcode opcode, std::uint64_t 
     const GLFramebuffer *last_source = nullptr;
     std::uint32_t last_pixel = UINT32_MAX;
     bool last_cpu_changed = false;
+    const GLFramebuffer *priority_owner = nullptr;
+    std::uint32_t priority_begin = 0, priority_end = 0;
     for (unsigned i = 0; i < sources.size(); ++i) {
         const auto source_address = sources[i];
         if (source_address == UINT32_MAX) continue;
         touched = true;
-        const GLFramebuffer *owner = nullptr;
-        for (const auto *f : candidates)
-            if (f->gpu_pending_range(source_address, 1)) { owner = f; break; }
+        const GLFramebuffer *owner = priority_owner && source_address >= priority_begin && source_address < priority_end
+            ? priority_owner : nullptr;
+        if (!owner) {
+            for (const auto *f : candidates)
+                if (f->gpu_pending_range(source_address, 1)) { owner = f; break; }
+            // The newest view wins throughout each contiguous owned row.
+            // Cache that interval instead of repeating layout divisions and
+            // walking framebuffer views for every byte of a texture word.
+            priority_owner = nullptr;
+            if (owner && owner == candidates.front()) {
+                const unsigned pixel_bytes = 1u << (unsigned(owner->size) - 1u);
+                const bool bounded = owner->dirty_x1 > owner->dirty_x0 && owner->dirty_y1 > owner->dirty_y0;
+                if (bounded) {
+                    const auto row = (source_address - owner->address) / (owner->native_width * pixel_bytes);
+                    priority_begin = owner->address + (row * owner->native_width + std::clamp(owner->dirty_x0, 0, owner->native_width)) * pixel_bytes;
+                    priority_end = owner->address + (row * owner->native_width + std::clamp(owner->dirty_x1, 0, owner->native_width)) * pixel_bytes;
+                } else {
+                    priority_begin = owner->address;
+                    priority_end = owner->address + owner->native_width * owner->native_height * pixel_bytes;
+                }
+                priority_owner = owner;
+            }
+        }
         if (owner) {
             const unsigned pixel_bytes = 1u << (unsigned(owner->size) - 1u);
             const auto pixel = (source_address - owner->address) / pixel_bytes;
@@ -3409,7 +3494,17 @@ bool RDPRenderer::load_texture(RDPState &state, RDPOpcode opcode, std::uint64_t 
     GLStateGuard guard;
     if (std::any_of(passes.begin(), passes.end(), [&](const auto &p) { return p.source == batch_target_; }))
         flush();
-    if (cpu_bytes) gpu_tmem_.write(state, cpu_map, nullptr);
+    if (cpu_bytes) {
+        if (passes.empty()) gpu_tmem_.write(state, cpu_map, nullptr);
+        else {
+            // Literal CPU bytes and framebuffer bytes occupy disjoint TMEM
+            // positions. Commit both in one GPU pass instead of copying the
+            // entire snapshot once for literals and again for the framebuffer.
+            auto &first_map = passes.front().map;
+            for (unsigned i = 0; i < cpu_map.size(); ++i)
+                if (cpu_map[i] != UINT32_MAX) first_map[i] = cpu_map[i];
+        }
+    }
     for (const auto &pass : passes) gpu_tmem_.write(state, pass.map, pass.source);
     ++state.tmem_generation;
     if (!passes.empty()) ++stats_.gpu_texture_loads;
@@ -3443,7 +3538,7 @@ void RDPRenderer::texture_read_range(std::uint32_t address, std::uint32_t size) 
     if (!color_pending && !queued_depth && !gpu_depth_.has_pending_read(address, size))
         return;
     GLStateGuard guard;
-    if ((batch_target_ && batch_target_->gpu_pending_range(address, size)) || queued_depth)
+    if (fb_.native_notifications() || (batch_target_ && batch_target_->gpu_pending_range(address, size)) || queued_depth)
         flush();
     if (color_pending)
         fb_.commit_color_range(address, size, true);
@@ -3452,6 +3547,7 @@ void RDPRenderer::texture_read_range(std::uint32_t address, std::uint32_t size) 
 }
 
 void RDPRenderer::fb_read(std::uint32_t address) {
+    if (fb_.native_notifications()) { fb_read_range(address, 1); return; }
     if (pending_batch_overlaps(address, 1)) { GLStateGuard guard; flush(); }
     if (!memory_)
         return;
@@ -3472,7 +3568,49 @@ void RDPRenderer::fb_read(std::uint32_t address) {
     gpu_depth_.store_to_rdram(address, *memory_);
 }
 
+void RDPRenderer::fb_read_range(std::uint32_t address, std::uint32_t size) {
+    synchronize_cpu_writes();
+    texture_read_range(address, size);
+}
+
+void RDPRenderer::framebuffer_pages(std::uint8_t *pages, unsigned count) const {
+    std::fill_n(pages, count, std::uint8_t(0));
+    if (!memory_) return;
+    for (const auto &[_, f] : fb_.buffers()) {
+        const auto bytes = (std::uint64_t(f.native_width) * f.native_height * (4u << unsigned(f.size)) + 7) / 8;
+        if (f.fbo && f.color && std::uint64_t(f.address) + bytes <= memory_->size())
+            core_framebuffer_mark_pages(pages, count, f.address, bytes,
+                f.gpu_dirty && !f.raw_z ? CORE_FB_PAGE_READ | CORE_FB_PAGE_WRITE : CORE_FB_PAGE_INVALIDATE);
+    }
+    const auto ram_pages = std::min<std::size_t>(count, memory_->size() >> CORE_FB_PAGE_SHIFT);
+    gpu_depth_.framebuffer_pages(pages, ram_pages);
+    // Queued Z writes already own their physical bytes, even before the
+    // first batch submission marks the depth surface GPU-dirty.
+    if (batch_depth_ && batch_writes_z_)
+        core_framebuffer_mark_pages(pages, ram_pages, batch_depth_->address,
+            std::uint64_t(batch_depth_->width) * batch_depth_->height * 2,
+            CORE_FB_PAGE_READ | CORE_FB_PAGE_WRITE);
+}
+
 void RDPRenderer::fb_write(std::uint32_t address, std::uint32_t size) {
+    GLRDP_PROFILE_SCOPE(cpu_write);
+    if (fb_.native_notifications()) {
+        // CPU/DMA can issue millions of adjacent stores between RDP lists.
+        // Record exact ranges now; update every color/depth view once before
+        // the next GPU operation or CPU readback.
+        size = std::max(size, 1u);
+        if (!memory_ || address >= memory_->size()) return;
+        size = std::uint32_t(std::min<std::size_t>(size, memory_->size() - address));
+        if (!cpu_writes_.empty() && address <= std::uint64_t(cpu_writes_.back().first) + cpu_writes_.back().second &&
+            cpu_writes_.back().first <= std::uint64_t(address) + size) {
+            auto &last = cpu_writes_.back();
+            const auto end = std::max(std::uint64_t(last.first) + last.second, std::uint64_t(address) + size);
+            last.first = std::min(last.first, address); last.second = std::uint32_t(end - last.first);
+        } else cpu_writes_.emplace_back(address, size);
+        ++stats_.metadata_writes;
+        if (cpu_writes_.size() == 1024) synchronize_cpu_writes();
+        return;
+    }
     size = std::max(size, 1u);
     const bool queued = pending_batch_overlaps(address, size);
     if (!queued && !gpu_depth_.has_surface_range(address, size)) {
@@ -3489,6 +3627,49 @@ void RDPRenderer::fb_write(std::uint32_t address, std::uint32_t size) {
     // win even when their values equal the original RAM snapshot.
     gpu_depth_.flush_cpu_write(address, size, *memory_);
     gpu_depth_.invalidate_range(address, size);
+}
+
+void RDPRenderer::synchronize_cpu_writes() {
+    if (cpu_writes_.empty() || !memory_) return;
+    std::sort(cpu_writes_.begin(), cpu_writes_.end());
+    unsigned count = 0;
+    for (const auto range : cpu_writes_) {
+        if (count && range.first <= std::uint64_t(cpu_writes_[count - 1].first) + cpu_writes_[count - 1].second) {
+            auto &last = cpu_writes_[count - 1];
+            last.second = std::uint32_t(std::max(std::uint64_t(last.first) + last.second,
+                std::uint64_t(range.first) + range.second) - last.first);
+        } else cpu_writes_[count++] = range;
+    }
+    cpu_writes_.resize(count);
+    bool pending_depth = false, queued = false, depth = false;
+    for (const auto [address, size] : cpu_writes_) {
+        pending_depth |= gpu_depth_.has_pending_read(address, size);
+        depth |= gpu_depth_.has_surface_range(address, size);
+        queued |= pending_batch_overlaps(address, size);
+        fb_.invalidate_cpu_write(address, size);
+    }
+    if (!depth && !queued) { cpu_writes_.clear(); return; }
+    GLStateGuard guard;
+    if (queued) { ++stats_.write_flushes; flush(); }
+    std::vector<std::uint8_t> saved;
+    if (pending_depth || queued) {
+        for (const auto [address, size] : cpu_writes_) {
+            const auto at = saved.size(); saved.resize(at + size);
+            memory_->copy_be(address, saved.data() + at, size);
+        }
+    }
+    for (const auto [address, size] : cpu_writes_) {
+        gpu_depth_.flush_cpu_write(address, size, *memory_);
+        gpu_depth_.invalidate_range(address, size);
+    }
+    // A depth commit for one range can cover later stores in the same surface.
+    // Restore all already-committed CPU bytes, including same-value stores.
+    if (!saved.empty()) {
+        std::size_t at = 0;
+        for (const auto [address, size] : cpu_writes_)
+            for (unsigned byte = 0; byte < size; ++byte) memory_->write8(address + byte, saved[at++]);
+    }
+    cpu_writes_.clear();
 }
 
 void RDPRenderer::read_screen(void *destination, int *width, int *height) {

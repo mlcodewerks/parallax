@@ -1,3 +1,4 @@
+#include "rdp_profile.hpp"
 #include "gl_state_guard.hpp"
 
 #include <algorithm>
@@ -13,6 +14,7 @@ void restore_enable(GLenum capability, GLboolean enabled) {
 } // namespace
 
 GLStateGuard::GLStateGuard() {
+    GLRDP_PROFILE_SCOPE(state_save);
     nested_ = guard_active;
     if (nested_)
         return;
@@ -110,6 +112,7 @@ GLStateGuard::GLStateGuard() {
 }
 
 GLStateGuard::~GLStateGuard() {
+    GLRDP_PROFILE_SCOPE(state_restore);
     if (nested_)
         return;
     guard_active = false;

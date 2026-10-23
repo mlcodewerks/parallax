@@ -121,13 +121,13 @@ endif
 
 ifeq ($(HAVE_GLRDP),1)
 GLRDP_DIR = $(CORE_DIR)/src/device/rcp/rdp/glrdp
-SOURCES_CXX += $(addprefix $(GLRDP_DIR)/,libretro_glrdp.cpp gl_loader.cpp gl_state_guard.cpp framebuffer_manager.cpp gpu_depth.cpp gpu_tmem.cpp rdp_parser.cpp rdp_tmem.cpp rdp_renderer.cpp)
+SOURCES_CXX += $(addprefix $(GLRDP_DIR)/,libretro_glrdp.cpp gl_loader.cpp gl_state_guard.cpp framebuffer_manager.cpp rdp_parser.cpp rdp_tmem.cpp rdp_renderer.cpp)
 COREFLAGS += -DHAVE_GLRDP
 ifneq (,$(filter 1,$(GLES) $(GLES3) $(FORCE_GLES) $(FORCE_GLES3)))
 COREFLAGS += -DGLRDP_DEFAULT_GLES3
 endif
 # Only GLRDP needs C++20; other renderers retain C++17.
-$(addprefix $(GLRDP_DIR)/,libretro_glrdp.o gl_loader.o gl_state_guard.o framebuffer_manager.o gpu_depth.o gpu_tmem.o rdp_parser.o rdp_tmem.o rdp_renderer.o): CXXFLAGS += -std=c++20 -O3 -fno-fast-math
+$(addprefix $(GLRDP_DIR)/,libretro_glrdp.o gl_loader.o gl_state_guard.o framebuffer_manager.o rdp_parser.o rdp_tmem.o rdp_renderer.o): CXXFLAGS += -std=c++20 -O3 -fno-fast-math
 endif
 
 # MD5 lib

@@ -39,6 +39,16 @@ static osal_inline size_t fb_buffer_size(const core_framebuffer_info* fb_info)
 
 void pre_framebuffer_read(struct fb* fb, uint32_t address)
 {
+    if (fb->native_notifications) {
+        unsigned page = address >> CORE_FB_PAGE_SHIFT;
+        if (page < FB_DIRTY_PAGES_COUNT && fb->dirty_page[page]) {
+            // Resolve every image/depth owner on this page before clearing it.
+            // A second image sharing the page must not lose its notification.
+            renderer_framebuffer_read_range(page << CORE_FB_PAGE_SHIFT, 1u << CORE_FB_PAGE_SHIFT);
+            fb->dirty_page[page] = 0;
+        }
+        return;
+    }
     if (!fb->infos[0].addr) {
         return;
     }
@@ -66,6 +76,14 @@ void pre_framebuffer_read(struct fb* fb, uint32_t address)
 
 void pre_framebuffer_read_range(struct fb* fb, uint32_t address, uint32_t length)
 {
+    if (fb->native_notifications) {
+        uint64_t end = (uint64_t)address + length;
+        const uint64_t limit = (uint64_t)FB_DIRTY_PAGES_COUNT << CORE_FB_PAGE_SHIFT;
+        if (end > limit) end = limit;
+        for (uint64_t at = address; at < end; at = (at & ~UINT64_C(4095)) + 4096)
+            pre_framebuffer_read(fb, (uint32_t)at);
+        return;
+    }
     if (!length || !fb->infos[0].addr) return;
     const uint64_t limit = (uint64_t)FB_DIRTY_PAGES_COUNT << 12;
     const uint64_t read_end = (uint64_t)address + length;
@@ -88,6 +106,26 @@ void pre_framebuffer_read_range(struct fb* fb, uint32_t address, uint32_t length
 void post_framebuffer_write(struct fb* fb, uint32_t address, uint32_t length)
 {
     if (fb->timing && length) rdp_timing_invalidate_range(fb->timing, address, length);
+    if (fb->native_notifications) {
+        const uint64_t limit = (uint64_t)FB_DIRTY_PAGES_COUNT << CORE_FB_PAGE_SHIFT;
+        uint64_t end = (uint64_t)address + length;
+        if (end > limit) end = limit;
+        if (!length || address >= end) return;
+        const unsigned first = address >> CORE_FB_PAGE_SHIFT, last = (unsigned)((end - 1) >> CORE_FB_PAGE_SHIFT);
+        for (unsigned page = first; page <= last; ++page)
+            if (fb->native_pages[page] & CORE_FB_PAGE_WRITE) {
+                renderer_framebuffer_write(address, (uint32_t)(end - address));
+                return;
+            }
+        // Clean cached views only need one invalidation per page. There are
+        // no pending GPU bytes on these pages to protect with exact stores.
+        for (unsigned page = first; page <= last; ++page)
+            if (fb->native_pages[page] & CORE_FB_PAGE_INVALIDATE) {
+                fb->native_pages[page] &= ~CORE_FB_PAGE_INVALIDATE;
+                renderer_framebuffer_write(page << CORE_FB_PAGE_SHIFT, 1u << CORE_FB_PAGE_SHIFT);
+            }
+        return;
+    }
     if (!fb->infos[0].addr) {
         return;
     }
@@ -131,6 +169,9 @@ void init_fb(struct fb* fb,
 
 void poweron_fb(struct fb* fb)
 {
+    memset(fb->native_pages, 0, sizeof(fb->native_pages));
+    memset(fb->native_regions, 0, sizeof(fb->native_regions));
+    fb->native_notifications = 0;
     memset(fb->dirty_page, 0, FB_DIRTY_PAGES_COUNT*sizeof(fb->dirty_page[0]));
     memset(fb->infos, 0, FB_INFOS_COUNT*sizeof(fb->infos[0]));
     fb->once = 1;
@@ -236,34 +277,57 @@ void protect_framebuffers(struct fb* fb)
     struct mem_mapping fb_mapping = { 0, 0, CORE_MEMORY_RDRAM, { fb, RW(rdram_fb) } };
 
     unprotect_timing_ranges(fb);
-    if (renderer_framebuffer_info && renderer_framebuffer_read && renderer_framebuffer_write)
-        renderer_framebuffer_info(fb->infos);
-    else
+    memset(fb->native_pages, 0, sizeof(fb->native_pages));
+    fb->native_notifications = renderer_framebuffer_pages(fb->native_pages, FB_DIRTY_PAGES_COUNT);
+    if (fb->native_notifications) {
         memset(fb->infos, 0, sizeof(fb->infos));
-
-    for (i = 0; i < FB_INFOS_COUNT; ++i) {
-
-        /* skip empty fb info */
-        if (fb->infos[i].addr == 0) {
-            continue;
+        for (unsigned page = 0; page < FB_DIRTY_PAGES_COUNT; ++page)
+            fb->dirty_page[page] = (fb->native_pages[page] & CORE_FB_PAGE_READ) != 0;
+        // Memory handlers cover 64 KiB regions; ownership remains at 4 KiB.
+        for (unsigned region = 0; region < sizeof(fb->native_regions); ++region) {
+            unsigned flags = 0;
+            for (unsigned page = region * 16; page < (region + 1) * 16; ++page)
+                flags |= fb->native_pages[page];
+            fb->native_regions[region] = flags != 0;
+            if (!flags) continue;
+            fb_mapping.begin = region << 16;
+            fb_mapping.end = fb_mapping.begin + 65535;
+            apply_mem_mapping(fb->mem, &fb_mapping);
+            if (fb->once) {
+                fb->once = 0;
+                invalidate_r4300_cached_code(fb->r4300, 0, 0);
+            }
         }
+    } else {
+        if (renderer_framebuffer_info && renderer_framebuffer_read && renderer_framebuffer_write)
+            renderer_framebuffer_info(fb->infos);
+        else
+            memset(fb->infos, 0, sizeof(fb->infos));
 
-        /* map fb rw handlers */
-        fb_mapping.begin = fb->infos[i].addr;
-        fb_mapping.end   = fb->infos[i].addr + fb_buffer_size(&fb->infos[i]) - 1;
-        apply_mem_mapping(fb->mem, &fb_mapping);
+        for (i = 0; i < FB_INFOS_COUNT; ++i) {
 
-        /* mark all pages that are within a fb as dirty */
-        for (j = fb_mapping.begin >> 12; j <= (fb_mapping.end >> 12); ++j) {
-            fb->dirty_page[j] = 1;
-        }
+            /* skip empty fb info */
+            if (fb->infos[i].addr == 0) {
+                continue;
+            }
 
-        /* disable dynarec "fast memory" code generation to avoid direct memory accesses */
-        if (fb->once) {
-            fb->once = 0;
+            /* map fb rw handlers */
+            fb_mapping.begin = fb->infos[i].addr;
+            fb_mapping.end   = fb->infos[i].addr + fb_buffer_size(&fb->infos[i]) - 1;
+            apply_mem_mapping(fb->mem, &fb_mapping);
 
-            /* also need to invalidate cached code to regen non fast memory code path */
-            invalidate_r4300_cached_code(fb->r4300, 0, 0);
+            /* mark all pages that are within a fb as dirty */
+            for (j = fb_mapping.begin >> 12; j <= (fb_mapping.end >> 12); ++j) {
+                fb->dirty_page[j] = 1;
+            }
+
+            /* disable dynarec "fast memory" code generation to avoid direct memory accesses */
+            if (fb->once) {
+                fb->once = 0;
+
+                /* also need to invalidate cached code to regen non fast memory code path */
+                invalidate_r4300_cached_code(fb->r4300, 0, 0);
+            }
         }
     }
     /* Timing proofs need CPU store notifications even on backends without
@@ -292,6 +356,17 @@ void unprotect_framebuffers(struct fb* fb)
     struct mem_mapping ram_mapping = { 0, 0, CORE_MEMORY_RDRAM, { fb->rdram, RW(rdram_dram) } };
 
     unprotect_timing_ranges(fb);
+
+    if (fb->native_notifications) {
+        for (unsigned region = 0; region < sizeof(fb->native_regions); ++region) {
+            if (!fb->native_regions[region]) continue;
+            ram_mapping.begin = region << 16;
+            ram_mapping.end = ram_mapping.begin + 65535;
+            apply_mem_mapping(fb->mem, &ram_mapping);
+            fb->native_regions[region] = 0;
+        }
+        return;
+    }
 
     /* return early if FB info is not supported or empty */
     if (!fb->infos[0].addr) {

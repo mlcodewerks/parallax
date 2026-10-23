@@ -24,6 +24,7 @@
 #ifndef PARALLAX_BACKEND_H
 #define PARALLAX_BACKEND_H
 #include <stdint.h>
+#include "core/framebuffer_notifications.h"
 #include "core/types.h"
 typedef struct {
     unsigned char * RDRAM;
@@ -149,6 +150,8 @@ void renderer_vi_width_changed(void);
 void renderer_framebuffer_read(unsigned address);
 void renderer_framebuffer_write(unsigned address, unsigned size);
 void renderer_framebuffer_info(void *info);
+int renderer_framebuffer_pages(uint8_t *pages, unsigned count);
+void renderer_framebuffer_read_range(unsigned address, unsigned size);
 void native_rsp_init(rsp_memory memory);
 void native_rsp_close(void);
 unsigned native_rsp_execute(unsigned cycles);

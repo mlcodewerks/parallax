@@ -967,6 +967,22 @@ void renderer_framebuffer_info(void *pinfo) {
 #endif
 }
 
+int renderer_framebuffer_pages(uint8_t *pages, unsigned count) {
+#ifdef HAVE_GLRDP
+    if (renderer_settings.renderer == RENDERER_GLRDP) return glrdp_fb_pages(pages, count);
+#endif
+    (void)pages; (void)count;
+    return 0;
+}
+
+void renderer_framebuffer_read_range(unsigned address, unsigned size) {
+#ifdef HAVE_GLRDP
+    if (renderer_settings.renderer == RENDERER_GLRDP) { glrdp_fb_read_range(address, size); return; }
+#endif
+    (void)size;
+    renderer_framebuffer_read(address);
+}
+
 
 #if defined(PARALLAX_HEADLESS_BENCHMARK)
 /* Sample at the video callback, before the next field changes VI registers. */

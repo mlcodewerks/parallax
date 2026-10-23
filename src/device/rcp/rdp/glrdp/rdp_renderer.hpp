@@ -10,8 +10,6 @@
 #include "n64_memory.hpp"
 #include "rdp_types.hpp"
 #include "rdp_vertex.hpp"
-#include "gpu_depth.hpp"
-#include "gpu_tmem.hpp"
 #include "rdp_accuracy.h"
 #include "vi_field.hpp"
 #include <array>
@@ -62,6 +60,10 @@ class RDPRenderer {
                  std::uint32_t xscale, std::uint32_t yscale, std::uint32_t vsync = 525,
                  std::uint32_t current = UINT32_MAX);
     void fb_read(std::uint32_t);
+    void fb_read_range(std::uint32_t address, std::uint32_t size);
+    void framebuffer_pages(std::uint8_t *, unsigned) const;
+    void enable_native_notifications() { fb_.set_native_notifications(true); }
+    void synchronize_cpu_writes();
     void texture_read(const RDPState &, RDPOpcode, std::uint64_t);
     bool load_texture(RDPState &, RDPOpcode, std::uint64_t);
     void materialize_tmem(RDPState &);
@@ -69,6 +71,7 @@ class RDPRenderer {
     void read_screen(void *, int *, int *);
     void capture_bmp(const char *);
     FramebufferManager &framebuffers() {
+        synchronize_cpu_writes();
         flush();
         return fb_;
     }
@@ -98,6 +101,7 @@ class RDPRenderer {
     GLuint batch_program_ = 0;
     bool batch_writes_z_ = false, batch_reads_color_ = false;
     SubmissionStats stats_;
+    std::vector<std::pair<std::uint32_t, std::uint32_t>> cpu_writes_;
     void primitive_geometry(const std::vector<GLVertex> &);
     void bind_primitive_pipeline(GLuint);
     void submit_records(const PrimitiveUniforms::Slot *, unsigned);
@@ -105,6 +109,7 @@ class RDPRenderer {
     void flush_batch(const std::vector<PrimitiveUniforms::Slot> &, const std::vector<PrimitiveBounds> &);
     bool pending_batch_overlaps(std::uint32_t address, std::uint32_t size) const;
     void texture_read_range(std::uint32_t address, std::uint32_t size);
+    void export_depth_range(std::uint32_t address, std::uint32_t size);
     void uniform_1i(GLint l, GLint x) { if (!primitive_uniforms_.store(l, &x, 4)) glUniform1i(l, x); }
     void uniform_1ui(GLint l, GLuint x) { if (!primitive_uniforms_.store(l, &x, 4)) glUniform1ui(l, x); }
     void uniform_1f(GLint l, GLfloat x) { if (!primitive_uniforms_.store(l, &x, 4)) glUniform1f(l, x); }

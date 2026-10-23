@@ -1,3 +1,4 @@
+#include "rdp_profile.hpp"
 #include "libretro_glrdp.h"
 #include "gl_loader.hpp"
 #include "gl_state_guard.hpp"
@@ -36,6 +37,7 @@ bool initialize_renderer() {
     renderer->set_rendering_config(renderer_settings.glrdp);
     if (!renderer->initialize(&rdram_memory))
         return false;
+    renderer->enable_native_notifications();
     renderer->set_internal_resolution_scale(renderer_settings.upscale);
     renderer->set_output_size(640, 480);
     return true;
@@ -120,11 +122,8 @@ bool glrdp_open() {
         parser->callbacks().load_texture = [](auto &state, auto opcode, auto command) {
             return renderer->load_texture(state, opcode, command);
         };
-        // A retired depth allocation is no longer reported in FBInfo. Commit
-        // it before CPU/DMA can reuse that RAM without write notifications.
-        parser->callbacks().before_z_image_change = [](const auto &state) {
-            renderer->fb_read(state.z_image_address);
-        };
+        // Native page notifications cover every retained depth allocation.
+        // SetZImage can change without forcing the old surface back to RAM.
         // The core schedules DP completion. Never alter DPC_CLOCK or deliver an early IRQ.
         parser->callbacks().sync_full = [] { if (renderer) renderer->flush(); *gfx_info.MI_INTR_REG |= 0x20; };
         opened = renderer || initialize_renderer();
@@ -144,6 +143,7 @@ void glrdp_close() {
     command_bytes.clear();
 }
 void glrdp_process_commands() {
+    GLRDP_PROFILE_SCOPE(commands);
     if (!ready || !opened || !parser || !renderer)
         return;
     const uint32_t start = *gfx_info.DPC_CURRENT_REG & 0x00fffff8;
@@ -155,6 +155,7 @@ void glrdp_process_commands() {
         return;
     try {
         ContextGuard guard;
+        renderer->synchronize_cpu_writes();
         command_bytes.resize(length);
         const uint32_t *hle = rdp_hle_command_buffer(start);
         if (hle) {
@@ -189,10 +190,12 @@ void glrdp_end_frame() {
     frame_guard.reset();
 }
 void glrdp_present() {
+    GLRDP_PROFILE_SCOPE(present);
     if (!ready || !opened || !renderer || !parser)
         return;
     try {
         ContextGuard guard;
+        renderer->synchronize_cpu_writes();
         auto present = [&](auto &gpu) {
             gpu.set_output_framebuffer(GLuint(hw.get_current_framebuffer()));
             gpu.present(parser->state(), *gfx_info.VI_STATUS_REG,
@@ -219,6 +222,16 @@ void glrdp_fb_read(uint32_t address) {
 void glrdp_fb_write(uint32_t address, uint32_t size) {
     if (renderer)
         renderer->fb_write(address, size);
+}
+bool glrdp_fb_pages(uint8_t *pages, unsigned count) {
+    if (!ready || !renderer || !parser) return false;
+    renderer->framebuffer_pages(pages, count);
+    return true;
+}
+void glrdp_fb_read_range(uint32_t address, uint32_t size) {
+    if (!ready || !renderer) return;
+    try { renderer->fb_read_range(address, size); }
+    catch (const std::exception &e) { error("framebuffer range read", e.what()); }
 }
 void glrdp_fb_info(void *data) {
     auto *info = static_cast<core_framebuffer_info *>(data);
@@ -258,3 +271,7 @@ void glrdp_fb_info(void *data) {
         info[index] = {state.z_image_address, 2, unsigned(dimensions.first),
                        unsigned(dimensions.second)};
 }
+
+#ifdef PARALLAX_GLRDP_PROFILE
+extern "C" RETRO_API void retro_debug_glrdp_profile(double *out) { glrdp_profile::take(out); }
+#endif
