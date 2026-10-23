@@ -17,10 +17,6 @@ Personal N64 emulator code playset for anything with:
 
 ## How?
 
-Raspberry Pi 4/5 (64-bit Raspberry Pi OS): `make -j4 rpi4` or `make -j4 rpi5`.
-These select the AArch64 Ari64 backend; choose `dynarec` in the restart-only
-CPU core option. See [Pi build instructions and ARM64 validation](benchmarks/ARI64_ARM64.md).
-
 Making a garbage fire by hacking on parallel-n64 to see what the heck happens, if any. This includes HLE for LLE RDP components, 
 GL3.3/GLES3 based LLE RDP, per-cycle level timing, etc.
 
